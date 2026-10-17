@@ -201,7 +201,9 @@ public final class ModelConverter {
             List<String> names=new ArrayList<>();for(Object b:Json.arr(x.get("bones"),n+".bones",1,512)){String bn=Json.str(b,n+".bones",256);check(bn.indexOf('\t')<0&&bn.indexOf('\n')<0&&bn.indexOf('\r')<0,"骨骼名无效："+n);names.add(bn);}
             List<Object> parents=Json.arr(x.get("parents"),n+".parents",names.size(),names.size());for(Object p:parents)Json.integer(p,n+".parents",-1,names.size()-1);
             ByteBuffer binds=buf(new byte[64*names.size()]);for(Object v:Json.arr(x.get("bindposes"),n+".bindposes",16*names.size(),16*names.size()))binds.putFloat(Json.finite(v,n+".bindposes"));
-            out.add(new Bones(n,names,binds.array(),fingerprint(x.get("target"))));
+            Map<String,Object> target=fingerprint(x.get("target"));
+            check(target==null||!ModelManifest.lowerLod((String)target.get("mesh")),"骨骼记录里 "+n+" 是低精度模型 "+(target==null?"":target.get("mesh"))+"（角色刚加载时记下的），骨骼比完整模型少。让角色在大世界出场一次（骨骼库会自动更新）或靠近角色重新导出后再转换");
+            out.add(new Bones(n,names,binds.array(),target));
         }
         return out;}
     /** The original mesh's identity (model.hpp fingerprintOf); one that does not check out is left for the runtime to learn. */
@@ -212,7 +214,7 @@ public final class ModelConverter {
         catch(IllegalArgumentException e){return null;}
     }
     private static Bones target(String part,List<Bones> bones,Map<String,String> map){String manual=map.get(lower(part));if(manual!=null){for(Bones b:bones)if(b.name.equalsIgnoreCase(manual))return b;throw new IllegalArgumentException("映射目标不存在："+manual);}String a=lower(part).replaceFirst("[a-z]$","");Bones best=null;int score=0;boolean tie=false;for(Bones b:bones){String n=lower(b.name).replaceFirst("_lod[0-9]+$","");int k=lower(part).endsWith(n)||a.endsWith(n)?n.length():0;if(k>score){score=k;best=b;tie=false;}else if(k>0&&k==score)tie=true;}check(!tie,"渲染器映射有歧义："+part);if(best!=null)return best;if(bones.size()==1)return bones.get(0);throw new IllegalArgumentException("请手工映射部件："+part);}
-    static final class Vertex {byte[] pos,norm,uv,tangent,color,weights;List<byte[]> extra=new ArrayList<>();}
+    static final class Vertex {byte[] pos,norm,uv,tangent,color,weights;List<byte[]> extra=new ArrayList<>();boolean unweighted;}
     /** Submeshes and material rows of one renderer part in one variant combination. */
     static final class ComboRows {final List<int[]> subs=new ArrayList<>();final List<String[]> rows=new ArrayList<>();String key(){StringBuilder s=new StringBuilder();for(int i=0;i<subs.size();i++)s.append(subs.get(i)[0]).append(',').append(subs.get(i)[1]).append(':').append(rows.get(i)[0]).append('#').append(rows.get(i)[1]).append(';');return s.toString();}}
     /** One renderer: union of every combination's vertices and index ranges, plus per-combination submeshes. */
@@ -220,7 +222,7 @@ public final class ModelConverter {
     static final class MaterialDef {String name;Resource diffuse,light,normal;}
     static final class Build {final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final Map<File,byte[]> cache=new HashMap<>();}
     private static Vertex vertex(Resource position,Resource blend,Resource tex,byte[] p,byte[] b,byte[] t,int i,int boneCount){
-        check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);v.uv=uv(t,to+4);for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(t,to+k));v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float sum=0;float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);check(Float.isFinite(w[k])&&w[k]>=0,"非法权重");check(w[k]==0||(ids[k]>=0&&ids[k]<boneCount),"骨骼索引越界");sum+=w[k];}check(sum>0&&Float.isFinite(sum),"权重和为零");for(int k=0;k<4;k++){wo.putFloat(4*k,w[k]/sum);wo.putInt(16+4*k,w[k]>0?ids[k]:0);}for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
+        check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);v.uv=uv(t,to+4);for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(t,to+k));v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float sum=0;float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);check(Float.isFinite(w[k])&&w[k]>=0,"非法权重");check(w[k]==0||(ids[k]>=0&&ids[k]<boneCount),"骨骼索引越界");sum+=w[k];}check(Float.isFinite(sum),"非法权重");if(sum>0){for(int k=0;k<4;k++){wo.putFloat(4*k,w[k]/sum);wo.putInt(16+4*k,w[k]>0?ids[k]:0);}}else v.unweighted=true;for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
     }
     private static byte[] uv(byte[] t,int p){ByteBuffer b=buf(t);float u=b.getFloat(p),v=b.getFloat(p+4);check(Float.isFinite(u)&&Float.isFinite(v),"非法 UV");return buf(new byte[8]).putFloat(u).putFloat(1-v).array();}
     /** A DDS texture as RGBA8, at most 1024 on a side, rows bottom to top: {width, height, data view}. */
@@ -267,6 +269,21 @@ public final class ModelConverter {
             rows.rows.add(new String[]{m.name,Integer.toString(slot(d,rows.subs.size()))});rows.subs.add(range);
         }
     }
+    /**
+     * Vertices the mod author left without any bone weight (all four 0). On PC such a vertex is skinned by nothing and
+     * collapses to the origin (a spike towards the feet); here it takes the weights of the nearest weighted vertex of the
+     * same part, which is where it was meant to move with. A part with no weighted vertex at all is refused.
+     */
+    static int fixUnweighted(Group g){
+        List<Integer> bad=new ArrayList<>(),good=new ArrayList<>();for(int i=0;i<g.vertices.size();i++)(g.vertices.get(i).unweighted?bad:good).add(i);
+        if(bad.isEmpty())return 0;
+        check(!good.isEmpty(),g.bones.name+"：所有顶点的权重都是 0（MOD 没有绑定骨骼），无法转换");
+        check(bad.size()<=20000,g.bones.name+"：有 "+bad.size()+" 个顶点没有权重（MOD 本身的问题），太多了，无法自动修补");
+        float[] gp=new float[good.size()*3];for(int j=0;j<good.size();j++){ByteBuffer q=buf(g.vertices.get(good.get(j)).pos);for(int k=0;k<3;k++)gp[j*3+k]=q.getFloat(4*k);}
+        for(int i:bad){Vertex v=g.vertices.get(i);ByteBuffer q=buf(v.pos);float x=q.getFloat(0),y=q.getFloat(4),z=q.getFloat(8);int best=0;double bd=Double.MAX_VALUE;
+            for(int j=0;j<good.size();j++){double dx=gp[j*3]-x,dy=gp[j*3+1]-y,dz=gp[j*3+2]-z,d=dx*dx+dy*dy+dz*dz;if(d<bd){bd=d;best=j;}}
+            v.weights=g.vertices.get(good.get(best)).weights.clone();v.unweighted=false;}
+        return bad.size();}
     /** model.bin: written front to back with its CRC-32; put() returns the [offset, length] view of what it wrote. */
     static final class BlobWriter implements Closeable {
         static final long MAX=768L<<20;
@@ -343,6 +360,7 @@ public final class ModelConverter {
         File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
         try{
             Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
+            for(Group g:b.groups.values()){int fixed=fixUnweighted(g);if(fixed>0)log.append(g.bones.name).append("：").append(fixed).append(" 个顶点没有权重（MOD 本身的问题，PC 上这些点会被拉到原点），已沿用最近顶点的权重\n");}
             for(Group g:b.groups.values())log.append(g.bones.name).append(": ").append(g.vertices.size()).append(" 顶点，").append(g.indices.size()).append(" 索引").append(g.bones.synthetic?"（骨骼取自游戏内角色）":g.bones.target==null?"（骨骼库没有网格特征，首次在场景中出现时识别）":"").append('\n');
             for(String x:ini.external)log.append("已忽略外部 CommandList：").append(x).append('\n');ini.external.clear();
             Map<String,Object> data=emit(tmp,b,kept.size(),decoder);
