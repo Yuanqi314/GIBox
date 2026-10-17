@@ -40,6 +40,27 @@ public final class ConverterTest {
    ok(Fixtures.draws(manyOut,0,new HashMap<>()).size()==1&&Fixtures.draws(manyOut,0,Fixtures.set("$b",1)).size()==2&&Fixtures.draws(manyOut,0,ef).size()==3&&Fixtures.draws(manyOut,0,Fixtures.set("$f",1)).size()==1,"draws by condition");
    Map<String,Object> f=Json.obj(Fixtures.draws(manyOut,0,ef).get(2),"draw");ok(Json.obj(f.get("when"),"when").get("vars").equals(Arrays.asList("$e","$f"))&&Json.write(f.get("when")).replaceAll("\\s","").contains("[[1,1]]"),"nested condition kept: "+Json.write(f));
    ok(!ml.toString().contains("只转换默认款式"),"no fallback to the default variant");}
+  // 3DMigoto operators: === and !== (as == and !=), // (floor division), ** (power).
+  {Map<String,Integer> v=new HashMap<>();v.put("$dress",4);v.put("$a",2);
+   ok(new ModelConverter.Expr("$dress!==4",v).eval()==0&&new ModelConverter.Expr("$dress !== 3",v).eval()==1&&new ModelConverter.Expr("$a===2",v).eval()==1&&new ModelConverter.Expr("-7//2",v).eval()==-4&&new ModelConverter.Expr("2**3+$a",v).eval()==10,"3DMigoto operators");}
+  // 13 toggles, each in its own section: 8192 assignments in all, but 13 independent groups of 2, so every toggle is
+  // offered. A Resource whose file depends on $tex ties $tex to the section that binds it ($b).
+  {File wide=new File(root,"wide");wide.mkdirs();for(String f:new String[]{"Position.buf","Blend.buf","Texcoord.buf","Index.buf","Diffuse.dds"})Files.copy(new File(src,f).toPath(),new File(wide,f).toPath());
+   Files.copy(new File(src,"Diffuse.dds").toPath(),new File(wide,"Diffuse2.dds").toPath());
+   StringBuilder m=new StringBuilder("[Constants]\n");for(int i=0;i<13;i++)m.append("global persist $t").append(i).append(" = 0\n");m.append("global persist $tex = 0\nglobal persist $dress = 0\n");
+   m.append("[TextureOverridePosition]\nvb0 = ResourcePosition\n[TextureOverrideBlend]\nvb1 = ResourceBlend\n[TextureOverrideTexcoord]\nvb2 = ResourceTexcoord\n");
+   m.append("[TextureOverrideBodyA]\nib = ResourceIndex\nps-t0 = ResourceDiffuse\nif $dress !== 4\ndrawindexed = 3, 0, 0\nendif\n");
+   for(int i=0;i<13;i++)m.append("[TextureOverrideBody").append((char)('B'+i)).append("]\nib = ResourceIndex\nps-t0 = ").append(i==0?"ResourceSkin":"ResourceDiffuse").append("\nif $t").append(i).append(" == 1\ndrawindexed = 3, 3, 0\nendif\n");
+   m.append(ini.substring(ini.indexOf("[ResourcePosition]"))).append("[ResourceSkin]\nif $tex == 1\nfilename = Diffuse2.dds\nelse\nfilename = Diffuse.dds\nendif\n");
+   String text=m.toString().replace("global persist $dress = 0","global persist $dress = 0\n[KeyDress]\nkey = d\ntype = cycle\n$dress = 0,4");put(wide,"mod.ini",text);
+   File wideOut=new File(root,"wide_out");StringBuilder wl=new StringBuilder();ModelConverter.convert(wide,bones,wideOut,10000107,"",true,dds->rgba,wl);ModelManifest wm=ModelManifest.read(wideOut);
+   ok(wm.vars.size()==15&&wm.vars.containsKey("$tex")&&wm.vars.containsKey("$t12")&&wm.vars.get("$dress").equals(Arrays.asList(0,4))&&!wl.toString().contains("只")&&!wl.toString().contains("过多"),"grouped variables: "+wm.vars.keySet()+"\n"+wl);
+   ok(Fixtures.draws(wideOut,0,new HashMap<>()).size()==1&&Fixtures.draws(wideOut,0,Fixtures.set("$dress",4)).isEmpty()&&Fixtures.draws(wideOut,0,Fixtures.set("$t12",1)).size()==2,"draws per group");
+   Map<String,Integer> bt=new HashMap<>();bt.put("$t0",1);bt.put("$tex",1);Map<String,Integer> b0=Fixtures.set("$t0",1);
+   String m1=(String)Json.obj(Fixtures.draws(wideOut,0,bt).get(1),"draw").get("material"),m0=(String)Json.obj(Fixtures.draws(wideOut,0,b0).get(1),"draw").get("material");
+   ok(!m1.equals(m0),"the Resource's variable picks the texture: "+m0+" "+m1);
+   // Every draw of the part's sections keeps its slot by match order, whatever else is drawn.
+   for(Object d:Fixtures.draws(wideOut,0,bt))ok(Fixtures.number(Json.obj(d,"draw"),"slot")<14,"slot");}
   // One vertex's weights: a bone listed twice is added up, the largest comes first, the sum is 1.
   {float[] w={.1f,.4f,.2f,0};int[] ids={7,3,7,9};ByteBuffer o=b(32);ModelConverter.tidy(w,ids,o);
    ok(Math.abs(o.getFloat(0)-4/7f)<1e-6&&o.getInt(16)==3&&Math.abs(o.getFloat(4)-3/7f)<1e-6&&o.getInt(20)==7&&o.getFloat(8)==0&&o.getInt(24)==0,"weights tidied");}
@@ -113,6 +134,6 @@ public final class ConverterTest {
   for(String j:new String[]{"{\"a\":1,\"a\":2}","[01]","[1,]","{\"a\":1} x","[\"\u0001\"]","[1e999]"}){bad=false;try{Json.parse(j);}catch(IllegalArgumentException e){bad=true;}ok(bad,"JSON accepted: "+j);}
   Object third=((List<?>)Json.parse(Json.write(Arrays.<Object>asList(1f/3,-2.5e-7f)))).get(0);ok(Json.finite(third,"f")==1f/3,"float round trip");
   ok(Json.parse("{\"s\":\"\\u6a21\\\"\"}").equals(Collections.singletonMap("s","模\"")),"escapes");
-  System.out.println("Java converter: PASS (weights merged and sorted, variants by condition beyond 32 assignments, unweighted vertices repaired, GIBox model.json + model.bin, shared vb1, nested commands, inherited auto draw, component scopes, explicit overrides, real ambiguity, merged variants, conditional streams, targets, atomic replace keeping runtime files per character, skeleton.json, no-library conversion, strict JSON, binary interoperability)");
+  System.out.println("Java converter: PASS (variables enumerated per independent group, 3DMigoto === / !== / // / **, weights merged and sorted, variants by condition beyond 32 assignments, unweighted vertices repaired, GIBox model.json + model.bin, shared vb1, nested commands, inherited auto draw, component scopes, explicit overrides, real ambiguity, merged variants, conditional streams, targets, atomic replace keeping runtime files per character, skeleton.json, no-library conversion, strict JSON, binary interoperability)");
  }
 }
