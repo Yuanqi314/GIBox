@@ -45,13 +45,16 @@ jobs:
       - name: Remove keystore
         if: always()
         run: rm -f "$RUNNER_TEMP/release.jks"
-      - uses: actions/upload-artifact@v4
-        if: steps.keystore.outputs.signed == 'true'
+      # Upload the APK itself instead of a zip wrapping it (archive: false takes exactly one file).
+      - name: Collect APK
+        run: |
+          if [ "${{ steps.keystore.outputs.signed }}" = "true" ]; then type=release; else type=debug; fi
+          apks=(app/build/outputs/apk/$type/*.apk)
+          if [ "${#apks[@]}" -ne 1 ] || [ ! -f "${apks[0]}" ]; then echo "::error::expected one APK, found: ${apks[*]}"; exit 1; fi
+          out="$RUNNER_TEMP/GIBox-$type-${GITHUB_SHA::7}.apk"
+          cp "${apks[0]}" "$out"
+          echo "APK_PATH=$out" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v7
         with:
-          name: GIBox-release
-          path: app/build/outputs/apk/release/*.apk
-      - uses: actions/upload-artifact@v4
-        if: steps.keystore.outputs.signed != 'true'
-        with:
-          name: GIBox-debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ env.APK_PATH }}
+          archive: false
