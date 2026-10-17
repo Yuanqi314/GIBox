@@ -50,7 +50,7 @@ struct Fake {
 }*f=nullptr;
 Ptr getMesh(Ptr p,Ptr){return f->obj.at(p).mesh;}Ptr getMaterials(Ptr p,Ptr){return f->obj.at(p).materials;}Ptr getBones(Ptr p,Ptr){return f->obj.at(p).bones;}
 Ptr getName(Ptr p,Ptr){auto n=f->obj.at(p).name;Ptr s=f->alloc(0x14+2*n.size());store<uint32_t>(s+0x10,n.size());for(size_t i=0;i<n.size();i++)store<uint16_t>(s+0x14+i*2,n[i]);return s;}
-Ptr clone(Ptr p,Ptr){f->clones++;auto original=f->obj.at(p);if(original.kind!="mesh")return f->object(original.kind,original.name);f->meshClones++;Ptr out=f->mesh(original.name,load<uint32_t>(original.shared+0x74));auto& o=f->obj[out];o.arrays=original.arrays;return out;}
+Ptr clone(Ptr p,Ptr){f->clones++;auto original=f->obj.at(p);if(original.kind!="mesh")return f->object(original.kind,original.name);f->meshClones++;Ptr out=f->mesh(original.name,load<uint32_t>(original.shared+0x74));auto& o=f->obj[out];o.arrays=original.arrays;store<uint64_t>(o.shared+0xe0,load<uint64_t>(original.shared+0xe0));return out;}
 void destroy(Ptr p,Ptr){store<Ptr>(p+0x10,0);}Ptr parent(Ptr p,Ptr){return f->obj.at(p).parent;}
 uint32_t pin(Ptr p,int,Ptr){auto h=f->nextHandle++;f->handles[h]=p;return h;}void unpin(uint32_t h){assert(f->handles.erase(h)==1);}
 void setMesh(Ptr p,Ptr m,Ptr){f->obj.at(p).mesh=m;}void setMaterials(Ptr p,Ptr m,Ptr){if(f->failMaterials){f->failMaterials=false;throw std::runtime_error("fake-material-failure");}f->obj.at(p).materials=m;}
@@ -351,17 +351,51 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   std::filesystem::remove_all(file+".tmp");complete.tick(1114500);complete.tick(1115000);assert(text(file).find("UpdatedBoneB")!=std::string::npos);
   reads=f->bindposeReads;complete.tick(1116000);complete.tick(1120000);assert(f->bindposeReads==reads);
   complete.shutdown();assert(f->handles.empty());}
- // 22. One renderer that never becomes usable (bone and bindpose counts differ) next to a complete one: the capture keeps
- //     retrying, and after 30 s of the very same result the complete renderer is recorded alone, with a warning.
+ // 23. Preserve the 0.7.5 exit: a persistent structural defect may be excluded after 30 s, with one partial warning.
  {std::string mediaPartial=root+"/mediaPartial",sharedPartial=mediaPartial+"/"+pkg+"/GIBox",bonesPartial=sharedPartial+"/skeletons",logFile=sharedPartial+"/GIBox Log.txt";std::filesystem::create_directories(sharedPartial);
-  write(sharedPartial+"/control.json","{\"enabled\":false,\"selected\":[]}");
+  write(sharedPartial+"/control.json","{\"enabled\":false,\"selected\":[],\"exportBones\":0}");
   Ptr good=f->renderer(original),broken=f->renderer(f->mesh(),"BoneA","Cloak");store<uint64_t>(f->obj[f->obj[broken].mesh].arrays[abi::getBindposes]+0x18,2);
   store<Ptr>(f->owner+0x68,f->array(8,2,std::vector<Ptr>{good,broken}.data()));
   Runtime part(e,pkg,root+"/privatePartial",mediaPartial,false);uint64_t t=1100000;
   for(;t<1100000+20000;t+=500){part.tick(t);}assert(!exists(bonesPartial+"/10000107/skeleton.json"));
   for(;t<1100000+40000;t+=500){part.tick(t);}auto lib=text(bonesPartial+"/10000107/skeleton.json");auto log=text(logFile);
   assert(lib.find("\"name\":\"Body\"")!=std::string::npos&&lib.find("Cloak")==std::string::npos&&log.find("runtime WARNING bone-library-partial 10000107: recording the complete renderers without Cloak")!=std::string::npos);
+  assert(log.find("bone-library-partial")==log.rfind("bone-library-partial"));auto reads=f->bindposeReads;part.tick(t+1000);part.tick(t+10000);assert(f->bindposeReads==reads);
   part.shutdown();assert(f->handles.empty());}
+ // 24. Default-off geometry leaves the original visible. Enabling builds/attaches it; disabling restores both mesh and
+ //     materials. The inactive model never takes precedence over a second enabled model on the same part.
+ {std::string mediaGate=root+"/mediaGate",sharedGate=mediaGate+"/"+pkg+"/GIBox",modelsGate=sharedGate+"/models";
+  Spec g;g.version=3;g.withTarget(fixture::target("Body"));g.variants="{\"vars\":[{\"name\":\"$vision\",\"values\":[0,1]}],\"default\":{\"$vision\":1}}";
+  g.edit=[](std::string& j){fixture::replaceIn(j,"\"blob\"","\"replaceWhen\":{\"vars\":[\"$vision\"],\"allow\":[[0]]},\"blob\"");};writeModel(modelsGate+"/G",g);writeModel(modelsGate+"/Other");
+  Ptr w=f->renderer(original),mat=f->obj[w].materials;f->world(w);f->scene={w};auto built=f->meshClones;
+  auto gateControl=[&](std::string selected,std::string vars){write(sharedGate+"/control.json","{\"enabled\":true,\"selected\":"+selected+",\"variables\":"+vars+"}");};
+  gateControl("[\"G\"]","{}");Runtime gate(e,pkg,root+"/privateGate",mediaGate,false);gate.tick(1300000);gate.tick(1300600);
+  assert(meshOf(w)==original&&f->obj[w].materials==mat&&f->meshClones==built);
+  assert(JsonParser(text(sharedGate+"/status.json")).parse().at("detail").string.find("显示替换已关闭")!=std::string::npos);
+  gateControl("[\"G\"]","{\"G\":{\"$vision\":0}}");gate.tick(1301200);gate.tick(1301800);Ptr replaced=meshOf(w);assert(replaced!=original&&f->obj[w].materials!=mat&&f->meshClones==built+1);
+  gateControl("[\"G\"]","{\"G\":{\"$vision\":1}}");gate.tick(1302400);assert(meshOf(w)==original&&f->obj[w].materials==mat);
+  gateControl("[\"G\",\"Other\"]","{}");gate.tick(1303000);gate.tick(1303600);assert(meshOf(w)!=original&&meshOf(w)!=replaced&&JsonParser(text(sharedGate+"/status.json")).parse().at("models").array[0].string=="Other");
+  gate.shutdown();assert(f->handles.empty());}
+ // 25. Index-only MOD needs two bones, but cached targets and this character's template have one. Do not build, latch a
+ //     failure, or learn another character's larger Body mesh. The SAME entity can finish loading later and be retried.
+ {std::string mediaMin=root+"/mediaMin",sharedMin=mediaMin+"/"+pkg+"/GIBox",modelsMin=sharedMin+"/models",dir=modelsMin+"/Indexed";
+  Spec s;s.noSkeleton().withTarget(fixture::target("Body"));s.edit=[](std::string& j){fixture::replaceIn(j,"\"bones\":1,\"vertices\"","\"bones\":2,\"vertices\"");};for(int i=0;i<3;i++){put32(s.weights.data()+32*i+16,1);}writeModel(dir,s);
+  Learned stale;stale.targets["Part0"]={"Body","Body",3,1,1};write(dir+"/learned.json",learnedJson(stale));
+  auto twoBones=[&](Ptr r){auto mesh=f->obj[r].mesh;Ptr b1=load<Ptr>(f->obj[r].bones+0x20),b2=f->object("bone","BoneB");f->obj[b2].parent=b1;Ptr bs[]={b1,b2};f->obj[r].bones=f->array(8,2,bs);Bytes binds(128);for(int n=0;n<2;n++)for(int j=0;j<4;j++)store<float>(reinterpret_cast<Ptr>(binds.data())+n*64+j*20,1);f->obj[mesh].arrays[abi::getBindposes]=f->array(64,2,binds.data());store<uint64_t>(f->obj[mesh].shared+0xe0,2);};
+  Ptr mesh=f->mesh(),w=f->renderer(mesh),foreign=f->renderer(f->mesh("Body",4),"BoneA","Body",f->kavehRoot);twoBones(foreign);f->world(w);f->scene={w,foreign};auto foreignMesh=meshOf(foreign);auto built=f->meshClones;
+  write(sharedMin+"/control.json","{\"enabled\":true,\"selected\":[\"Indexed\"]}");Runtime min(e,pkg,root+"/privateMin",mediaMin,false);
+  for(uint64_t t=1400000;t<=1403000;t+=500){min.tick(t);}auto st=JsonParser(text(sharedMin+"/status.json")).parse();
+  assert(st.at("state").string=="waiting"&&st.at("detail").string.find("至少 2 根骨骼")!=std::string::npos&&meshOf(w)==mesh&&meshOf(foreign)==foreignMesh&&f->meshClones==built);
+  auto log=text(sharedMin+"/GIBox Log.txt");assert(log.find("build-retry")==std::string::npos&&log.find("spawn-build-error")==std::string::npos);
+  twoBones(w);for(uint64_t t=1403500;t<=1406000;t+=500){min.tick(t);}
+  assert(meshOf(w)!=mesh&&meshOf(foreign)==foreignMesh&&learnedAt(dir).targets.at("Part0").bones==2&&f->meshClones==built+1);
+  min.shutdown();assert(f->handles.empty());}
+ // 26. A part whose renderer is not on the character is looked for again every scan, but logged once.
+ {std::string mediaMiss=root+"/mediaMiss",sharedMiss=mediaMiss+"/"+pkg+"/GIBox";Spec s;s.edit=[](std::string& j){fixture::replaceIn(j,"\"renderer\":\"Body\"","\"renderer\":\"Cloak\"");};writeModel(sharedMiss+"/models/Miss",s);
+  Ptr w=f->renderer(original);f->world(w);f->scene={w};write(sharedMiss+"/control.json","{\"enabled\":true,\"selected\":[\"Miss\"]}");
+  Runtime miss(e,pkg,root+"/privateMiss",mediaMiss,false);for(uint64_t t=1500000;t<=1505000;t+=500){miss.tick(t);}
+  auto log=text(sharedMiss+"/GIBox Log.txt");auto at=log.find("target-missing Miss/Part0: renderer match missing: Cloak");assert(at!=std::string::npos&&log.find("target-missing",at+1)==std::string::npos&&meshOf(w)==original);
+  miss.shutdown();assert(f->handles.empty());}
  std::filesystem::remove_all(root);
- std::cout<<"Native runtime: PASS (a renderer that never becomes usable left out after 30 s, idle sets released after a minute, version 2 conditional draws switched in place, lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
+ std::cout<<"Native runtime: PASS (structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }

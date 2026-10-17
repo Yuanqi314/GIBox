@@ -45,7 +45,7 @@ int main(int argc,char**argv){
  // ---- the checks: every one names what is wrong
  auto bad=root+"/bad";
  refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"gibox-model","other-model");};},"not a GIBox model");
- refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"\"version\":1","\"version\":3");};},"unsupported version");
+ refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"\"version\":1","\"version\":4");};},"unsupported version");
  refused(bad,[](Spec& s){s.character(9999);},"Character ID out of range");
  refused(bad,[](Spec& s){s.character(0);},"needs a character ID or names");
  refused(bad,[](Spec& s){s.character(0,{"Citlali"});},"Character name");
@@ -74,6 +74,13 @@ int main(int argc,char**argv){
   activeDraws(p.draws,pick(m->variants,Assignment{{"$halo",3}}),subs,rows);assert(subs.size()==2&&rows[1].slot==1);
   activeDraws(p.draws,pick(m->variants,Assignment{{"$halo",3},{"$legs",0}}),subs,rows);assert(subs.size()==1);
   assert(pick(m->variants,Assignment{{"$halo",5},{"$nope",1}})==m->variants.defaults);}
+ // Version 3 adds a model-level replacement switch; old readers must reject it rather than hide the original mesh.
+ {Spec s=v2();s.version=3;s.edit=[](std::string& j){replaceIn(j,"\"blob\"","\"replaceWhen\":{\"vars\":[\"$halo\"],\"allow\":[[3]]},\"blob\"");};fixture::writeModel(root+"/v3",s);
+  auto summary=readSummary(root+"/v3");assert(!drawn(summary.replaceWhen,pick(summary.variants,{}))&&drawn(summary.replaceWhen,pick(summary.variants,Assignment{{"$halo",3}}))&&!summary.parts[0].indexedBones);loadModelFile(root+"/v3");
+  s.noSkeleton();fixture::writeModel(root+"/v3-indexed",s);assert(readSummary(root+"/v3-indexed").parts[0].indexedBones);}
+ refused(bad,[](Spec& s){s=v2();s.version=3;s.edit=[](std::string& j){replaceIn(j,"\"blob\"","\"replaceWhen\":{\"vars\":[\"$unknown\"],\"allow\":[[0]]},\"blob\"");};},"undeclared variable");
+ refused(bad,[](Spec& s){s=v2();s.version=3;s.edit=[](std::string& j){replaceIn(j,"\"blob\"","\"replaceWhen\":{\"vars\":[\"$halo\"],\"allow\":[[9]]},\"blob\"");};},"when value not listed");
+ refused(bad,[](Spec& s){s=v2();s.edit=[](std::string& j){replaceIn(j,"\"blob\"","\"replaceWhen\":{\"vars\":[\"$halo\"],\"allow\":[[3]]},\"blob\"");};},"requires model version 3");
  refused(bad,[](Spec& s){s=v2();replaceIn(s.draws[0],"[\"$halo\",\"$legs\"]","[\"$halo\",\"$wings\"]");},"undeclared variable");
  refused(bad,[](Spec& s){s=v2();replaceIn(s.draws[0],"[[3,1]]","[[4,1]]");},"when value not listed for $halo");
  refused(bad,[](Spec& s){s=v2();replaceIn(s.draws[0],"[[3,1]]","[[3]]");},"when tuple size");

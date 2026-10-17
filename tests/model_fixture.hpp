@@ -10,7 +10,7 @@ inline Bytes words32(const std::vector<uint32_t>& v){Bytes b(4*v.size());for(siz
 inline std::string target(const std::string& mesh,unsigned vertices=3){return "{\"renderer\":\"Body\",\"mesh\":"+quote(mesh)+",\"vertices\":"+std::to_string(vertices)+",\"submeshes\":1,\"bones\":1}";}
 struct Spec {
  unsigned id=10000107;std::vector<std::string> names;std::string generation="1";
- unsigned version=1;           // 2: "draws" holds one flat list whose entries may carry "when"
+ unsigned version=1;           // 2/3: "draws" holds one flat list whose entries may carry "when"
  bool skeleton=true;          // bone names + bindposes; without them the game's own bone order is used
  std::string target;          // Part0's mesh identity (fingerprint JSON); empty: learned in game
  bool textures=false;         // Material0 with a 1x1 main texture and a lightmap; otherwise the original material
@@ -37,7 +37,7 @@ inline void writeModel(const std::string& dir,const Spec& s=Spec()){
  std::string part="{\"name\":\"Part0\",\"renderer\":\"Body\",\"bones\":1,\"vertices\":3,\"indices\":"+std::to_string(s.indices.size())+",\"data\":"+data;
  if(s.skeleton)part+=",\"skeleton\":{\"bones\":[\"BoneA\"],\"bindposes\":"+view(blob,floats({1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}))+"}";
  if(!s.target.empty())part+=",\"target\":"+s.target;
- if(s.version==2)part+=",\"draws\":"+s.draws[0]+"}";else{part+=",\"draws\":[";for(size_t i=0;i<s.draws.size();i++)part+=(i?",":"")+s.draws[i];part+="]}";}
+ if(s.version>=2)part+=",\"draws\":"+s.draws[0]+"}";else{part+=",\"draws\":[";for(size_t i=0;i<s.draws.size();i++)part+=(i?",":"")+s.draws[i];part+="]}";}
  std::string material="{\"name\":\"Material0\",\"original\":true}";
  if(s.textures){Bytes px(4,255);auto main=view(blob,px);auto light=view(blob,px);material="{\"name\":\"Material0\",\"main\":{\"width\":1,\"height\":1,\"data\":"+main+"},\"lightmap\":{\"width\":1,\"height\":1,\"data\":"+light+"}}";}
  std::string names="[";for(size_t i=0;i<s.names.size();i++)names+=(i?",":"")+quote(s.names[i]);names+="]";

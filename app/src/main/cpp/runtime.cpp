@@ -39,10 +39,10 @@ ControlState parseControl(const std::string& raw){
 }
 // lodMesh: the converter's target is a lower level of detail (a skeleton library recorded while the character was still
 // loading, before 0.6.5); the part's bone indices follow that LOD's shorter bone list, so the model is not built.
-struct PartInfo {std::string name,group,lodMesh;bool hasTarget=false;Fingerprint target;};
+struct PartInfo {std::string name,group,lodMesh;unsigned minBones=0;bool hasTarget=false;Fingerprint target;};
 // A model folder as the scan sees it (model.json + learned.json; model.bin is only read when the model is loaded).
 // id 0 + names: converted without the skeleton library; the character is found by the names in its skeleton chain.
-struct ModelInfo {std::string name,path,generation,stamp;unsigned id=0;std::vector<PartInfo> parts;std::vector<std::string> names;Learned learned;};
+struct ModelInfo {std::string name,path,generation,stamp;unsigned id=0;std::vector<PartInfo> parts;std::vector<std::string> names;Learned learned;Variants variants;When replaceWhen;};
 std::vector<std::string> nameTokens(const std::string& s){std::vector<std::string> out;std::string cur;for(size_t i=0;i<=s.size();i++){unsigned char c=i<s.size()?s[i]:' ';bool alnum=(c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9');
  if(!alnum){if(cur.size()>=3)out.push_back(cur);cur.clear();continue;}cur+=char(c>='A'&&c<='Z'?c+32:c);}return out;}
 bool namesMatch(const std::vector<std::string>& names,const std::vector<std::string>& tokens){for(auto& n:names)for(auto& t:tokens)if(t==n||(std::min(t.size(),n.size())>=4&&(t.compare(0,n.size(),n)==0||n.compare(0,t.size(),t)==0)))return true;return false;}
@@ -60,12 +60,12 @@ std::vector<ModelInfo> scanModels(const std::string& root,std::map<std::string,M
   if(!d.is_directory(ec)){continue;}auto name=d.path().filename().string();if(name.empty()||name[0]=='.')continue;auto path=d.path().string();
   try{auto manifest=path+"/model.json";if(!exists(manifest))continue;auto stamp=stampOf(manifest);auto it=cache.find(path);
    if(it!=cache.end()&&it->second.stamp==stamp){next[path]=it->second;out.push_back(it->second);continue;}
-   auto summary=readSummary(path);ModelInfo m;m.name=name;m.path=path;m.stamp=stamp;m.generation="g:"+summary.generation;m.id=summary.id;m.names=summary.names;m.learned=readLearned(path);
+   auto summary=readSummary(path);ModelInfo m;m.name=name;m.path=path;m.stamp=stamp;m.generation="g:"+summary.generation;m.id=summary.id;m.names=summary.names;m.learned=readLearned(path);m.variants=summary.variants;m.replaceWhen=summary.replaceWhen;
    if(!m.id&&m.learned.id)m.id=m.learned.id;
    // Targets the runtime learned (also after a game update moved a part) take precedence over the converter's.
-   for(auto& p:summary.parts){PartInfo pi;pi.name=p.name;pi.group=p.renderer;pi.hasTarget=p.hasTarget;pi.target=p.target;if(p.hasTarget&&lowerLod(p.target.mesh))pi.lodMesh=p.target.mesh;
+   for(auto& p:summary.parts){PartInfo pi;pi.name=p.name;pi.group=p.renderer;pi.minBones=p.indexedBones?p.bones:0;pi.hasTarget=p.hasTarget&&p.target.bones>=pi.minBones;pi.target=p.target;if(p.hasTarget&&lowerLod(p.target.mesh))pi.lodMesh=p.target.mesh;
     // A target learned from a lower level of detail (before 0.6.5) is dropped and learned again from the full mesh.
-    auto l=m.learned.targets.find(p.name);if(l!=m.learned.targets.end()&&sameRenderer(l->second,p)&&!lowerLod(l->second.mesh)){pi.target=l->second;pi.hasTarget=true;}m.parts.push_back(pi);}
+    auto l=m.learned.targets.find(p.name);if(l!=m.learned.targets.end()&&sameRenderer(l->second,p)&&!lowerLod(l->second.mesh)&&l->second.bones>=pi.minBones){pi.target=l->second;pi.hasTarget=true;}m.parts.push_back(pi);}
    next[path]=m;out.push_back(m);
   }catch(const std::exception&){}
  }
@@ -145,14 +145,14 @@ struct Runtime::Impl {
  Recent<std::pair<Ptr,uint32_t>,Fingerprint> fpCache{8192};std::set<std::pair<Ptr,Ptr>> skipped;
  std::map<std::string,std::pair<std::string,std::string>> failed;            // path -> generation, message
  std::map<std::string,std::map<std::string,Fingerprint>> learned;            // path -> part -> target from the world character
- std::map<std::string,Ptr> learnTried;std::set<unsigned> library;std::map<std::string,unsigned> learnedId;Recent<std::pair<Ptr,Ptr>,std::vector<std::string>> chains{1024};Recent<std::pair<Ptr,Ptr>,std::string> rendererNames{2048};std::map<unsigned,uint64_t> libraryRetry;std::map<unsigned,std::string> libraryError;std::map<std::string,unsigned> attempts;  // path|generation -> failed builds
+ std::set<unsigned> library;std::map<std::string,unsigned> learnedId;Recent<std::pair<Ptr,Ptr>,std::vector<std::string>> chains{1024};Recent<std::pair<Ptr,Ptr>,std::string> rendererNames{2048};std::map<unsigned,uint64_t> libraryRetry;std::map<unsigned,std::string> libraryError;std::map<std::string,unsigned> attempts;  // path|generation -> failed builds
  std::map<std::string,std::string> staleNote;
  std::set<unsigned> libraryPending;std::map<std::string,std::string> boneRefreshCause;
  std::string boneCandidate,manualWait,boneBadList;unsigned boneBadStreak=0;Ptr boneCandidateEntity=0;unsigned boneCandidateId=0;uint64_t boneCandidateAt=0,manualRetryAt=0;bool manualPending=false;
  // Async hand-off: wanted models of the last tick (valid until the next tick's consume), GameObject class, Tick thread.
  std::vector<const ModelInfo*> wantedNow;std::vector<Ptr> spawnAttached;Ptr goClass=0;std::atomic<int> tickTid{0};std::atomic<uint64_t> offThread{0};uint64_t spawnOffThread=0,reclaims=0,guardAt=0,binds=0,passes=0;
  std::atomic<int> logLevel{int(Level::Info)};std::map<std::string,std::string> learnedGen;  // log threshold (control.json "logLevel"); generation the learned targets belong to
- Ptr rendererTypeObject=0;bool typeDumped=false;bool findOff=false;unsigned findFails=0;uint64_t next=0,discoverAt=0,findAt=0;bool inTick=false;std::string lastStatus;std::vector<std::string> notes;
+ Ptr rendererTypeObject=0;bool typeDumped=false;bool findOff=false;unsigned findFails=0;uint64_t next=0,discoverAt=0,findAt=0;bool inTick=false;std::string lastStatus;std::vector<std::string> notes;std::map<std::string,std::string> missingLogged;  // model|part -> last target-missing reason
  Owned handoffTypeRoots;uint64_t handoffTypeRetry=0;
  // Last scan, for the wait reason: world character's renderers, FindObjectsOfType results (-1: not run), renderers left
  // out because an attach failed on them; scanCount numbers the scans. Per model: scan number, reason, details logged, time.
@@ -270,8 +270,11 @@ struct Runtime::Impl {
  // the order changed (discover); parts only one of them replaces are shown from each.
  std::vector<const ModelInfo*> chooseModels(){
   std::vector<const ModelInfo*> out;std::set<std::string> taken;
-  for(auto& n:ctl.selected)for(auto& m:models)if(m.name==n&&taken.insert(m.path).second)out.push_back(&m);
+  for(auto& n:ctl.selected)for(auto& m:models)if(m.name==n&&taken.insert(m.path).second){auto v=ctl.variables.find(m.name);
+   if(drawn(m.replaceWhen,pick(m.variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second)))out.push_back(&m);}
   return out;}
+ // A selected model left out only because its own switch (replaceWhen) is off.
+ bool switchedOff(){for(auto& n:ctl.selected)for(auto& m:models)if(m.name==n){auto v=ctl.variables.find(m.name);if(!drawn(m.replaceWhen,pick(m.variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second)))return true;}return false;}
  size_t rank(const std::string& path){for(size_t i=0;i<wantedNow.size();i++)if(wantedNow[i]->path==path)return i;return wantedNow.size();}
  bool claims(const Set& s,Ptr original){if(!alive(original))return false;auto fp=fingerprint(original);for(auto& p:s.parts)if(matches(p.target,fp))return true;return false;}
  // Every part of the model is also replaced by a model switched on earlier: building it would show nothing, so it waits
@@ -287,7 +290,7 @@ struct Runtime::Impl {
   freeOwned(tmp);chains.put(key,out);return out;}
  // Targets learned this session (also after a game update moved a part) take precedence over the folder's.
  bool targetsFor(const ModelInfo& m,std::vector<Fingerprint>& out){out.clear();auto l=learned.find(m.path);
-  for(auto& p:m.parts){if(l!=learned.end()&&l->second.count(p.name))out.push_back(l->second.at(p.name));else if(p.hasTarget)out.push_back(p.target);else return false;}return true;}
+  for(auto& p:m.parts){if(l!=learned.end()&&l->second.count(p.name)&&l->second.at(p.name).bones>=p.minBones)out.push_back(l->second.at(p.name));else if(p.hasTarget&&p.target.bones>=p.minBones)out.push_back(p.target);else return false;}return true;}
  std::string rendererName(Ptr r){auto key=std::make_pair(r,load<Ptr>(r+0x10));if(auto* hit=rendererNames.find(key))return *hit;return rendererNames.put(key,name(r));}
  // Models imported without a bone library: the first renderer whose skeleton chain carries the model's
  // character name and whose renderer name is the part's group defines the part's target (world character first).
@@ -299,40 +302,42 @@ struct Runtime::Impl {
   unsigned budget=8;bool changed=false;std::set<Ptr> world0;try{for(Ptr r:worldRenderers())world0.insert(r);}catch(const std::exception&){}
   for(auto& p:m.parts){if(p.hasTarget||learned[m.path].count(p.name))continue;
    for(Ptr r:pool){if(!alive(r))continue;if(normalize(rendererName(r))!=normalize(p.group))continue;auto key=std::make_pair(r,load<Ptr>(r+0x10));if(!chains.has(key)){if(!budget)break;budget--;}{auto c=chain(r);if(!namesMatch(m.names,c)||(m.id&&std::find(c.begin(),c.end(),"avatar")==c.end()))continue;}
-    Ptr mesh=originalMesh(r);if(!alive(mesh))continue;auto fp=fingerprint(mesh);if(lowerLod(fp.mesh))continue;fp.renderer=rendererName(r);learned[m.path][p.name]=fp;changed=true;log("target-learned",m.name+"/"+p.name+" by name "+m.names[0]+" ("+fp.mesh+", "+std::to_string(fp.vertices)+" vertices)");
+    Ptr mesh=originalMesh(r);if(!alive(mesh))continue;auto fp=fingerprint(mesh,true);if(lowerLod(fp.mesh)||fp.bones<p.minBones||!usableTemplate({r,mesh,fp},p.minBones))continue;fp.renderer=rendererName(r);learned[m.path][p.name]=fp;changed=true;log("target-learned",m.name+"/"+p.name+" by name "+m.names[0]+" ("+fp.mesh+", "+std::to_string(fp.vertices)+" vertices)");
     if(!m.id&&world0.count(r)&&ch.entity&&!learnedId.count(m.path)){learnedId[m.path]=ch.config;}
     break;}}
   if(changed)saveLearned(m);
  }
- // Folders converted before targets existed: identify each part on the world character by renderer name, once per entity.
+ // Folders without usable targets: keep identifying missing parts on the world character until all are ready.
  void learnTargets(const ModelInfo& m){
   if(m.id==0){learnByName(m);return;}
-  if(!ch.entity||m.id!=ch.config){if(!m.names.empty())learnByName(m);return;}std::vector<Fingerprint> t;if(targetsFor(m,t)){checkStale(m,t);return;}auto tried=learnTried.find(m.path);if(tried!=learnTried.end()&&tried->second==ch.entity)return;
+  if(!ch.entity||m.id!=ch.config){if(!m.names.empty())learnByName(m);return;}std::vector<Fingerprint> t;if(targetsFor(m,t)){checkStale(m,t);return;}
   // Only from the full meshes: right after loading the character shows a lower level of detail for a moment.
-  struct World {Ptr mesh;std::string renderer,meshName;};std::vector<World> world;bool changed=false;for(Ptr r:worldRenderers()){if(!alive(r))continue;Ptr mesh=originalMesh(r);if(alive(mesh))world.push_back({mesh,name(r),name(mesh)});}
-  for(auto& w:world){if(lowerLod(w.meshName))return;}learnTried[m.path]=ch.entity;
+  struct World {Ptr rendererObject,mesh;std::string renderer,meshName;};std::vector<World> world;bool changed=false;for(Ptr r:worldRenderers()){if(!alive(r))continue;Ptr mesh=originalMesh(r);if(alive(mesh))world.push_back({r,mesh,name(r),name(mesh)});}
+  for(auto& w:world){if(lowerLod(w.meshName)){staleNote[m.path]=w.renderer+" 正在使用低精度网格 "+w.meshName+"，等待该角色的完整模型后重新检测骨骼";return;}}
   for(auto& p:m.parts){if(p.hasTarget||learned[m.path].count(p.name))continue;std::vector<size_t> hit;for(size_t i=0;i<world.size();i++)if(normalize(p.group)==normalize(world[i].renderer)||normalize(p.group)==normalize(world[i].meshName))hit.push_back(i);
-   if(hit.size()!=1){log("target-missing",m.name+"/"+p.name+": renderer match missing/ambiguous: "+p.group);continue;}
-   auto fp=fingerprint(world[hit[0]].mesh);fp.renderer=world[hit[0]].renderer;learned[m.path][p.name]=fp;changed=true;log("target-learned",m.name+"/"+p.name);}
-  if(changed)saveLearned(m);
+   if(hit.size()!=1){auto why=std::string(hit.empty()?"missing":"ambiguous")+": "+p.group;auto& last=missingLogged[m.path+"|"+p.name];if(last!=why){last=why;log("target-missing",m.name+"/"+p.name+": renderer match "+why);}continue;}
+   auto fp=fingerprint(world[hit[0]].mesh,true);if(fp.bones<p.minBones){staleNote[m.path]=p.group+"：MOD 的骨骼索引要求至少 "+std::to_string(p.minBones)+" 根骨骼，当前完整网格只有 "+std::to_string(fp.bones)+" 根；等待该角色的兼容模型，或用对应骨骼记录重新转换";continue;}
+   auto& w=world[hit[0]];if(!usableTemplate({w.rendererObject,w.mesh,fp},p.minBones)){staleNote[m.path]=p.group+" 的骨骼或绑定矩阵尚未完整，持续等待并重新检测";continue;}
+   fp.renderer=w.renderer;learned[m.path][p.name]=fp;changed=true;log("target-learned",m.name+"/"+p.name);}
+  if(changed){saveLearned(m);if(targetsFor(m,t))staleNote.erase(m.path);}
  }
  // The game changed this character's model (version update): no target matches the world character any more. A part
- // follows the new mesh only when it is plainly the same asset (same renderer, same mesh name, same bone count; bones
- // are then mapped by name, or by the unchanged palette for name-imported models). Anything else (another outfit, a
- // re-rigged model) is reported instead of guessed.
+ // follows the new mesh only with the same renderer and mesh name. Named skeletons are verified and mapped by name;
+ // index-only skeletons also need the unchanged palette size. Other outfits are reported instead of guessed.
  static bool lodName(const std::string& n){auto l=n;for(auto& c:l)c=char(std::tolower(static_cast<unsigned char>(c)));return l.find("_lod")!=l.npos;}
  void checkStale(const ModelInfo& m,const std::vector<Fingerprint>& targets){
   struct World {Fingerprint fp;};std::vector<World> world;
-  for(Ptr r:worldRenderers()){if(!alive(r))continue;Ptr mesh=originalMesh(r);if(!alive(mesh))continue;auto fp=fingerprint(mesh);fp.renderer=rendererName(r);world.push_back({fp});}
-  if(world.empty()){return;}for(auto& t:targets)for(auto& w:world)if(matches(t,w.fp)){staleNote.erase(m.path);return;}
+  for(Ptr r:worldRenderers()){if(!alive(r))continue;Ptr mesh=originalMesh(r);if(!alive(mesh))continue;auto fp=fingerprint(mesh,true);fp.renderer=rendererName(r);world.push_back({fp});}
+  if(world.empty())return;
   std::vector<std::string> changed;bool moved=false;
   for(size_t i=0;i<m.parts.size()&&i<targets.size();i++){auto& t=targets[i];std::vector<size_t> hit;bool present=false;
+   bool matched=false;for(auto& w:world)matched=matched||matches(t,w.fp);if(matched)continue;
    bool lod=false;for(auto& w:world){if(normalize(w.fp.renderer)!=normalize(t.renderer))continue;present=true;lod=lod||(meshName(w.fp.mesh)==meshName(t.mesh)&&lodName(w.fp.mesh)!=lodName(t.mesh));}
    if(!present||lod){continue;}  // still loading, or showing another level of detail of the same mesh
    for(size_t j=0;j<world.size();j++)if(normalize(world[j].fp.renderer)==normalize(t.renderer)&&meshName(world[j].fp.mesh)==meshName(t.mesh)&&!lodName(world[j].fp.mesh)&&!lodName(t.mesh))hit.push_back(j);
    if(hit.size()!=1){std::string now;for(auto& w:world)if(normalize(w.fp.renderer)==normalize(t.renderer)){now=w.fp.mesh;break;}changed.push_back(t.renderer+" "+t.mesh+"→"+now);continue;}auto fp=world[hit[0]].fp;
    if(fp.bones!=t.bones){if(m.id==ch.config){auto cause=fingerprintJson(fp),key=m.path+"|"+m.parts[i].name;if(boneRefreshCause[key]!=cause){boneRefreshCause[key]=cause;library.erase(ch.config);libraryRetry[ch.config]=0;boneCandidate.clear();}}
-    changed.push_back(t.renderer+" 骨骼数 "+std::to_string(t.bones)+"→"+std::to_string(fp.bones));continue;}
+    if(m.parts[i].minBones){changed.push_back(t.renderer+" 骨骼数 "+std::to_string(t.bones)+"→"+std::to_string(fp.bones));continue;}}
    learned[m.path][m.parts[i].name]=fp;moved=true;
    log("target-updated",m.name+"/"+m.parts[i].name+": "+t.mesh+" vertices "+std::to_string(t.vertices)+"->"+std::to_string(fp.vertices)+", submeshes "+std::to_string(t.submeshes)+"->"+std::to_string(fp.submeshes));}
   if(moved){saveLearned(m);Set* old=nullptr;for(auto& s:sets)if(s->path==m.path){old=s.get();break;}if(old)releaseSet(old);failed.erase(m.path);}
@@ -342,12 +347,21 @@ struct Runtime::Impl {
  // Newest built set for a wanted model: the current generation, or the previous one while a reload builds.
  Set* liveSet(const ModelInfo& m){Set* best=nullptr;for(auto& s:sets)if(s->path==m.path&&s->built){if(s->generation==m.generation)return s.get();best=s.get();}return best;}
  // One renderer per part, still showing the original asset: the source of bones, bindposes and the mesh to clone.
- std::optional<std::vector<Seen>> templatesFor(const std::vector<Fingerprint>& targets){std::vector<Seen> out;
-  for(auto& t:targets){bool found=false;
+ bool usableTemplate(const Seen& s,unsigned minBones){Owned tmp;bool ok=false;
+  try{auto fp=fingerprint(s.mesh,true);require(!lowerLod(fp.mesh)&&fp.bones>=minBones,"Template LOD/bone count");
+   Ptr bones=e.get(abi::getBones,s.renderer);require(bones!=0,"Template bones missing");pin(tmp,bones);
+   Ptr binds=e.get(abi::getBindposes,s.mesh);require(binds!=0,"Template bindposes missing");pin(tmp,binds);
+   auto n=length(bones,512);require(n>0&&n>=minBones&&n==fp.bones&&n==length(binds,512),"Template bone/bindpose count");
+   for(Ptr b:pointers(bones,512))require(alive(b)&&!name(b).empty(),"Template bone missing/unnamed");
+   detail::finite(arrayBytes(binds,64,512),"Template bindposes");ok=true;}
+  catch(const std::exception&){}freeOwned(tmp);return ok;}
+ std::optional<std::vector<Seen>> templatesFor(const ModelInfo& model,const std::vector<Fingerprint>& targets){std::vector<Seen> out;
+  for(size_t i=0;i<targets.size();i++){auto& t=targets[i];bool found=false;unsigned min=model.parts[i].minBones;
    // Not a renderer that already failed to attach (another skeleton on the same asset): it would fail the build too.
-   for(auto& s:seen)if(matches(t,s.fp)&&alive(s.renderer)&&alive(s.mesh)&&!attachments.count(s.renderer)&&!skipped.count({s.renderer,load<Ptr>(s.renderer+0x10)})&&e.get(abi::getMesh,s.renderer)==s.mesh){out.push_back(s);found=true;break;}
-   if(!found)for(auto& a:attachments)if(alive(a.first)&&alive(a.second->original)&&matches(t,fingerprint(a.second->original))){out.push_back({a.first,a.second->original,fingerprint(a.second->original)});found=true;break;}
-   if(!found)return std::nullopt;}
+   for(auto& s:seen)if(matches(t,s.fp)&&alive(s.renderer)&&alive(s.mesh)&&!attachments.count(s.renderer)&&!skipped.count({s.renderer,load<Ptr>(s.renderer+0x10)})&&e.get(abi::getMesh,s.renderer)==s.mesh&&usableTemplate(s,min)){out.push_back(s);found=true;break;}
+   if(!found)for(auto& a:attachments)if(alive(a.first)&&alive(a.second->original)&&matches(t,fingerprint(a.second->original))){Seen s{a.first,a.second->original,fingerprint(a.second->original)};if(usableTemplate(s,min)){out.push_back(s);found=true;break;}}
+   if(!found){for(auto& s:seen)if(matches(t,s.fp)&&alive(s.renderer)&&alive(s.mesh)&&!usableTemplate(s,min)){staleNote[model.path]=t.renderer+" 的骨骼或绑定矩阵尚未完整，持续等待并重新检测";break;}return std::nullopt;}}
+  staleNote.erase(model.path);
   return out;}
 
  // ---------------------------------------------------------------- build (one part per tick)
@@ -356,16 +370,17 @@ struct Runtime::Impl {
    for(size_t i=0;i<subs.size();i++){Ptr a=arrayOf(tmp,arrayClasses.i32,bp.indices.data()+subs[i].start*4ull,subs[i].count,4);e.call<void>(abi::setSubmeshTriangles,bp.mesh,a,int(i),Ptr(0));}}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}
  void buildStep(Set& s,const Seen& tpl){
   auto& pf=s.data->parts[s.parts.size()];Ptr owner=tpl.renderer,ownerMesh=tpl.mesh;require(alive(owner)&&alive(ownerMesh),"Template renderer expired");
-  if(s.parts.empty()){createTextures(s);}Owned tmp;
+  Owned tmp;
   try{
    Ptr boneArray=e.get(abi::getBones,owner);pin(tmp,boneArray);auto bones=pointers(boneArray,512);Ptr binds=e.get(abi::getBindposes,ownerMesh);pin(tmp,binds);require(length(binds,512)==bones.size(),"Target bone/bindpose count");
    std::vector<std::string> target;for(Ptr b:bones)target.push_back(name(b));Skin weights{pf.weights,pf.used};std::vector<int> mapping;
-   if(pf.sourceBones.empty()){mapping.assign(pf.spec.bones,-1);for(unsigned i:weights.used){require(i<bones.size(),"Model uses bone "+std::to_string(i)+" but the target skeleton has "+std::to_string(bones.size()));mapping[i]=int(i);}}
+   if(pf.sourceBones.empty()){mapping.assign(pf.spec.bones,-1);for(unsigned i:weights.used){require(i<bones.size(),"Model uses bone index "+std::to_string(i)+" (needs at least "+std::to_string(i+1)+" bones), but this template has "+std::to_string(bones.size())+"; a matching skeleton is required");mapping[i]=int(i);}}
    else{std::vector<int> parents;for(Ptr b:bones){Ptr up=alive(b)?e.get(abi::getParent,b):0;auto at=std::find(bones.begin(),bones.end(),up);parents.push_back(up&&at!=bones.end()?int(at-bones.begin()):-1);}
     auto bm=mapBones(pf.sourceBones,target,pf.sourceBinds,arrayBytes(binds,64,512),weights.used,pf.sourceParents,parents);mapping=bm.target;
     for(auto& mv:bm.moved){unsigned n=0;for(size_t v=0;v+32<=weights.data.size();v+=32)for(int j=0;j<4;j++)if(f32(weights.data.data()+v+4*j)>0&&u32(weights.data.data()+v+16+4*j)==mv.first){n++;break;}
      log("bone-fallback",s.name+"/"+pf.spec.name+": "+pf.sourceBones[mv.first]+" -> "+target[size_t(mv.second)]+" ("+std::to_string(n)+" vertices; the game's skeleton has no such bone)");}}
    remap(weights,mapping);
+   if(s.parts.empty())createTextures(s);
    std::string report="source_index\ttarget_index\tsource_name\ttarget_name\n";for(size_t i=0;i<mapping.size();i++)report+=std::to_string(i)+'\t'+std::to_string(mapping[i])+'\t'+(pf.sourceBones.empty()?"#"+std::to_string(i):pf.sourceBones[i])+'\t'+(mapping[i]>=0?target[mapping[i]]:"")+"\n";writeLater(s.path+"/bonemap-"+pf.spec.name+".tsv",report);
    BuiltPart bp;bp.name=pf.spec.name;bp.target=s.targets[s.parts.size()];bp.bones=target;bp.draws=pf.draws;bp.indices.assign(pf.geo.idx(),pf.geo.idx()+4ull*pf.geo.ni);
    const auto& geo=pf.geo;bp.mesh=clone(s,ownerMesh);
@@ -519,7 +534,7 @@ struct Runtime::Impl {
      auto o=ours.find(m);if(o!=ours.end()){adopt(r,*o->second.first,o->second.second,now);adopted++;continue;}found.push_back({r,m,fingerprint(m)});}
     if(!found.empty())for(auto* m:wantedNow){if(liveSet(*m)||shadowed(*m,wantedNow)||!lodTarget(*m).empty())continue;auto f=failed.find(m->path);if(f!=failed.end()&&f->second.first==m->generation)continue;
      std::vector<Fingerprint> targets;if(!targetsFor(*m,targets))continue;std::vector<Seen> tpl;
-     for(auto& t:targets){for(auto& sn:found)if(matches(t,sn.fp)){tpl.push_back(sn);break;}}
+     for(size_t i=0;i<targets.size();i++){for(auto& sn:found)if(matches(targets[i],sn.fp)&&usableTemplate(sn,m->parts[i].minBones)){tpl.push_back(sn);break;}}
      if(tpl.size()!=targets.size())continue;
      LoadResult res;if(!takeLoaded(*m,res)){requestLoad(*m);continue;}
      if(!res.error.empty()){failed[m->path]={m->generation,res.error};log("model-error",m->name+": "+res.error);continue;}
@@ -652,11 +667,12 @@ struct Runtime::Impl {
    if(b.error.empty()){if(b.library){library.insert(b.id);libraryError.erase(b.id);}else{exportSeen=b.request;manualWait.clear();}}
    else{if(b.library)library.erase(b.id);auto& last=b.library?libraryError[b.id]:manualWait;if(last!=b.error){last=b.error;log(b.library?"bone-library-error":"bone-export-error",std::to_string(b.id)+": "+b.error+"; retrying automatically");}}}
   // A re-imported folder (new generation, maybe another character) forgets what was learned for the old one.
-  for(auto& m:models){auto g=learnedGen.find(m.path);if(g!=learnedGen.end()&&g->second==m.generation)continue;learned.erase(m.path);learnedId.erase(m.path);learnTried.erase(m.path);staleNote.erase(m.path);learnedGen[m.path]=m.generation;}
+  for(auto& m:models){auto g=learnedGen.find(m.path);if(g==learnedGen.end()||g->second!=m.generation){learned.erase(m.path);learnedId.erase(m.path);staleNote.erase(m.path);learnedGen[m.path]=m.generation;for(auto it=missingLogged.lower_bound(m.path+"|");it!=missingLogged.end()&&it->first.compare(0,m.path.size()+1,m.path+"|")==0;)it=missingLogged.erase(it);}
+   auto l=learned.find(m.path);if(l!=learned.end())for(auto& p:m.parts){auto t=l->second.find(p.name);if(t!=l->second.end()&&t->second.bones<p.minBones)l->second.erase(t);}}
   // A bone export is a request made while the game runs: the count found at start-up is not one.
   if(c&&!controlSeen){controlSeen=true;exportSeen=c->exportBones;}
   if(c&&c->exportBones!=exportSeen&&c->exportBones!=ctl.exportBones){boneCandidate.clear();manualRetryAt=0;manualWait.clear();}
-  if(c){ctl=*c;handoff::publishControl(ctl.enabled);failed.clear();attempts.clear();skipped.clear();learnTried.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();}
+  if(c){ctl=*c;handoff::publishControl(ctl.enabled);failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();}
   if(!cerr.empty())log("control-error",cerr);}
  void tick(uint64_t now){if(inTick)return;if(now<next){guard(now);return;}inTick=true;next=now+100;
   try{
@@ -700,8 +716,8 @@ struct Runtime::Impl {
     auto f=failed.find(m->path);if(f!=failed.end()&&f->second.first==m->generation){errors.push_back(m->name+": "+f->second.second);continue;}
     {auto lod=lodTarget(*m);if(!lod.empty()){errors.push_back(m->name+": 转换时骨骼库记录的是低精度模型 "+lod+"，骨骼对不上；在 App 里重新转换这个 MOD");continue;}}
     Set* cur=findSet(m->path,m->generation);if(cur&&cur->built){auto st=staleNote.find(m->path);if(st!=staleNote.end()){waiting=m->name+": "+st->second;stale=true;}continue;}
-    std::vector<Fingerprint> targets;if(!targetsFor(*m,targets)){waiting=m->name+": 等待"+(m->id?"该角色":"名字含 "+m->names[0]+" 的角色")+"出现以识别部件";continue;}
-    auto tpl=templatesFor(targets);
+    std::vector<Fingerprint> targets;if(!targetsFor(*m,targets)){auto why=staleNote.find(m->path);waiting=m->name+": "+(why!=staleNote.end()?why->second:"等待"+(m->id?std::string("该角色"):"名字含 "+m->names[0]+" 的角色")+"出现以识别部件");stale=why!=staleNote.end();continue;}
+    auto tpl=templatesFor(*m,targets);
     if(!cur){if(!tpl){auto st=staleNote.find(m->path);if(st!=staleNote.end()){waiting=m->name+": "+st->second;stale=true;}
       else{auto& why=waitReason(*m,targets,now);if(waiting.empty()){waiting=m->name+": "+(why.reason.empty()?std::string("等待该角色出现"):why.reason);stale=why.plain;}}
       requestLoad(*m);continue;}LoadResult res;if(!takeLoaded(*m,res)){requestLoad(*m);if(!takeLoaded(*m,res)){building.push_back(m->name);continue;}}
@@ -721,7 +737,7 @@ struct Runtime::Impl {
    if(!active.empty())status("active",errors.empty()?"":errors[0],active,errors);
    else if(!building.empty())status("loading",building[0],active,errors);
    else if(!errors.empty())status("error",errors[0],active,errors);
-   else status("waiting",wanted.empty()?"没有勾选的模型":(waiting.empty()?"等待角色出现":waiting)+(stale?"":findOff?"（全场景扫描不可用，目前只认当前操控的角色；GIBox Log.txt 里有 renderer-type-dump）":"（大世界、队伍界面、角色详情页任一处出现即可）"),active,errors);
+   else status("waiting",wanted.empty()?(switchedOff()?"显示替换已关闭，保留游戏原模型（在 App 的款式里打开）":"没有勾选的模型"):(waiting.empty()?"等待角色出现":waiting)+(stale?"":findOff?"（全场景扫描不可用，目前只认当前操控的角色；GIBox Log.txt 里有 renderer-type-dump）":"（大世界、队伍界面、角色详情页任一处出现即可）"),active,errors);
   }catch(const std::exception& ex){log("tick-error",ex.what());status("error",ex.what(),{},{ex.what()});}
   inTick=false;}
 };

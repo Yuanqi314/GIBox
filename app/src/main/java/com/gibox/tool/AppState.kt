@@ -176,6 +176,11 @@ class AppState(private val activity: Activity) {
         dismiss = dismiss,
     )
     fun setVariable(mod: Importer.Mod, variable: String, value: Int) = save("保存") { Control.setVariable(game, mod.name, variable, value) }
+    /** 显示替换 开/关 for a model with its own on/off switch (model.json "replaceWhen"). */
+    fun setReplacing(mod: Importer.Mod, variants: Variants, on: Boolean) = save("保存") {
+        val change = variants.switchTo(on, variants.current(game, mod.name))
+        if (change.isNotEmpty()) Control.setVariables(game, mod.name, change)
+    }
     fun changeLogLevel(level: String) = save("保存") { Control.setLogLevel(game, level) }
     fun exportBones() = save("保存") {
         Control.requestBoneExport(game)

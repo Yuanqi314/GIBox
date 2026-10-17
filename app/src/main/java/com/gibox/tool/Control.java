@@ -58,6 +58,11 @@ public final class Control {
         JSONObject j = load(pkg); JSONObject all = j.optJSONObject("variables"); if (all == null) all = new JSONObject();
         JSONObject m = all.optJSONObject(model); if (m == null) m = new JSONObject(); m.put(var, value); all.put(model, m); j.put("variables", all); save(pkg, j);
     }
+    /** Several variables of one model in one write (显示替换 can change more than one). */
+    public static synchronized void setVariables(String pkg, String model, java.util.Map<String, Integer> values) throws Exception {
+        JSONObject j = load(pkg); JSONObject all = j.optJSONObject("variables"); if (all == null) all = new JSONObject();
+        JSONObject m = all.optJSONObject(model); if (m == null) m = new JSONObject(); for (java.util.Map.Entry<String, Integer> e : values.entrySet()) m.put(e.getKey(), (int) e.getValue()); all.put(model, m); j.put("variables", all); save(pkg, j);
+    }
     public static int variable(String pkg, String model, String var, int fallback) {
         JSONObject all = load(pkg).optJSONObject("variables"); JSONObject m = all == null ? null : all.optJSONObject(model); return m == null ? fallback : m.optInt(var, fallback);
     }

@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * What the app needs from a GIBox model folder's model.json (format "gibox-model", version 1 or 2; the full check of the
+ * What the app needs from a GIBox model folder's model.json (format "gibox-model", versions 1–3; the full check of the
  * data is the runtime's, model.hpp): the character, the variants, where it was converted from. learned.json adds the
  * character ID the runtime found for a model converted by name.
  */
@@ -23,6 +23,9 @@ public final class ModelManifest {
     /** The value each variable starts with (version 2 "variants.default"; version 1: the default combination's). */
     public final Map<String, Integer> defaults = new LinkedHashMap<>();
     public int version;
+    /** Version 3 "replaceWhen": the variables that switch the whole replacement on, and the values it is on for. Empty: always on. */
+    public final List<String> replaceVars = new ArrayList<>();
+    public final List<List<Integer>> replaceAllow = new ArrayList<>();
     /** A part's target is a lower level of detail (converted against a skeleton library recorded while the character was
      *  still loading, before 0.6.5): the bone indices do not fit the full model, it has to be converted again. Else "". */
     public String lodMesh = "";
@@ -40,7 +43,7 @@ public final class ModelManifest {
     public static ModelManifest read(File dir) throws Exception {
         Map<String, Object> m = Json.obj(Json.read(new File(dir, "model.json"), 4L << 20), "model.json");
         Json.check("gibox-model".equals(m.get("format")), "不是 GIBox 模型：" + dir.getName());
-        long version = Json.integer(m.get("version"), "version", 1, 1000000); Json.check(version == 1 || version == 2, "模型格式版本 " + version + " 不支持（新版 GIBox 转换的？）：" + dir.getName());
+        long version = Json.integer(m.get("version"), "version", 1, 1000000); Json.check(version >= 1 && version <= 3, "模型格式版本 " + version + " 不支持（新版 GIBox 转换的？）：" + dir.getName());
         ModelManifest r = new ModelManifest(); r.version = (int) version;
         r.name = Json.str(m.get("name"), "name", 512); r.generation = Json.str(m.get("generation"), "generation", 64);
         Map<String, Object> c = Json.obj(m.get("character"), "character");
@@ -54,7 +57,7 @@ public final class ModelManifest {
                 Map<String, Object> e = Json.obj(x, "variants.vars"); String n = Json.str(e.get("name"), "variants.vars.name", 64); Json.check(n.length() > 1 && n.startsWith("$") && !r.vars.containsKey(n), "款式变量：" + n);
                 List<Integer> values = new ArrayList<>(); for (Object k : Json.arr(e.get("values"), n, 1, 64)) values.add((int) Json.integer(k, n, -1000000, 1000000)); r.vars.put(n, values);
             }
-            if (version == 2) {
+            if (version >= 2) {
                 Map<String, Object> d = Json.obj(vo.get("default"), "variants.default");
                 for (String n : r.vars.keySet()) { int x = (int) Json.integer(d.get(n), "variants.default." + n, -1000000, 1000000); Json.check(r.vars.get(n).contains(x), "默认值不在可选值里：" + n); r.defaults.put(n, x); }
                 Json.check(d.size() == r.vars.size(), "variants.default 里有未声明的变量");
@@ -66,6 +69,17 @@ public final class ModelManifest {
             }
             r.defaultCombo = (int) Json.integer(vo.get("default"), "variants.default", 0, r.combos.size() - 1);
             r.defaults.putAll(r.combos.get(r.defaultCombo));
+            }
+        }
+        Object gate = m.get("replaceWhen");
+        if (gate != null) {
+            Json.check(version >= 3, "replaceWhen 需要模型格式版本 3");
+            Map<String, Object> g = Json.obj(gate, "replaceWhen");
+            for (Object x : Json.arr(g.get("vars"), "replaceWhen.vars", 1, 16)) { String n = Json.str(x, "replaceWhen.vars", 64); Json.check(r.vars.containsKey(n) && !r.replaceVars.contains(n), "replaceWhen 变量：" + n); r.replaceVars.add(n); }
+            for (Object x : Json.arr(g.get("allow"), "replaceWhen.allow", 1, 4096)) {
+                List<Integer> row = new ArrayList<>(); List<?> a = Json.arr(x, "replaceWhen.allow", r.replaceVars.size(), r.replaceVars.size());
+                for (int i = 0; i < a.size(); i++) { int value = (int) Json.integer(a.get(i), "replaceWhen.allow", -1000000, 1000000); Json.check(r.vars.get(r.replaceVars.get(i)).contains(value), "replaceWhen 取值不在可选值里：" + r.replaceVars.get(i)); row.add(value); }
+                r.replaceAllow.add(row);
             }
         }
         if (m.get("parts") instanceof List) for (Object p : (List<?>) m.get("parts")) {

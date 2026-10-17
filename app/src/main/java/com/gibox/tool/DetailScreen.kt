@@ -102,12 +102,27 @@ fun DetailScreen(state: AppState, name: String) {
                     )
                 }
             }
-            if (variants != null && variants.values.isNotEmpty()) item {
+            if (variants != null && (variants.values.keys.any { !variants.hidden(it) } || variants.hasSwitch())) item {
                 SettingsGroup(title = { SectionTitle("款式") }, verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-                    val names = variants.values.keys.toList()
-                    names.forEachIndexed { index, v ->
+                    val names = variants.values.keys.filter { !variants.hidden(it) }
+                    val switch = variants.hasSwitch()
+                    val rows = names.size + (if (switch) 1 else 0)
+                    if (switch) {
+                        val on = variants.replacing(variants.current(state.game, mod.name))
+                        SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(0, rows)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("显示替换", style = MaterialTheme.typography.titleSmall)
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    FilterChip(selected = on, onClick = { state.setReplacing(mod, variants, true) }, label = { Text("开") })
+                                    FilterChip(selected = !on, onClick = { state.setReplacing(mod, variants, false) }, label = { Text("关") })
+                                }
+                            }
+                        }
+                    }
+                    names.forEachIndexed { i, v ->
+                        val index = i + (if (switch) 1 else 0)
                         val current = variants.current(state.game, mod.name, v)
-                        SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(index, names.size)) {
+                        SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(index, rows)) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(v.removePrefix("$"), style = MaterialTheme.typography.titleSmall)
                                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

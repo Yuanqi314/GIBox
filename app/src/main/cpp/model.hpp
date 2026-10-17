@@ -1,5 +1,5 @@
 #pragma once
-// GIBox model format, versions 1 and 2 — GIBox's own model folder, written by the converter (ModelConverter.java) and read here.
+// GIBox model format, versions 1–3 — GIBox's own model folder, written by the converter (ModelConverter.java) and read here.
 // Version 2 gives each draw the variable values it is drawn for ("when") instead of one draw list per combination.
 //
 //   models/<name>/model.json    manifest: character, parts, materials, variants, and where each array sits in model.bin
@@ -66,16 +66,17 @@ inline When whenOf(const Json& w,const Variants& v,const std::string& what){When
  return out;}
 
 // ---------------------------------------------------------------- manifest summary (what the runtime scans every second)
-struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false;Fingerprint target;};
-struct ModelSummary {std::string name,generation;unsigned id=0;std::vector<std::string> names;std::vector<PartSummary> parts;};
+struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false,indexedBones=false;Fingerprint target;};
+struct ModelSummary {std::string name,generation;unsigned id=0;std::vector<std::string> names;std::vector<PartSummary> parts;Variants variants;When replaceWhen;};
 inline void checkFormat(const Json& m){require(m.type==Json::Object,"model.json: not an object");require(m.at("format").type==Json::String&&m.at("format").string=="gibox-model","model.json: not a GIBox model");
- auto version=juint(m,"version",1,1000000);require(version==1||version==2,"model.json: unsupported version "+std::to_string(version)+" (made by a newer GIBox?)");}
+ auto version=juint(m,"version",1,1000000);require(version>=1&&version<=3,"model.json: unsupported version "+std::to_string(version)+" (made by a newer GIBox?)");}
 inline void characterOf(const Json& m,unsigned& id,std::vector<std::string>& names){const auto& c=jfield(m,"character");id=unsigned(juint(c,"id",0,10001999));require(id==0||id>=10000000,"Character ID out of range");
  const auto& n=c.at("names");if(n.type!=Json::Null){require(n.type==Json::Array&&n.array.size()<=16,"Character names");for(auto& x:n.array){require(x.type==Json::String&&nameToken(x.string),"Character name");names.push_back(x.string);}}
  require(id!=0||!names.empty(),"A model needs a character ID or names");}
 inline ModelSummary summaryOf(const Json& m){checkFormat(m);ModelSummary s;s.name=jstr(m,"name",512);s.generation=jstr(m,"generation",64);characterOf(m,s.id,s.names);std::set<std::string> seen;
+ auto version=unsigned(juint(m,"version",1,3));s.variants=variantsOf(m.at("variants"),version);require(version>=3||m.at("replaceWhen").type==Json::Null,"replaceWhen requires model version 3");s.replaceWhen=whenOf(m.at("replaceWhen"),s.variants,"replacement");
  for(auto& p:jarr(m,"parts",1,model::maxParts)){PartSummary ps;ps.name=jstr(p,"name",64);require(safeName(ps.name)&&seen.insert(ps.name).second,"Part name: "+ps.name);ps.renderer=jstr(p,"renderer",256);
-  ps.bones=unsigned(juint(p,"bones",1,model::maxBones));if(p.at("target").type!=Json::Null){ps.target=fingerprintOf(p.at("target"));ps.hasTarget=true;}s.parts.push_back(ps);}
+  ps.bones=unsigned(juint(p,"bones",1,model::maxBones));ps.indexedBones=p.at("skeleton").type==Json::Null;if(p.at("target").type!=Json::Null){ps.target=fingerprintOf(p.at("target"));ps.hasTarget=true;}s.parts.push_back(ps);}
  return s;}
 inline std::string manifestText(const std::string& dir){auto b=read(dir+"/model.json",4*1024*1024);return std::string(b.begin(),b.end());}
 inline ModelSummary readSummary(const std::string& dir){return summaryOf(JsonParser(manifestText(dir)).parse());}
@@ -120,7 +121,7 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir){
  auto m=JsonParser(manifestText(dir)).parse();auto summary=summaryOf(m);
  auto out=std::make_shared<ModelFile>();out->name=summary.name;out->path=dir;out->generation=summary.generation;out->id=summary.id;out->names=summary.names;
  const auto& flags=m.at("flags");if(flags.type!=Json::Null){out->originalMaterials=jbool(flags,"originalMaterials",false);out->diffuseOnly=jbool(flags,"diffuseOnly",false);}
- auto version=unsigned(juint(m,"version",1,2));out->variants=variantsOf(m.at("variants"),version);
+ auto version=unsigned(juint(m,"version",1,3));out->variants=variantsOf(m.at("variants"),version);
  // The data file: exact size and CRC-32 before any view is taken from it.
  const auto& blobInfo=jfield(m,"blob");require(jstr(blobInfo,"file",64)=="model.bin","blob.file must be model.bin");
  auto size=juint(blobInfo,"size",1,model::maxBlob);auto crc=uint32_t(juint(blobInfo,"crc32",0,0xffffffffull));

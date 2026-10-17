@@ -9,7 +9,7 @@ import java.util.regex.*;
 
 /**
  * INI/vertex-buffer converter. Output: one GIBox model folder
- * (format version 1, read by model.hpp): model.json (manifest) + model.bin (every array on a 16-byte boundary, CRC-32 in
+ * (format versions 2/3, read by model.hpp): model.json (manifest) + model.bin (every array on a 16-byte boundary, CRC-32 in
  * the manifest) + conversion.log. The runtime adds learned.json and bonemap-<part>.tsv.
  */
 public final class ModelConverter {
@@ -126,6 +126,7 @@ public final class ModelConverter {
     }
     private static void commands(Ini ini,Section s,Map<String,Integer> vars,Map<String,Resource> rs,Map<String,String> bindings,List<Draw> draws,String part,int depth){
         check(depth<16,"CommandList 递归过深");for(String l:ini.active(s,vars)){String[] a=kv(l);if(a==null)continue;String k=a[0],v=a[1];if(binding(k))assign(rs,bindings,k,v);
+            else if(k.equals("handling"))bindings.put(k,lower(v));
             else if(k.equals("run")){Section target=ini.run(v);if(target!=null)commands(ini,target,vars,rs,bindings,draws,part,depth+1);}
             else if(k.equals("drawindexed")){String[] f=v.split(",");check(f.length<=3,"drawindexed 参数");int count=f[0].trim().equalsIgnoreCase("auto")?-1:Integer.parseInt(f[0].trim());int start=f.length>1?Integer.parseInt(f[1].trim()):0;check(f.length<3||Integer.parseInt(f[2].trim())==0,"仅支持 baseVertex=0");check(count>=-1,"drawindexed 数量");check(start>=0,"drawindexed 起始");if(count!=0)draws.add(new Draw(part,bindings,count,start));}
         }
@@ -197,6 +198,16 @@ public final class ModelConverter {
         for(String hash:autoHashes)check(usedHashes.contains(hash),"drawindexed=auto 没有对应的 ib 资源，hash="+hash);
         for(Draw d:draws)if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part))))resolveStreams(d,providers,rs);
         return draws;
+    }
+    /** No replacement draw can mean the mod's geometry switch is off, or a deliberate hide. Active vertex/index
+     * bindings or handling=skip retain the hide behavior; no active geometry override leaves the game's model alone. */
+    private static boolean geometryOverride(Ini ini,Map<String,Integer> vars,Map<String,Resource> rs){
+        for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")){
+            Evaluated e=new Evaluated(ini,s,vars,rs);
+            if("skip".equals(e.bindings.get("handling")))return true;
+            for(Map.Entry<String,String> b:e.bindings.entrySet())if((b.getKey().equals("ib")||b.getKey().matches("vb[0-9]+"))&&!unbound(b.getValue()))return true;
+        }
+        return false;
     }
     static final int MAX_ASSIGNMENTS=4096;
     private static final Pattern CONDITION_VAR=Pattern.compile("\\$[a-z_][a-z0-9_]*");
@@ -329,15 +340,27 @@ public final class ModelConverter {
         catch(IllegalArgumentException e){return null;}
     }
     private static Bones target(String part,List<Bones> bones,Map<String,String> map){String manual=map.get(lower(part));if(manual!=null){for(Bones b:bones)if(b.name.equalsIgnoreCase(manual))return b;throw new IllegalArgumentException("映射目标不存在："+manual);}String a=lower(part).replaceFirst("[a-z]$","");Bones best=null;int score=0;boolean tie=false;for(Bones b:bones){String n=lower(b.name).replaceFirst("_lod[0-9]+$","");int k=lower(part).endsWith(n)||a.endsWith(n)?n.length():0;if(k>score){score=k;best=b;tie=false;}else if(k>0&&k==score)tie=true;}check(!tie,"渲染器映射有歧义："+part);if(best!=null)return best;if(bones.size()==1)return bones.get(0);throw new IllegalArgumentException("请手工映射部件："+part);}
-    static final class Vertex {byte[] pos,norm,uv,tangent,color,weights;List<byte[]> extra=new ArrayList<>();boolean unweighted;}
+    static final class Vertex {byte[] pos,norm,uv,tangent,color,weights;List<byte[]> extra=new ArrayList<>();boolean unweighted;int trimmedWeights;}
     /** Submeshes and material rows of one renderer part in one variant combination. */
     static final class ComboRows {final List<int[]> subs=new ArrayList<>();final List<String[]> rows=new ArrayList<>();String key(){StringBuilder s=new StringBuilder();for(int i=0;i<subs.size();i++)s.append(subs.get(i)[0]).append(',').append(subs.get(i)[1]).append(':').append(rows.get(i)[0]).append('#').append(rows.get(i)[1]).append(';');return s.toString();}}
     /** One renderer: union of every combination's vertices and index ranges, plus per-combination submeshes. */
     static final class Group {Bones bones;String name;List<Vertex> vertices=new ArrayList<>();List<Integer> indices=new ArrayList<>();Map<String,Integer> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();List<Object> draws;Group(Bones b,String n){bones=b;name=n;} }
     static final class MaterialDef {String name;Resource diffuse,light,normal;}
     static final class Build {final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final Map<File,byte[]> cache=new HashMap<>();}
+    /** Relative to this vertex's total: a little above one float32 ULP at 1. Unused exporter slots can contain a tiny
+     * positive residue and a sentinel bone index. Remove that residue before checking indices; real weights still fail. */
+    static final float WEIGHT_EPSILON=2e-7f;
+    static int cleanWeights(float[] w,int[] ids,int boneCount){
+        float sum=0;for(float x:w){check(Float.isFinite(x)&&x>=0,"非法权重");sum+=x;}check(Float.isFinite(sum),"非法权重");int trimmed=0;
+        for(int k=0;k<4;k++){
+            if(sum==0||w[k]/sum<=WEIGHT_EPSILON){if(w[k]>0)trimmed++;w[k]=0;ids[k]=0;}
+            else check(ids[k]>=0&&ids[k]<boneCount,"骨骼索引越界：索引 "+ids[k]+"，骨骼数 "+boneCount+"，有效权重 "+(w[k]/sum));
+        }
+        return trimmed;
+    }
     private static Vertex vertex(Resource position,Resource blend,Resource tex,byte[] p,byte[] b,byte[] t,int i,int boneCount){
-        check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);v.uv=uv(t,to+4);for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(t,to+k));v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float sum=0;float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);check(Float.isFinite(w[k])&&w[k]>=0,"非法权重");check(w[k]==0||(ids[k]>=0&&ids[k]<boneCount),"骨骼索引越界");sum+=w[k];}check(Float.isFinite(sum),"非法权重");if(sum>0)tidy(w,ids,wo);else v.unweighted=true;for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
+        check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);v.uv=uv(t,to+4);for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(t,to+k));v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);}
+        v.trimmedWeights=cleanWeights(w,ids,boneCount);boolean weighted=false;for(float x:w)weighted|=x>0;if(weighted)tidy(w,ids,wo);else v.unweighted=true;for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
     }
     /** One vertex's four weights: the same bone listed twice added together, largest first, summing to 1; empty slots 0 on bone 0. */
     static void tidy(float[] w,int[] ids,ByteBuffer out){
@@ -358,13 +381,14 @@ public final class ModelConverter {
     /** Draws of one variable assignment, each resolved to its target renderer. */
     private static LinkedHashMap<Draw,Bones> resolve(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,Map<String,Resource> rs,StringBuilder log){return resolve(ini,src,boneRecords,mapping,vars,rs,log,null);}
     private static LinkedHashMap<Draw,Bones> resolve(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,Map<String,Resource> rs,StringBuilder log,String fallback){
-        // With the initial values something must be drawn; another assignment may hide everything.
-        boolean required=vars.equals(ini.vars);List<Draw> draws=drawCalls(ini,vars,rs,mapping);if(draws.isEmpty()&&!required)return new LinkedHashMap<>();check(!draws.isEmpty(),"没有有效 drawindexed");
+        // The initial state may legitimately have geometry replacement disabled (e.g. Shenhe's $vision=1).
+        // Reject a mod only after examining all available assignments, not before its active state is visited.
+        List<Draw> draws=drawCalls(ini,vars,rs,mapping);if(draws.isEmpty())return new LinkedHashMap<>();
         LinkedHashMap<Draw,Bones> targets=new LinkedHashMap<>();Map<String,Bones> byHash=new HashMap<>();List<Draw> pending=new ArrayList<>();
         for(Draw d:draws){if("skip".equalsIgnoreCase(mapping.get(lower(d.part))))continue;try{Bones b=target(d.part,boneRecords,mapping);targets.put(d,b);if(!d.hash.isEmpty()){Bones prev=byHash.putIfAbsent(d.hash,b);check(prev==null||prev==b,"同一 IB hash 的部件映射到了不同渲染器："+d.hash);}}catch(IllegalArgumentException e){if(d.hash.isEmpty()||mapping.containsKey(lower(d.part)))throw e;pending.add(d);}}
         Bones fallbackBones=null;if(fallback!=null)for(Bones b:boneRecords)if(b.name.equalsIgnoreCase(fallback))fallbackBones=b;
         for(Draw d:pending){Bones b=byHash.get(d.hash);if(b==null&&fallbackBones!=null){b=fallbackBones;byHash.put(d.hash,b);if(log!=null)log.append(d.part).append(" -> ").append(b.name).append("（未匹配到渲染器名，按默认渲染器）\n");targets.put(d,b);continue;}check(b!=null,"请手工映射部件："+d.part+"（同一 hash 的其他部件也没有匹配到渲染器）");targets.put(d,b);if(log!=null)log.append(d.part).append(" -> ").append(b.name).append("（按同一 IB hash 推定）\n");}
-        LinkedHashMap<Draw,Bones> ordered=new LinkedHashMap<>();for(Draw d:draws)if(targets.containsKey(d))ordered.put(d,targets.get(d));check(!ordered.isEmpty()||!required,"全部部件均已跳过");return ordered;
+        LinkedHashMap<Draw,Bones> ordered=new LinkedHashMap<>();for(Draw d:draws)if(targets.containsKey(d))ordered.put(d,targets.get(d));return ordered;
     }
     private static Resource[] textures(Draw d,Map<String,Resource> rs){Resource diffuse=null,light=null,normal=null;
         for(Map.Entry<String,String> binding:d.bindings.entrySet())if(binding.getKey().startsWith("ps-t")&&!unbound(binding.getValue())){Resource r=resource(rs,binding.getValue());String file=lower(r.file.getName());
@@ -388,8 +412,9 @@ public final class ModelConverter {
     private static int checkedSlot(int s){check(s<64,"材质槽越界");return s;}
     /** What a combination draws, without reading buffers: used to find the variables that actually change the model. */
     private static String signature(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,String fallback)throws Exception{
-        Map<String,Resource> rs=resources(ini,src,vars);StringBuilder s=new StringBuilder();
-        for(Map.Entry<Draw,Bones> e:resolve(ini,src,boneRecords,mapping,vars,rs,null,fallback).entrySet()){Draw d=e.getKey();Resource[] t=textures(d,rs);
+        Map<String,Resource> rs=resources(ini,src,vars);LinkedHashMap<Draw,Bones> resolved=resolve(ini,src,boneRecords,mapping,vars,rs,null,fallback);
+        StringBuilder s=new StringBuilder(!resolved.isEmpty()||geometryOverride(ini,vars,rs)?"replace\n":"original\n");
+        for(Map.Entry<Draw,Bones> e:resolved.entrySet()){Draw d=e.getKey();Resource[] t=textures(d,rs);
             s.append(e.getValue().name).append('|').append(d.part).append('#').append(slot(ini,d)).append('|').append(path(stream(rs,d.bindings,0))).append('|').append(path(stream(rs,d.bindings,1))).append('|').append(path(stream(rs,d.bindings,2))).append('|').append(path(resource(rs,d.bindings.get("ib")))).append('|').append(d.start).append('|').append(d.count).append('|').append(path(t[0])).append(path(t[1])).append(path(t[2])).append('\n');}
         return s.toString();}
     private static void collect(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,int combo,Build b,StringBuilder log,String fallback)throws Exception {
@@ -515,12 +540,18 @@ public final class ModelConverter {
         File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
         try{
             Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
+            check(!b.groups.isEmpty(),"全部可用款式都没有有效 drawindexed（或全部部件已跳过）；若初始开关关闭，请开启款式枚举后转换");
             Set<String> shown=new LinkedHashSet<>();
-            try{for(Group g:b.groups.values())g.draws=drawTable(g,var,sigOf,kept.size(),shown);}
+            Object replaceWhen=null;
+            try{for(Group g:b.groups.values())g.draws=drawTable(g,var,sigOf,kept.size(),shown);
+                Group gate=new Group(null,"replacement");
+                for(int r=0;r<sig.length;r++)if(sig[r].startsWith("replace\n")&&!gate.combos.containsKey(sigOf[r])){ComboRows row=new ComboRows();row.subs.add(new int[]{0,0});row.rows.add(new String[]{"enabled","0"});gate.combos.put(sigOf[r],row);}
+                replaceWhen=Json.obj(drawTable(gate,var,sigOf,kept.size(),shown).get(0),"replacement").get("when");}
             catch(Entangled e){log.append("款式变量之间相互影响（有绘制段同时取决于几组变量），无法分组处理，只转换默认款式\n");shown.clear();
+                check(sig[0].startsWith("replace\n"),"初始款式关闭替换，且其关联款式无法分组；不能把关闭状态转换成空模型");
                 Variation none=new Variation(ini,new ArrayList<>(),new ArrayList<>());int[] only={0};for(Group g:b.groups.values()){Map<Integer,ComboRows> c=new HashMap<>();if(g.combos.containsKey(sigOf[0]))c.put(0,g.combos.get(sigOf[0]));g.combos.clear();g.combos.putAll(c);}
                 for(Group g:b.groups.values())g.draws=g.combos.isEmpty()?null:drawTable(g,none,only,1,shown);}
-            for(Group g:b.groups.values()){int fixed=fixUnweighted(g);if(fixed>0)log.append(g.bones.name).append("：").append(fixed).append(" 个顶点没有权重（MOD 本身的问题，PC 上这些点会被拉到原点），已沿用最近顶点的权重\n");}
+            for(Group g:b.groups.values()){int trimmed=0;for(Vertex v:g.vertices)if(v.trimmedWeights>0)trimmed++;if(trimmed>0)log.append(g.bones.name).append("：已清理 ").append(trimmed).append(" 个顶点中占比不超过 ").append(WEIGHT_EPSILON).append(" 的微小权重，并重新归一化\n");int fixed=fixUnweighted(g);if(fixed>0)log.append(g.bones.name).append("：").append(fixed).append(" 个顶点没有权重（MOD 本身的问题，PC 上这些点会被拉到原点），已沿用最近顶点的权重\n");}
             for(Group g:b.groups.values())log.append(g.bones.name).append(": ").append(g.vertices.size()).append(" 顶点，").append(g.indices.size()).append(" 索引").append(g.bones.synthetic?"（骨骼取自游戏内角色）":g.bones.target==null?"（骨骼库没有网格特征，首次在场景中出现时识别）":"").append('\n');
             for(String x:ini.external)log.append("已忽略外部 CommandList：").append(x).append('\n');ini.external.clear();
             Map<String,Object> data=emit(tmp,b,kept.size(),decoder);
@@ -533,6 +564,7 @@ public final class ModelConverter {
                 check(vars.size()<=16,"款式变量过多");manifest.put("variants",Json.of("vars",vars,"default",defaults));
                 log.append("款式变量：").append(shown).append("，").append(product).append(" 种取值组合（游戏内切换，无需重新转换）\n");}
             manifest.putAll(data);
+            if(replaceWhen!=null){manifest.put("version",3);manifest.put("replaceWhen",replaceWhen);log.append("未启用几何替换的款式保留游戏原模型和材质；此模型需要支持格式 3 的 GIBox\n");}
             if(o.sourcePath!=null)manifest.put("source",Json.of("path",o.sourcePath,"signature",o.sourceSignature==null?"":o.sourceSignature));
             write(tmp,"conversion.log",text(log.toString()));
             // Written last: the runtime reloads a folder when model.json changes.

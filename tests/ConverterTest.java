@@ -11,6 +11,8 @@ public final class ConverterTest {
  static void put(File f,String n,byte[] a)throws Exception{Files.write(new File(f,n).toPath(),a);}
  static void put(File f,String n,String a)throws Exception{put(f,n,a.getBytes(StandardCharsets.UTF_8));}
  static String ini="[Constants]\nglobal persist $variant = 0\n[TextureOverridePosition]\nvb0 = ResourcePosition\n[TextureOverrideBlend]\nvb1 = ResourceBlend\n[TextureOverrideTexcoord]\nvb2 = ResourceTexcoord\n[TextureOverrideBodyA]\nib = ResourceIndex\nps-t0 = ResourceDiffuse\nif $variant == 0\ndrawindexed = 3, 0, 0\nelse if $variant == 1\ndrawindexed = 3, 3, 0\nendif\n[ResourcePosition]\nfilename = Position.buf\nstride = 40\n[ResourceBlend]\nfilename = Blend.buf\nstride = 32\n[ResourceTexcoord]\nfilename = Texcoord.buf\nstride = 12\n[ResourceIndex]\nfilename = Index.buf\nformat = R32_UINT\n[ResourceDiffuse]\nfilename = Diffuse.dds\n";
+ /** Material of the slot-0 (Head) draw: draws come in table order, not slot order. */
+ static Object headMaterial(File out,Map<String,Integer> a)throws Exception{for(Object d:Fixtures.draws(out,0,a))if(Fixtures.number(Json.obj(d,"draw"),"slot")==0)return Json.obj(d,"draw").get("material");throw new AssertionError("no slot-0 draw");}
  public static void main(String[] args)throws Exception{
   File root=Files.createTempDirectory("model-converter-test").toFile(),src=new File(root,"src"),bones=new File(root,"bones"),dest=new File(root,"model");src.mkdir();bones.mkdir();put(src,"mod.ini",ini);
   boolean bad;ByteBuffer pos=b(120),blend=b(96),uv=b(36),bind=b(64);for(int i=0;i<3;i++){pos.position(i*40);pos.putFloat(i).putFloat(0).putFloat(0).putFloat(0).putFloat(1).putFloat(0).putFloat(1).putFloat(0).putFloat(0).putFloat(1);blend.putFloat(i*32,2);uv.position(i*12);uv.putInt(-1).putFloat(.25f).putFloat(.75f);}for(int i=0;i<4;i++)bind.putFloat((i*4+i)*4,1);
@@ -97,6 +99,25 @@ public final class ConverterTest {
   // One vertex's weights: a bone listed twice is added up, the largest comes first, the sum is 1.
   {float[] w={.1f,.4f,.2f,0};int[] ids={7,3,7,9};ByteBuffer o=b(32);ModelConverter.tidy(w,ids,o);
    ok(Math.abs(o.getFloat(0)-4/7f)<1e-6&&o.getInt(16)==3&&Math.abs(o.getFloat(4)-3/7f)<1e-6&&o.getInt(20)==7&&o.getFloat(8)==0&&o.getInt(24)==0,"weights tidied");}
+  // Lumine's Body contains 20 vertices with a fourth, tiny weight on index 114. Test the actual vertex-7891 values,
+  // then both conversion paths: named skeleton index validation and synthetic minimum-bone count calculation.
+  {float[] w={.5608007311820984f,.3355036675930023f,.1036955714225769f,5.960464477539063e-8f};int[] ids={1,0,2,114};ByteBuffer out=b(32);
+   ok(ModelConverter.cleanWeights(w,ids,114)==1,"actual Lumine residue removed before validating index 114");ModelConverter.tidy(w,ids,out);
+   ok(out.getFloat(12)==0&&out.getInt(28)==0&&Math.abs(out.getFloat(0)+out.getFloat(4)+out.getFloat(8)-1)<1e-6,"remaining associations are preserved and normalized");
+   byte[] noisy=blend.array().clone();ByteBuffer nb=ByteBuffer.wrap(noisy).order(ByteOrder.LITTLE_ENDIAN);
+   for(int i=0;i<3;i++){nb.putFloat(i*32+12,1.1920929e-7f);nb.putInt(i*32+28,114);}put(src,"Blend.buf",noisy);
+   File namedNoise=new File(root,"named_noise"),indexedNoise=new File(root,"indexed_noise");
+   outputs.addAll(ModelConverter.convert(src,bones,namedNoise,10000107,"",false,dds->rgba,new StringBuilder()));
+   ModelConverter.convert(src,null,indexedNoise,10000107,new ModelConverter.Options(),dds->rgba,new StringBuilder());outputs.add(indexedNoise);
+   ok(Fixtures.number(Fixtures.part(indexedNoise,0),"bones")==1,"epsilon residue must not inflate the required bone count to 115");
+   for(File d:Arrays.asList(namedNoise,indexedNoise)){ByteBuffer skin=Fixtures.data(d,0,"weights");for(int i=0;i<3;i++)ok(skin.getFloat(i*32)==1&&skin.getFloat(i*32+12)==0&&skin.getInt(i*32+28)==0,"no dangling fourth association");}
+   for(int i=0;i<3;i++)nb.putFloat(i*32+12,.25f);put(src,"Blend.buf",noisy);boolean refused=false;
+   try{ModelConverter.convert(src,bones,new File(root,"real_bad_bone"),10000107,"",false,dds->rgba,new StringBuilder());}catch(IllegalArgumentException ex){refused=ex.getMessage().contains("骨骼索引越界");}ok(refused,"a significant out-of-range weight is never silently removed");
+   File realIndexed=new File(root,"real_indexed");ModelConverter.convert(src,null,realIndexed,10000107,new ModelConverter.Options(),dds->rgba,new StringBuilder());outputs.add(realIndexed);
+   ok(Fixtures.number(Fixtures.part(realIndexed,0),"bones")==115,"a real association still requires 115 bones");
+   float[] scaled={1e-9f,0,0,0};int[] scaledIds={0,0,0,0};ok(ModelConverter.cleanWeights(scaled,scaledIds,1)==0&&scaled[0]>0,"threshold is relative to the vertex total, not raw buffer magnitude");
+   for(float invalid:new float[]{-1e-8f,Float.NaN,Float.POSITIVE_INFINITY}){refused=false;try{ModelConverter.cleanWeights(new float[]{1,invalid,0,0},new int[4],1);}catch(IllegalArgumentException ex){refused=true;}ok(refused,"invalid weight must not be treated as residue");}
+   put(src,"Blend.buf",blend.array());}
   // Vertices the author left without weights take the nearest weighted vertex's (old vertex 2 is first in the index
   // buffer, so compact vertex 0; its nearest, old vertex 1, lists bone 0 twice: 1 + 3, merged to 1); a part with no
   // weights at all is refused.
@@ -117,6 +138,42 @@ public final class ConverterTest {
   String inherited="[TextureOverrideHeroPosition]\nvb0 = ResourcePosition\n[TextureOverrideHeroBlend]\nvb1 = ResourceBlend\n[TextureOverrideHeroTexcoord]\nvb1 = ResourceTexcoord\n[TextureOverrideHeroIB]\nhash = aabbccdd\nhandling = skip\ndrawindexed = auto\n[TextureOverrideHeroBodyA]\nhash = aabbccdd\nmatch_first_index = 9000\nib = ResourceIndex\nps-t0 = ResourceDiffuse\n"+resourceDefs;
   put(src,"mod.ini",inherited);File inheritedOut=new File(root,"inherited");outputs.addAll(ModelConverter.convert(src,bones,inheritedOut,10000107,"",false,dds->rgba,new StringBuilder()));
   ok(Fixtures.number(Fixtures.part(inheritedOut,0),"indices")==6,"auto uses all split IB indices, not match_first_index offset");
+  // Shenhe Frost Flower: the default $vision=1 has no active geometry override. Enumerate the enabled state before
+  // rejecting the mod, preserve its initial switch, and distinguish original-model mode from an intentional hide.
+  {File guarded=new File(root,"guarded");guarded.mkdirs();for(String f:new String[]{"Position.buf","Blend.buf","Texcoord.buf","Index.buf","Diffuse.dds"})Files.copy(new File(src,f).toPath(),new File(guarded,f).toPath());
+   Files.copy(new File(src,"Diffuse.dds").toPath(),new File(guarded,"Diffuse2.dds").toPath());
+   StringBuilder g=new StringBuilder("[Constants]\nglobal persist $vision = 1\nglobal persist $stockings = 0\nglobal persist $chest = 0\n");
+   for(String key:new String[]{"vision","stockings","chest"})g.append("[Key").append(key).append("]\ntype = cycle\n$").append(key).append(" = 0,1\n");
+   for(String stream:new String[]{"Position","Blend","Texcoord"})g.append("[TextureOverrideHero").append(stream).append("]\nif $vision == 0\n").append(stream.equals("Position")?"vb0":"vb1").append(" = Resource").append(stream).append("\nendif\n");
+   g.append("[TextureOverrideHeroIB]\nhash = aabbccdd\nif $vision == 0\nhandling = skip\ndrawindexed = auto\nendif\n");
+   String[] components={"Head","Body","Dress","Extra"};
+   for(int i=0;i<4;i++)g.append("[TextureOverrideHero").append(components[i]).append("]\nhash = aabbccdd\nmatch_first_index = ").append(i*6).append("\nif $vision == 0\nib = ResourceIndex\nendif\nif $").append(i%2==0?"stockings":"chest").append(" == 0\nps-t0 = ResourceDiffuse\nelse\nps-t0 = ResourceDiffuse2\nendif\n");
+   String guardedIni=g+resourceDefs+"[ResourceDiffuse2]\nfilename = Diffuse2.dds\n";put(guarded,"mod.ini",guardedIni);
+   File guardedOut=new File(root,"guarded_out");outputs.addAll(ModelConverter.convert(guarded,bones,guardedOut,10000107,"",true,dds->rgba,new StringBuilder()));
+   ModelManifest gm=ModelManifest.read(guardedOut);ok(gm.version==3&&gm.defaults.get("$vision")==1&&gm.vars.size()==3,"default-off mod retains all three toggles");
+   Map<String,Object> gate=Json.obj(Fixtures.manifest(guardedOut).get("replaceWhen"),"replaceWhen");
+   ok(gate.get("vars").equals(Collections.singletonList("$vision"))&&Json.write(gate.get("allow")).replaceAll("\\s","").equals("[[0]]"),"only $vision enables geometry: "+Json.write(gate));
+   for(int vision=0;vision<2;vision++)for(int stockings=0;stockings<2;stockings++)for(int chest=0;chest<2;chest++){
+    Map<String,Integer> a=new HashMap<>();a.put("$vision",vision);a.put("$stockings",stockings);a.put("$chest",chest);List<Object> ds=Fixtures.draws(guardedOut,0,a);
+    ok(ds.size()==(vision==0?4:0),"all eight combinations retain their draw count: "+a);
+    Set<Integer> slots=new TreeSet<>();for(Object d:ds)slots.add((int)Fixtures.number(Json.obj(d,"draw"),"slot"));
+    ok(slots.size()==ds.size()&&(ds.isEmpty()||slots.equals(new TreeSet<>(Arrays.asList(0,1,2,3)))),"component slots stay at match_first_index order: "+ds);}
+   // 显示替换: $vision is only the switch, so it is shown as 开/关 and not as its own row.
+   Variants vs=Variants.read(guardedOut);ok(vs.hasSwitch()&&vs.hidden("$vision")&&!vs.hidden("$stockings")&&!vs.hidden("$chest"),"显示替换 replaces the $vision row");
+   Map<String,Integer> now=new HashMap<>();now.put("$vision",1);now.put("$stockings",1);now.put("$chest",0);
+   ok(!vs.replacing(now)&&vs.switchTo(true,now).equals(Fixtures.set("$vision",0))&&vs.switchTo(false,now).isEmpty(),"开 sets only the switch variable");
+   now.put("$vision",0);ok(vs.replacing(now)&&vs.switchTo(false,now).equals(Fixtures.set("$vision",1)),"关 goes back to the mod's own off value");
+   Variants two=new Variants();two.values.put("$a",Arrays.asList(0,1,2));two.values.put("$b",Arrays.asList(0,1));two.defaults.put("$a",0);two.defaults.put("$b",0);
+   two.gateVars.addAll(Arrays.asList("$a","$b"));two.gateAllow.add(Arrays.asList(0,0));two.gateAllow.add(Arrays.asList(2,1));
+   Map<String,Integer> off=two.switchTo(false,new HashMap<>(two.defaults));ok(!two.hidden("$a")&&off.size()==2&&!two.replacing(Variants.merged(two.defaults,off)),"关 with a switch over two variables picks an off row: "+off);
+   Map<String,Integer> stockingOn=new HashMap<>();stockingOn.put("$vision",0);stockingOn.put("$stockings",1);
+   ok(!headMaterial(guardedOut,Fixtures.set("$vision",0)).equals(headMaterial(guardedOut,stockingOn)),"stocking texture still switches");
+   boolean refused=false;try{ModelConverter.convert(guarded,bones,new File(root,"guarded_default_only"),10000107,"",false,dds->rgba,new StringBuilder());}catch(IllegalArgumentException ex){refused=ex.getMessage().contains("全部可用款式都没有有效 drawindexed");}ok(refused,"default-only conversion explains why enumeration is needed");
+   put(guarded,"mod.ini",guardedIni.replace("if $vision == 0\nhandling = skip\n","handling = skip\nif $vision == 0\n"));
+   File hideOut=new File(root,"guarded_hide");outputs.addAll(ModelConverter.convert(guarded,bones,hideOut,10000107,"",true,dds->rgba,new StringBuilder()));
+   ok(!Fixtures.manifest(hideOut).containsKey("replaceWhen")&&Fixtures.draws(hideOut,0,new HashMap<>()).isEmpty(),"handling=skip remains an intentional hide");
+   put(guarded,"mod.ini",guardedIni.replace("drawindexed = auto","drawindexed = 0"));refused=false;
+   try{ModelConverter.convert(guarded,bones,new File(root,"no_draw"),10000107,"",true,dds->rgba,new StringBuilder());}catch(IllegalArgumentException ex){refused=ex.getMessage().contains("没有有效 drawindexed");}ok(refused,"a mod with no draw in any state remains invalid");}
   // A more specific component wins over shared character defaults.
   byte[] hairPos=pos.array().clone(),hairBlend=blend.array().clone(),hairUV=uv.array().clone();for(int i=0;i<3;i++){ByteBuffer.wrap(hairPos).order(ByteOrder.LITTLE_ENDIAN).putFloat(i*40,100+i);ByteBuffer.wrap(hairBlend).order(ByteOrder.LITTLE_ENDIAN).putFloat(i*32,.5f).putFloat(i*32+4,.5f).putInt(i*32+20,1);ByteBuffer.wrap(hairUV).order(ByteOrder.LITTLE_ENDIAN).putFloat(i*12+4,.5f).putFloat(i*12+8,.5f);}
   put(src,"HairPosition.buf",hairPos);put(src,"HairBlend.buf",hairBlend);put(src,"HairTexcoord.buf",hairUV);
@@ -162,7 +219,7 @@ public final class ConverterTest {
   put(named,"learned.json","{\"format\":\"gibox-learned\",\"version\":1,\"id\":10000107,\"targets\":{}}");ok(ModelManifest.read(named).character()==10000107,"learned character ID");
   Process np2=new ProcessBuilder(args[0],named.getAbsolutePath()).inheritIO().start();ok(np2.waitFor()==0,"native loader reads the by-name model");
   // model.json is checked when the app reads it, too.
-  put(named,"model.json",new String(Files.readAllBytes(new File(named,"model.json").toPath()),StandardCharsets.UTF_8).replace("\"version\": 2","\"version\": 3"));bad=false;try{ModelManifest.read(named);}catch(IllegalArgumentException e){bad=e.getMessage().contains("版本");}ok(bad,"newer format refused");
+  put(named,"model.json",new String(Files.readAllBytes(new File(named,"model.json").toPath()),StandardCharsets.UTF_8).replace("\"version\": 2","\"version\": 4"));bad=false;try{ModelManifest.read(named);}catch(IllegalArgumentException e){bad=e.getMessage().contains("版本");}ok(bad,"newer format refused");
   // Our JSON: strict like the native reader, exact float round trip.
   for(String j:new String[]{"{\"a\":1,\"a\":2}","[01]","[1,]","{\"a\":1} x","[\"\u0001\"]","[1e999]"}){bad=false;try{Json.parse(j);}catch(IllegalArgumentException e){bad=true;}ok(bad,"JSON accepted: "+j);}
   Object third=((List<?>)Json.parse(Json.write(Arrays.<Object>asList(1f/3,-2.5e-7f)))).get(0);ok(Json.finite(third,"f")==1f/3,"float round trip");
