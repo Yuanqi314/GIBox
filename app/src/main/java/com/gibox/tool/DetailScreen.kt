@@ -88,7 +88,7 @@ fun DetailScreen(state: AppState, name: String) {
                 SettingsGroup(title = { SectionTitle("角色") }, verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                     SettingsMenuLink(
                         title = { Text(if (mod.converted) "更换角色并重新转换" else "选择角色并转换") },
-                        subtitle = { Text(who(mod) + if (mod.outdated) "（已更改，还没重新转换）" else "") },
+                        subtitle = { Text(who(mod) + if (!mod.outdated) "" else if (mod.reason.isNotEmpty()) "（${mod.reason}，需要重新转换）" else "（已更改，还没重新转换）") },
                         icon = { Icon(Icons.Filled.Person, contentDescription = null) },
                         shapes = ListItemDefaults.segmentedShapes(0, actions),
                         onClick = { state.open(Screen.Pick(mod.name, mod.sourceName, null, mod.source, mod.id)) },

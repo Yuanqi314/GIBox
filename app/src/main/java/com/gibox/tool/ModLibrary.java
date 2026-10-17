@@ -16,7 +16,9 @@ public final class ModLibrary {
     /** A character the runtime has seen: its skeleton library folder plus the transform chain above its skeleton. */
     public static final class Character {
         public final int id; public final File bones; public final String root;
-        Character(int id, File bones, String root) { this.id = id; this.bones = bones; this.root = root; }
+        /** A renderer recorded at a lower level of detail (libraries written before 0.6.5, while the character was still loading); else "". */
+        public final String lodMesh;
+        Character(int id, File bones, String root, String lodMesh) { this.id = id; this.bones = bones; this.root = root; this.lodMesh = lodMesh; }
     }
 
     /** skeleton.json files are large (every bindpose); their id and root are read once per file version. */
@@ -27,7 +29,12 @@ public final class ModLibrary {
         Map<String, Object> j = Json.obj(Json.read(f, 64L << 20), "skeleton.json");
         Json.check("gibox-skeleton".equals(j.get("format")) && Json.integer(j.get("version"), "version", 1, 1000000) == 1, "不是 GIBox 骨骼记录，或版本不支持");
         int id = (int) Json.integer(j.get("id"), "id", 10000000, 10001999); String root = j.get("root") instanceof String ? (String) j.get("root") : "";
-        Object[] h = {stamp, id, root}; synchronized (HEADS) { HEADS.put(key, h); } return h;
+        String lod = "";
+        if (j.get("renderers") instanceof List) for (Object r : (List<?>) j.get("renderers")) {
+            Object t = r instanceof Map ? ((Map<?, ?>) r).get("target") : null, mesh = t instanceof Map ? ((Map<?, ?>) t).get("mesh") : null;
+            if (mesh instanceof String && ModelManifest.lowerLod((String) mesh)) { lod = (String) mesh; break; }
+        }
+        Object[] h = {stamp, id, root, lod}; synchronized (HEADS) { HEADS.put(key, h); } return h;
     }
     public static List<Character> library(File boneRoot) {
         Map<Integer, Character> byId = new TreeMap<>(); File[] dirs = boneRoot.listFiles(); if (dirs == null) return new ArrayList<>();
@@ -35,7 +42,7 @@ public final class ModLibrary {
         for (File d : dirs) try {
             File info = new File(d, "skeleton.json"); if (!d.isDirectory() || d.getName().startsWith(".") || !info.isFile()) continue;
             Object[] h = head(info); int id = (Integer) h[1];
-            Character c = new Character(id, d, (String) h[2]); Character prior = byId.get(id);
+            Character c = new Character(id, d, (String) h[2], (String) h[3]); Character prior = byId.get(id);
             // The library folder (named exactly by id) wins over timestamped manual exports.
             if (prior == null || d.getName().equals(Integer.toString(id))) byId.put(id, c);
         } catch (Exception ignored) {}

@@ -24,6 +24,14 @@ public final class ConverterTest {
   ok("Body".equals(p0.get("renderer"))&&Fixtures.number(p0,"bones")==1&&Json.obj(p0.get("skeleton"),"skeleton").get("bones").equals(Collections.singletonList("BoneA")),"renderer and skeleton");
   for(File out:outputs){Map<String,Object> p=Fixtures.part(out,0);ok(Fixtures.number(p,"vertices")==3&&Fixtures.number(p,"indices")==6,"vertices shared by both variants, two index ranges");ok(Fixtures.data(out,0,"uv").getFloat(4)==.25f,"V flip");
    ok(Fixtures.data(out,0,"weights").getFloat(0)==1,"normalized weights");ok(Fixtures.view(out,Json.obj(Fixtures.material(out,"Material0").get("main"),"main").get("data")).getInt(0)==0x090a0b0c,"row flip");}
+  // Vertices the author left without weights take the nearest weighted vertex's (old vertex 2 is first in the index
+  // buffer, so compact vertex 0; its nearest is old vertex 1); a part with no weights at all is refused.
+  {byte[] holes=blend.array().clone();ByteBuffer h=ByteBuffer.wrap(holes).order(ByteOrder.LITTLE_ENDIAN);h.putFloat(64,0);h.putFloat(32,1).putFloat(36,3);put(src,"Blend.buf",holes);
+   StringBuilder hl=new StringBuilder();File holed=new File(root,"holes");ModelConverter.convert(src,bones,holed,10000107,"",false,dds->rgba,hl);ByteBuffer w=Fixtures.data(holed,0,"weights");
+   ok(w.getFloat(0)==.25f&&w.getFloat(4)==.75f&&w.getFloat(32)==1&&hl.toString().contains("Body：1 个顶点没有权重"),"unweighted vertex repaired: "+w.getFloat(0)+" "+hl);
+   for(int i=0;i<3;i++)h.putFloat(i*32,0);h.putFloat(36,0);put(src,"Blend.buf",holes);
+   try{ModelConverter.convert(src,bones,new File(root,"none"),10000107,"",false,dds->rgba,new StringBuilder());ok(false,"no weights accepted");}catch(IllegalArgumentException e){ok(e.getMessage().contains("所有顶点的权重都是 0"),e.getMessage());}
+   put(src,"Blend.buf",blend.array());}
   // GIMI binds both Blend and Texcoord to vb1 in separate override stages.
   put(src,"mod.ini",ini.replace("vb2 = ResourceTexcoord","vb1 = ResourceTexcoord"));
   outputs.addAll(ModelConverter.convert(src,bones,new File(root,"shared_slot"),10000107,"",false,dds->rgba,new StringBuilder()));
@@ -83,6 +91,6 @@ public final class ConverterTest {
   for(String j:new String[]{"{\"a\":1,\"a\":2}","[01]","[1,]","{\"a\":1} x","[\"\u0001\"]","[1e999]"}){bad=false;try{Json.parse(j);}catch(IllegalArgumentException e){bad=true;}ok(bad,"JSON accepted: "+j);}
   Object third=((List<?>)Json.parse(Json.write(Arrays.<Object>asList(1f/3,-2.5e-7f)))).get(0);ok(Json.finite(third,"f")==1f/3,"float round trip");
   ok(Json.parse("{\"s\":\"\\u6a21\\\"\"}").equals(Collections.singletonMap("s","模\"")),"escapes");
-  System.out.println("Java converter: PASS (GIBox model.json + model.bin, shared vb1, nested commands, inherited auto draw, component scopes, explicit overrides, real ambiguity, merged variants, conditional streams, targets, atomic replace keeping runtime files per character, skeleton.json, no-library conversion, strict JSON, binary interoperability)");
+  System.out.println("Java converter: PASS (unweighted vertices repaired, GIBox model.json + model.bin, shared vb1, nested commands, inherited auto draw, component scopes, explicit overrides, real ambiguity, merged variants, conditional streams, targets, atomic replace keeping runtime files per character, skeleton.json, no-library conversion, strict JSON, binary interoperability)");
  }
 }

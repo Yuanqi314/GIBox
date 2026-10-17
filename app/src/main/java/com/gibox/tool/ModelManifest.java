@@ -20,6 +20,17 @@ public final class ModelManifest {
     public final Map<String, List<Integer>> vars = new LinkedHashMap<>();
     public final List<Map<String, Integer>> combos = new ArrayList<>();
     public int defaultCombo;
+    /** A part's target is a lower level of detail (converted against a skeleton library recorded while the character was
+     *  still loading, before 0.6.5): the bone indices do not fit the full model, it has to be converted again. Else "". */
+    public String lodMesh = "";
+
+    /** A lower level of detail by mesh name (Body_LOD1, Body_LOD3 …); the plain name and _LOD0 are the full mesh (core.hpp lowerLod). */
+    public static boolean lowerLod(String mesh) {
+        if (mesh == null) return false;
+        String o = mesh.toLowerCase(java.util.Locale.ROOT).replace("(clone)", "").replace(" instance", "").trim();
+        int p = o.lastIndexOf("_lod"); if (p < 0 || p + 4 >= o.length()) return false;
+        String d = o.substring(p + 4); return d.matches("[0-9]+") && !d.matches("0+");
+    }
 
     public static boolean exists(File dir) { return new File(dir, "model.json").isFile(); }
 
@@ -46,6 +57,11 @@ public final class ModelManifest {
                 Json.check(combo.size() == r.vars.size(), "款式组合必须给每个变量赋值"); r.combos.add(combo);
             }
             r.defaultCombo = (int) Json.integer(vo.get("default"), "variants.default", 0, r.combos.size() - 1);
+        }
+        if (m.get("parts") instanceof List) for (Object p : (List<?>) m.get("parts")) {
+            if (!(p instanceof Map) || !(((Map<?, ?>) p).get("target") instanceof Map)) continue;
+            Object mesh = ((Map<?, ?>) ((Map<?, ?>) p).get("target")).get("mesh");
+            if (mesh instanceof String && lowerLod((String) mesh)) { r.lodMesh = (String) mesh; break; }
         }
         Object s = m.get("source");
         if (s != null) { Map<String, Object> so = Json.obj(s, "source"); if (so.get("path") instanceof String) r.sourcePath = (String) so.get("path"); if (so.get("signature") instanceof String) r.sourceSignature = (String) so.get("signature"); }

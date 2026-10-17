@@ -275,6 +275,32 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   lib.tick(601200);lib.tick(612000);lib.tick(623000);auto log=text(logFile);auto at=log.find("bone-library-error 10000107: No exportable renderer: 1 renderers, 0 still loading, 1 with bone/bindpose counts that differ");
   assert(at!=std::string::npos&&log.find("bone-library-error",at+1)==std::string::npos&&log.find("Body 1 bones / 2 bindposes")!=std::string::npos);
   Ptr good=f->renderer(original);f->world(good);lib.tick(634000);assert(exists(shared6+"/skeletons/10000107/skeleton.json"));lib.shutdown();assert(f->handles.empty());}
+ // 18. Why a model waits: before the character is known the scan has not started; then the same mesh at another level of
+ //     detail is named with the number that differs (status and log); once LOD0 shows, it attaches.
+ {std::string media7=root+"/media7",shared7=media7+"/"+pkg+"/GIBox",models7=shared7+"/models",logFile=shared7+"/GIBox Log.txt";writeModel(models7+"/A",Spec().withTarget(fixture::target("Body")));
+  std::filesystem::create_directories(shared7);write(shared7+"/control.json","{\"enabled\":true,\"selected\":[\"A\"]}");
+  Ptr lod=f->renderer(f->mesh("Body_LOD1",2));f->world(lod);f->scene={lod};store<uint32_t>(f->manager+0x288,0);
+  Runtime why(e,pkg,root+"/private7",media7,false);why.tick(700000);auto st=JsonParser(text(shared7+"/status.json")).parse();
+  assert(st.at("state").string=="waiting"&&st.at("detail").string.find("还没认出当前操控的角色")!=std::string::npos&&st.at("detail").string.find("任一处")==std::string::npos);
+  store<uint32_t>(f->manager+0x288,7);why.tick(700600);st=JsonParser(text(shared7+"/status.json")).parse();auto log=text(logFile);
+  assert(st.at("state").string=="waiting"&&st.at("detail").string.find("和导入时不同（顶点 3→2）")!=std::string::npos&&meshOf(lod)==f->obj[lod].mesh);
+  assert(log.find("runtime INFO character none")!=std::string::npos&&log.find("runtime INFO character 10000107")!=std::string::npos);
+  assert(log.find("wait-reason A: 当前角色 10000107，它的渲染器 1 个，全场景 1 个")!=std::string::npos&&log.find("Part0 要 Body / Body（顶点 3，子网格 1，骨骼 1）：同名 Mesh 数字不同 Body / Body_LOD1（顶点 2，子网格 1，骨骼 1）")!=std::string::npos);
+  Ptr near=f->renderer(original);f->world(near);f->scene={lod,near};why.tick(701200);why.tick(701800);
+  assert(JsonParser(text(shared7+"/status.json")).parse().at("state").string=="active"&&meshOf(near)!=original);why.shutdown();assert(f->handles.empty());}
+ // 19. Lower levels of detail. Right after loading the character shows one (Body_LOD3): the skeleton library waits and
+ //     records the full mesh. A model converted against a lower LOD is not built, also when that LOD is on screen, and
+ //     says it needs re-converting. A bone-export count already in control.json at start-up is not a request.
+ {std::string media8=root+"/media8",shared8=media8+"/"+pkg+"/GIBox",models8=shared8+"/models",bones8=shared8+"/skeletons";writeModel(models8+"/L",Spec().withTarget(fixture::target("Body_LOD3")));
+  std::filesystem::create_directories(shared8);write(shared8+"/control.json","{\"enabled\":true,\"selected\":[\"L\"],\"exportBones\":3}");
+  Ptr low=f->mesh("Body_LOD3");Ptr w=f->renderer(low);f->world(w);f->scene={w};
+  {Runtime lod(e,pkg,root+"/private8",media8,false);lod.tick(800000);lod.tick(800600);auto st=JsonParser(text(shared8+"/status.json")).parse();
+   assert(!exists(bones8+"/10000107/skeleton.json")&&meshOf(w)==low&&st.at("state").string=="error"&&st.at("detail").string.find("低精度模型 Body_LOD3")!=std::string::npos);
+   f->obj[w].mesh=original;lod.tick(802000);lod.tick(802600);auto lib=text(bones8+"/10000107/skeleton.json");
+   assert(lib.find("\"mesh\":\"Body\"")!=std::string::npos&&lib.find("LOD")==std::string::npos);lod.shutdown();}
+  {Runtime again(e,pkg,root+"/private8b",media8,false);again.tick(803000);again.tick(803600);again.shutdown();}
+  for(auto& d:std::filesystem::directory_iterator(bones8))assert(d.path().filename()=="10000107");
+  assert(f->handles.empty());}
  std::filesystem::remove_all(root);
- std::cout<<"Native runtime: PASS (GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
+ std::cout<<"Native runtime: PASS (lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }

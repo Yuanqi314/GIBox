@@ -53,6 +53,9 @@ Texture decodeDds(const Bytes& b);
 // The renderer name is informational. Same rule as PC importers matching buffers by hash.
 struct Fingerprint {std::string renderer,mesh;unsigned vertices=0,submeshes=0,bones=0;};
 inline std::string meshName(std::string s){std::string o;for(unsigned char c:s)o+=char(c>='A'&&c<='Z'?c+32:c);for(const char* junk:{"(clone)"," instance"}){size_t p;while((p=o.find(junk))!=o.npos)o.erase(p,std::strlen(junk));}return normalize(trim(o));}
+// A lower level of detail by name (Body_LOD1, Body_LOD3 …). The plain name and _LOD0 are the full mesh.
+inline bool lowerLod(const std::string& s){std::string o;for(unsigned char c:s)o+=char(c>='A'&&c<='Z'?c+32:c);for(const char* junk:{"(clone)"," instance"}){size_t p;while((p=o.find(junk))!=o.npos)o.erase(p,std::strlen(junk));}o=trim(o);
+ auto p=o.rfind("_lod");if(p==o.npos||p+4>=o.size()||o.find_first_not_of("0123456789",p+4)!=o.npos)return false;return o.find_first_not_of('0',p+4)!=o.npos;}
 inline bool matches(const Fingerprint& t,const Fingerprint& f){return t.vertices==f.vertices&&t.submeshes==f.submeshes&&t.bones==f.bones&&(t.mesh.empty()?normalize(t.renderer)==normalize(f.renderer):meshName(t.mesh)==meshName(f.mesh));}
 
 // Switchable variants of a model (GIBox model format, "variants"): variables, their combinations, the default one.

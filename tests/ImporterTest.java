@@ -108,6 +108,18 @@ public class ImporterTest {
   File logs=new File(base,"logs");AppLog.write(logs,AppLog.threshold("warning"),"importer",AppLog.INFO,"hidden");AppLog.write(logs,AppLog.threshold("warning"),"importer",AppLog.ERROR,"shown");AppLog.write(logs,AppLog.threshold("disabled"),"importer",AppLog.ERROR,"never");
   String text=read(new File(logs,AppLog.FILE));ok(!text.contains("hidden")&&text.contains(" importer ERROR shown")&&!text.contains("never")&&AppLog.threshold("debug")==AppLog.DEBUG&&AppLog.threshold("?")==AppLog.INFO,"log levels");
   ok(AppLog.tail(new File(logs,AppLog.FILE),1000).equals(text),"tail");
-  System.out.println("Importer: PASS (mod names, 0.5 → 0.6 migration, unreadable models listed, 7.1 character table, search by ID/name, recommended character first, folder/zip staging, picker prepare/commit/discard, zip-slip guard, bone-library and ID conversion, character change, Mods list, delete, XXMI log line and levels)");
+  // 12. Lower levels of detail: a library record made right after loading (Body_LOD3) is not used for an import, a
+  //     conversion against it is refused, and a model converted against one is listed as needing a re-conversion.
+  File lodBones=new File(base,"骨骼LOD");Fixtures.skeleton(new File(lodBones,"10000107"),10000107,"Scene/Avatar_Girl_Catalyst_Citlali/Bip001",new String[]{"body","face"},new String[]{"Root","Spine"},Collections.singletonMap("body",Fixtures.target("Body_LOD3",5246,2,2)));
+  ok(ModLibrary.recorded(lodBones,10000107).lodMesh.equals("Body_LOD3")&&ModLibrary.recorded(bones,10000107).lodMesh.isEmpty(),"LOD record found");
+  StringBuilder lodLog=new StringBuilder();r=Importer.convert(staged,10000107,models,lodBones,dec,lodLog);
+  ok(!r.library&&Fixtures.part(pack,0).get("skeleton")==null&&lodLog.toString().contains("低精度模型 Body_LOD3"),"LOD library not used: "+lodLog);
+  try{ModelConverter.bones(new File(lodBones,"10000107"),10000107);ok(false,"LOD record accepted");}catch(IllegalArgumentException e){ok(e.getMessage().contains("低精度模型 Body_LOD3"),e.getMessage());}
+  Importer.convert(staged,10000107,models,bones,dec,new StringBuilder());
+  File packJson=new File(pack,"model.json");String full=read(packJson);ok(full.contains("\"mesh\":\"Body\""),"target mesh written");
+  Files.write(packJson.toPath(),full.replace("\"mesh\":\"Body\"","\"mesh\":\"Body_LOD3\"").getBytes(StandardCharsets.UTF_8));
+  Importer.Mod pk=null;for(Importer.Mod m:Importer.list(mods,models))if(m.name.equals("Pack"))pk=m;
+  ok(pk!=null&&pk.outdated&&pk.reason.contains("Body_LOD3")&&ModelManifest.read(pack).lodMesh.equals("Body_LOD3")&&!ModelManifest.lowerLod("Body_LOD0")&&ModelManifest.lowerLod("body_lod1 (Clone)"),"LOD model listed for re-conversion");
+  System.out.println("Importer: PASS (lower-LOD library records and models, mod names, 0.5 → 0.6 migration, unreadable models listed, 7.1 character table, search by ID/name, recommended character first, folder/zip staging, picker prepare/commit/discard, zip-slip guard, bone-library and ID conversion, character change, Mods list, delete, XXMI log line and levels)");
  }
 }

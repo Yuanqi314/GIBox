@@ -16,7 +16,7 @@ import androidx.compose.runtime.setValue
 import java.io.File
 import kotlin.concurrent.thread
 
-const val VERSION = "0.6.3"
+const val VERSION = "0.6.6"
 const val BUILD_ID = "2b4dd73155e845a2ef698ec500509baa4eb3bfa8"
 private const val LOGGER = "importer"
 
