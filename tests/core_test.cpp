@@ -16,10 +16,14 @@ template<class F>void refused(const std::string& dir,F spec,const char* why){Spe
  try{loadModelFile(dir);}catch(const std::exception& ex){message=ex.what();}
  if(message.find(why)==std::string::npos){std::cerr<<"expected \""<<why<<"\", got \""<<message<<"\"\n";assert(false);}}
 static void floatAt(Bytes& b,size_t p,float f){std::memcpy(b.data()+p,&f,4);}
+// A version 2 model: an always-drawn draw plus one drawn only for $halo=3 with $legs=1; the skeleton carries parents.
+Spec v2(){Spec s;s.version=2;s.variants="{\"vars\":[{\"name\":\"$halo\",\"values\":[0,1,3]},{\"name\":\"$legs\",\"values\":[0,1]}],\"default\":{\"$halo\":0,\"$legs\":1}}";
+ s.draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0},{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":1,\"when\":{\"vars\":[\"$halo\",\"$legs\"],\"allow\":[[3,1]]}}]"};
+ s.edit=[](std::string& j){replaceIn(j,"\"bones\":[\"BoneA\"]","\"bones\":[\"BoneA\"],\"parents\":[-1]");};return s;}
 int main(int argc,char**argv){
  // Converter output check (called by the Java tests): the folder must load exactly as the runtime will load it.
- if(argc==2){std::string p=argv[1];auto m=loadModelFile(p);auto s=readSummary(p);assert(m->parts.size()==s.parts.size()&&!m->parts.empty()&&m->variants.combos.size()>=1);
-  for(auto& part:m->parts){assert(part.subs.size()==m->variants.combos.size()&&part.rows.size()==part.subs.size());for(auto& rows:part.rows)for(auto& r:rows)assert(m->materials.count(r.name));}
+ if(argc==2){std::string p=argv[1];auto m=loadModelFile(p);auto s=readSummary(p);assert(m->parts.size()==s.parts.size()&&!m->parts.empty()&&m->variants.combos.empty());
+  for(auto& part:m->parts){assert(!part.draws.empty());for(auto& d:part.draws)assert(m->materials.count(d.row.name));std::vector<Submesh> subs;std::vector<Material> rows;activeDraws(part.draws,m->variants.defaults,subs,rows);assert(!subs.empty());}
   if(exists(p+"/learned.json"))learnedOf(JsonParser(text(p+"/learned.json")).parse());
   return 0;}
  char temp[]="/tmp/gibox-core-XXXXXX";assert(mkdtemp(temp));std::string root=temp;
@@ -29,7 +33,10 @@ int main(int argc,char**argv){
   auto m=loadModelFile(dir);auto& p=m->parts.at(0);
   assert(m->id==10000107&&m->generation=="1"&&p.spec.name=="Part0"&&p.spec.group=="Body"&&p.spec.bones==1&&p.geo.n==3&&p.geo.ni==3&&u32(p.geo.idx()+8)==2);
   assert(p.used==std::set<unsigned>{0}&&p.sourceBones==std::vector<std::string>{"BoneA"}&&p.sourceBinds.size()==64&&f32(p.sourceBinds.data())==1);
-  assert(m->variants.combos.size()==2&&m->variants.def==1&&p.subs[1][0].count==0&&p.rows[1][0].slot==2&&pick(m->variants,{})==1&&pick(m->variants,{{"$swap",0}})==0);
+  // Version 1 combinations read as draws that know their combinations; an unlisted assignment is the default one.
+  {std::vector<Submesh> subs;std::vector<Material> rows;assert(m->variants.combos.size()==2&&m->variants.defaults==(Assignment{{"$swap",1}})&&p.draws.size()==2&&pick(m->variants,{})==(Assignment{{"$swap",1}}));
+   activeDraws(p.draws,pick(m->variants,{}),subs,rows);assert(subs.size()==1&&subs[0].count==0&&rows[0].slot==2);
+   activeDraws(p.draws,pick(m->variants,Assignment{{"$swap",0}}),subs,rows);assert(subs.size()==1&&subs[0].count==3&&rows[0].slot==0&&pick(m->variants,Assignment{{"$swap",7}})==(Assignment{{"$swap",1}}));}
   auto& mat=m->materials.at("Material0");assert(!mat.original&&mat.main&&mat.main->w==1&&mat.light&&!mat.normal);
   auto sum=readSummary(dir);assert(sum.parts.size()==1&&sum.parts[0].hasTarget&&sum.parts[0].target.mesh=="Body"&&sum.parts[0].renderer=="Body");
   // diffuseOnly drops the extra maps; a model by name needs names in the right shape
@@ -38,7 +45,7 @@ int main(int argc,char**argv){
  // ---- the checks: every one names what is wrong
  auto bad=root+"/bad";
  refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"gibox-model","other-model");};},"not a GIBox model");
- refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"\"version\":1","\"version\":2");};},"unsupported version");
+ refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"\"version\":1","\"version\":3");};},"unsupported version");
  refused(bad,[](Spec& s){s.character(9999);},"Character ID out of range");
  refused(bad,[](Spec& s){s.character(0);},"needs a character ID or names");
  refused(bad,[](Spec& s){s.character(0,{"Citlali"});},"Character name");
@@ -60,6 +67,19 @@ int main(int argc,char**argv){
  refused(bad,[](Spec& s){s.variants="{\"vars\":[{\"name\":\"$a\",\"values\":[0,1]}],\"combos\":[{}],\"default\":0}";},"must set every variable");
  refused(bad,[](Spec& s){s.variants="{\"vars\":[],\"combos\":[{\"$b\":1}],\"default\":0}";},"Variant undeclared: $b");
  refused(bad,[](Spec& s){s.variants="{\"vars\":[],\"combos\":[{}],\"default\":3}";},"\"default\" out of range");
+ // ---- version 2: each draw says when it is drawn; no combination list, no limit of 32
+ {Spec s=v2();fixture::writeModel(root+"/v2",s);auto m=loadModelFile(root+"/v2");auto& p=m->parts.at(0);std::vector<Submesh> subs;std::vector<Material> rows;
+  assert(m->variants.combos.empty()&&m->variants.defaults==(Assignment{{"$halo",0},{"$legs",1}})&&p.draws.size()==2&&p.draws[0].when.vars.empty()&&p.sourceParents==std::vector<int>{-1});
+  activeDraws(p.draws,pick(m->variants,{}),subs,rows);assert(subs.size()==1&&subs[0].count==3);
+  activeDraws(p.draws,pick(m->variants,Assignment{{"$halo",3}}),subs,rows);assert(subs.size()==2&&rows[1].slot==1);
+  activeDraws(p.draws,pick(m->variants,Assignment{{"$halo",3},{"$legs",0}}),subs,rows);assert(subs.size()==1);
+  assert(pick(m->variants,Assignment{{"$halo",5},{"$nope",1}})==m->variants.defaults);}
+ refused(bad,[](Spec& s){s=v2();replaceIn(s.draws[0],"[\"$halo\",\"$legs\"]","[\"$halo\",\"$wings\"]");},"undeclared variable");
+ refused(bad,[](Spec& s){s=v2();replaceIn(s.draws[0],"[[3,1]]","[[4,1]]");},"when value not listed for $halo");
+ refused(bad,[](Spec& s){s=v2();replaceIn(s.draws[0],"[[3,1]]","[[3]]");},"when tuple size");
+ refused(bad,[](Spec& s){s=v2();replaceIn(s.variants,",\"$legs\":1}","}");},"Variant default must set every variable");
+ refused(bad,[](Spec& s){s=v2();s.draws[0]="[]";},"Invalid \"draws\" list");
+ refused(bad,[](Spec& s){s=v2();s.edit=[](std::string& j){replaceIn(j,"\"bones\":[\"BoneA\"]","\"bones\":[\"BoneA\"],\"parents\":[0]");};},"bone parent out of range");
  refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"\"name\":\"Part0\"","\"name\":\"../x\"");};},"Part name");
  refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"\"bones\":[\"BoneA\"]","\"bones\":[\"BoneA\",\"BoneB\"]");};},"Invalid \"bones\" list");
  refused(bad,[](Spec& s){s.withTarget("{\"renderer\":\"Body\",\"vertices\":0,\"submeshes\":1,\"bones\":1}");},"\"vertices\" out of range");
@@ -77,7 +97,21 @@ int main(int argc,char**argv){
  assert(crc32(reinterpret_cast<const uint8_t*>("123456789"),9)==0xcbf43926u);
  // ---- shared building blocks
  assert(config(" 10000107\n")==10000107);rejects([]{config("10000107 evil");});
- Bytes bind(64);for(int i=0;i<4;i++)floatAt(bind,i*20,1);auto mapping=mapBones({"Bone_A"},{"bonea"},bind,bind,{0});assert(mapping[0]==0);rejects([&]{mapBones({"Bone_A"},{"bonea","Bone-A"},bind,Bytes(128),{0});});auto changed=bind;floatAt(changed,0,2);rejects([&]{mapBones({"Bone_A"},{"bonea"},bind,changed,{0});});
+ Bytes bind(64);for(int i=0;i<4;i++)floatAt(bind,i*20,1);auto mapping=mapBones({"Bone_A"},{"bonea"},bind,bind,{0}).target;assert(mapping[0]==0);rejects([&]{mapBones({"Bone_A"},{"bonea","Bone-A"},bind,Bytes(128),{0});});auto changed=bind;floatAt(changed,0,2);rejects([&]{mapBones({"Bone_A"},{"bonea"},bind,changed,{0});});
+ // Bone matching in tiers: an exact name wins over a looser one; same names are told apart by their ancestors;
+ // a helper bone the target lacks hands its weight to its nearest matching ancestor; a body bone never does.
+ {auto binds=[&](size_t n){Bytes b;for(size_t i=0;i<n;i++)b.insert(b.end(),bind.begin(),bind.end());return b;};auto why=[&](auto f){std::string m;try{f();}catch(const std::exception& e){m=e.what();}return m;};
+  assert(mapBones({"Bone A"},{"bone_a","Bone A"},bind,binds(2),{0}).target[0]==1);
+  std::vector<std::string> src{"Root","L","Tip","R","Tip"},dst{"Root","R","Tip","L","Tip"};std::vector<int> sp{-1,0,1,0,3},dp{-1,0,1,0,3};
+  auto m=mapBones(src,dst,binds(5),binds(5),{2,4},sp,dp);assert(m.target[2]==4&&m.target[4]==2&&m.moved.empty());
+  assert(why([&]{mapBones(src,dst,binds(5),binds(5),{2});}).find("Bone name ambiguous: Tip")==0);
+  std::vector<std::string> hs{"Bip001 Head","+HairBack01","+HairBack02"};std::vector<int> hp{-1,0,1};
+  auto h=mapBones(hs,{"Bip001 Head"},binds(3),bind,{0,2},hp,{-1});assert(h.target[2]==0&&h.moved.size()==1&&h.moved[0].first==2);
+  assert(why([&]{mapBones({"Bip001 Head","Bip001 L Hand"},{"Bip001 Head"},binds(2),bind,{1},{-1,0},{-1});}).find("Bone name missing: Bip001 L Hand")==0);
+  assert(why([&]{mapBones(hs,{"Bip001 Head"},binds(3),bind,{2});}).find("Bone name missing: +HairBack02")==0);}
+ // Weights after mapping: two source bones that became one target bone are added together; largest first; sum 1.
+ {Skin s{Bytes(32),{0,1,2}};floatAt(s.data,0,.2f);floatAt(s.data,4,.5f);floatAt(s.data,8,.3f);put32(s.data.data()+16,0);put32(s.data.data()+20,1);put32(s.data.data()+24,2);
+  remap(s,{3,5,3});assert(f32(s.data.data())==.5f&&u32(s.data.data()+16)==3&&f32(s.data.data()+4)==.5f&&u32(s.data.data()+20)==5&&f32(s.data.data()+8)==0&&f32(s.data.data()+12)==0);}
  {Skin s{Bytes(32),{0}};floatAt(s.data,0,1);remap(s,mapping);assert(u32(s.data.data()+16)==0);put32(s.data.data()+16,5);rejects([&]{remap(s,mapping);});}
  auto j=JsonParser("{\"enabled\":true,\"selected\":[\"\\u6a21\\u578b\",\"\\ud83d\\ude00\"],\"cycle\":2}").parse();assert(j.at("selected").array[0].string=="模型");assert(j.at("cycle").number==2);rejects([]{JsonParser("{\"a\":1,\"a\":2}").parse();});rejects([]{JsonParser("[01]").parse();});rejects([]{JsonParser("\"\\ud800\"").parse();});
  Bytes note(32);put32(note.data(),4);put32(note.data()+4,16);put32(note.data()+8,3);put32(note.data()+12,0x00554e47);for(int i=0;i<16;i++)note[16+i]=i;Elf64_Phdr ph{};ph.p_type=PT_NOTE;ph.p_memsz=note.size();auto id=loadedBuildId(reinterpret_cast<Ptr>(note.data()),&ph,1,sizeof(ph));assert(id=="000102030405060708090a0b0c0d0e0f"&&id!=abi::buildId);ph.p_memsz=16;rejects([&]{loadedBuildId(reinterpret_cast<Ptr>(note.data()),&ph,1,sizeof(ph));});

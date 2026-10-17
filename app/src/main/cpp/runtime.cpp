@@ -109,6 +109,15 @@ std::string loadedBuildId(Ptr base,const void* headers,size_t count,size_t strid
  throw std::runtime_error("GNU Build ID not found");
 }
 
+// A bounded cache that keeps what is in use: entries go into the current generation; when it is full it becomes the
+// previous one (the one before is dropped), and a hit in the previous generation moves the entry back. Keys carry the
+// object's identity (address plus native object or instance id), so a reused address is a different key.
+template<class K,class V> struct Recent {size_t limit;std::map<K,V> now,before;explicit Recent(size_t l):limit(l){}
+ V* find(const K& k){auto it=now.find(k);if(it!=now.end())return &it->second;auto b=before.find(k);if(b==before.end())return nullptr;V v=std::move(b->second);before.erase(b);return &put(k,std::move(v));}
+ V& put(const K& k,V v){if(now.size()>=limit){before.swap(now);now.clear();}return now[k]=std::move(v);}
+ bool has(const K& k)const{return now.count(k)||before.count(k);}
+ void clear(){now.clear();before.clear();}
+};
 struct Runtime::Impl {
  Engine e;std::string pkg,priv,shared,modelRoot,boneRoot;
  // ---- shared with the worker (guarded by sm)
@@ -120,20 +129,20 @@ struct Runtime::Impl {
  // ---- game thread only
  struct Owned {std::vector<Ptr> objects;std::vector<uint32_t> handles;};
  struct MatTex {bool original=true;Ptr main=0,light=0,normal=0;};
- struct BuiltPart {std::string name;Ptr mesh=0;Fingerprint target;std::vector<std::string> bones;Bytes indices;std::vector<std::vector<Submesh>> subs;std::vector<std::vector<Material>> rows;
+ struct BuiltPart {std::string name;Ptr mesh=0;Fingerprint target;std::vector<std::string> bones;Bytes indices;std::vector<DrawSpec> draws;std::vector<Submesh> subs;std::vector<Material> rows;  // all draws; those in effect
   Ptr originMesh=0,originMaterials=0;
   int bindable=-1;};  // our mesh carries the same number of bone-name hashes as the original (checked once)  // the asset's own mesh and materials, from the first attachment (pinned by the set)
- struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;Variants variants;bool originalMaterials=false,built=false;unsigned combo=0;uint64_t used=0;};
+ struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;Variants variants;bool originalMaterials=false,built=false;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
  // source: for a renderer the game created from one of ours (adopted), the renderer whose material clones it shows.
  struct Attachment:Owned {Ptr renderer=0,native=0,original=0,originalMaterials=0,source=0;Set* set=nullptr;size_t part=0;bool adopted=false;std::map<std::string,Ptr> clones;};
  struct Seen {Ptr renderer=0,mesh=0;Fingerprint fp;};
  struct Character {Ptr entity=0;unsigned runtime=0,config=0;} ch;
  ControlState ctl;std::vector<ModelInfo> models;long long exportSeen=0;
  std::vector<std::unique_ptr<Set>> sets;std::map<Ptr,std::unique_ptr<Attachment>> attachments;std::vector<Seen> seen;
- std::map<std::pair<Ptr,uint32_t>,Fingerprint> fpCache;std::set<std::pair<Ptr,Ptr>> skipped;
+ Recent<std::pair<Ptr,uint32_t>,Fingerprint> fpCache{8192};std::set<std::pair<Ptr,Ptr>> skipped;
  std::map<std::string,std::pair<std::string,std::string>> failed;            // path -> generation, message
  std::map<std::string,std::map<std::string,Fingerprint>> learned;            // path -> part -> target from the world character
- std::map<std::string,Ptr> learnTried;std::set<unsigned> library;std::map<std::string,unsigned> learnedId;std::map<std::pair<Ptr,Ptr>,std::vector<std::string>> chains;std::map<std::pair<Ptr,Ptr>,std::string> rendererNames;std::map<unsigned,uint64_t> libraryRetry;std::map<unsigned,std::string> libraryError;std::map<std::string,unsigned> attempts;  // path|generation -> failed builds
+ std::map<std::string,Ptr> learnTried;std::set<unsigned> library;std::map<std::string,unsigned> learnedId;Recent<std::pair<Ptr,Ptr>,std::vector<std::string>> chains{1024};Recent<std::pair<Ptr,Ptr>,std::string> rendererNames{2048};std::map<unsigned,uint64_t> libraryRetry;std::map<unsigned,std::string> libraryError;std::map<std::string,unsigned> attempts;  // path|generation -> failed builds
  std::map<std::string,std::string> staleNote;
  // Async hand-off: wanted models of the last tick (valid until the next tick's consume), GameObject class, Tick thread.
  std::vector<const ModelInfo*> wantedNow;std::vector<Ptr> spawnAttached;Ptr goClass=0;std::atomic<int> tickTid{0};std::atomic<uint64_t> offThread{0};uint64_t spawnOffThread=0,reclaims=0,guardAt=0,binds=0,passes=0;
@@ -142,7 +151,7 @@ struct Runtime::Impl {
  Owned handoffTypeRoots;uint64_t handoffTypeRetry=0;
  // Last scan, for the wait reason: world character's renderers, FindObjectsOfType results (-1: not run), renderers left
  // out because an attach failed on them; scanCount numbers the scans. Per model: scan number, reason, details logged, time.
- int scanWorld=0,scanAll=-1;unsigned scanSkipped=0;uint64_t scanCount=0;unsigned shownCharacter=~0u;bool controlSeen=false;std::string exportWait;
+ int scanWorld=0,scanAll=-1;unsigned scanSkipped=0;uint64_t scanCount=0;unsigned shownCharacter=~0u;uint64_t idleMs=60000,idleBudget=256ull<<20;bool controlSeen=false;std::string exportWait;
  struct WaitWhy {uint64_t scan=~0ull;std::string reason;bool plain=false;std::string logged;uint64_t loggedAt=0;};std::map<std::string,WaitWhy> waitWhy;
  Worker worker;  // last member: destroyed (joined) first, while everything it touches still exists
 
@@ -199,9 +208,9 @@ struct Runtime::Impl {
  std::vector<Ptr> worldRenderers(){if(!ch.entity)return {};Ptr o=load<Ptr>(ch.entity+0xf8);if(!o)return {};Ptr list=load<Ptr>(o+0x68);if(!list)return {};return pointers(list,64);}
  // Original mesh asset under a renderer, even while one of our meshes is attached to it.
  Ptr originalMesh(Ptr r){auto a=attachments.find(r);if(a!=attachments.end()&&a->second->native==load<Ptr>(r+0x10))return a->second->original;return e.get(abi::getMesh,r);}
- Fingerprint fingerprint(Ptr mesh){Ptr native=load<Ptr>(mesh+0x10);auto key=std::make_pair(native,load<uint32_t>(native+8));auto it=fpCache.find(key);if(it!=fpCache.end())return it->second;
+ Fingerprint fingerprint(Ptr mesh){Ptr native=load<Ptr>(mesh+0x10);auto key=std::make_pair(native,load<uint32_t>(native+8));if(auto* hit=fpCache.find(key))return *hit;
   Ptr data=load<Ptr>(native+0x48);Fingerprint f;f.mesh=name(mesh);f.vertices=load<uint32_t>(data+0x74);f.submeshes=load<uint32_t>(data+0xc0);f.bones=uint32_t(load<uint64_t>(data+0xe0));
-  if(fpCache.size()>16384){fpCache.clear();}fpCache[key]=f;return f;}
+  fpCache.put(key,f);return f;}
  // System.Type of SkinnedMeshRenderer, for FindObjectsOfType. Il2CppClass is laid out differently in this game, so the
  // offset B of byval_arg is found from two independent signs, read from the renderer class and from the element
  // classes of the renderer's own Material[] / Transform[] arrays:
@@ -268,13 +277,13 @@ struct Runtime::Impl {
  static std::string lodTarget(const ModelInfo& m){for(auto& p:m.parts)if(!p.lodMesh.empty())return p.lodMesh;return {};}
  bool outranked(const Attachment& a,const std::vector<Set*>& live){size_t mine=rank(a.set->path);for(Set* s:live)if(s->path!=a.set->path&&rank(s->path)<mine&&claims(*s,a.original))return true;return false;}
  // Lower-case name tokens of the transforms above a renderer's skeleton, e.g. avatar girl catalyst citlali.
- std::vector<std::string> chain(Ptr r){auto key=std::make_pair(r,load<Ptr>(r+0x10));auto it=chains.find(key);if(it!=chains.end())return it->second;std::vector<std::string> out;Owned tmp;
+ std::vector<std::string> chain(Ptr r){auto key=std::make_pair(r,load<Ptr>(r+0x10));if(auto* hit=chains.find(key))return *hit;std::vector<std::string> out;Owned tmp;
   try{Ptr ba=e.get(abi::getBones,r);if(ba){pin(tmp,ba);auto bones=pointers(ba,512);Ptr t=bones.empty()?0:bones[0];for(int i=0;i<24&&t&&alive(t);i++){for(auto& x:nameTokens(name(t)))out.push_back(x);t=e.get(abi::getParent,t);}}}catch(...){freeOwned(tmp);throw;}
-  freeOwned(tmp);if(chains.size()>2048)chains.clear();chains[key]=out;return out;}
+  freeOwned(tmp);chains.put(key,out);return out;}
  // Targets learned this session (also after a game update moved a part) take precedence over the folder's.
  bool targetsFor(const ModelInfo& m,std::vector<Fingerprint>& out){out.clear();auto l=learned.find(m.path);
   for(auto& p:m.parts){if(l!=learned.end()&&l->second.count(p.name))out.push_back(l->second.at(p.name));else if(p.hasTarget)out.push_back(p.target);else return false;}return true;}
- std::string rendererName(Ptr r){auto key=std::make_pair(r,load<Ptr>(r+0x10));auto it=rendererNames.find(key);if(it!=rendererNames.end())return it->second;if(rendererNames.size()>4096)rendererNames.clear();return rendererNames[key]=name(r);}
+ std::string rendererName(Ptr r){auto key=std::make_pair(r,load<Ptr>(r+0x10));if(auto* hit=rendererNames.find(key))return *hit;return rendererNames.put(key,name(r));}
  // Models imported without a bone library: the first renderer whose skeleton chain carries the model's
  // character name and whose renderer name is the part's group defines the part's target (world character first).
  // A model imported for a chosen character ID (model.json "character" holds that character's model name) learns the same way
@@ -284,7 +293,7 @@ struct Runtime::Impl {
   std::vector<Fingerprint> t;if(targetsFor(m,t))return;std::vector<Ptr> pool;try{pool=worldRenderers();}catch(const std::exception&){}for(auto& s:seen)pool.push_back(s.renderer);
   unsigned budget=8;bool changed=false;std::set<Ptr> world0;try{for(Ptr r:worldRenderers())world0.insert(r);}catch(const std::exception&){}
   for(auto& p:m.parts){if(p.hasTarget||learned[m.path].count(p.name))continue;
-   for(Ptr r:pool){if(!alive(r))continue;if(normalize(rendererName(r))!=normalize(p.group))continue;auto key=std::make_pair(r,load<Ptr>(r+0x10));if(!chains.count(key)){if(!budget)break;budget--;}{auto c=chain(r);if(!namesMatch(m.names,c)||(m.id&&std::find(c.begin(),c.end(),"avatar")==c.end()))continue;}
+   for(Ptr r:pool){if(!alive(r))continue;if(normalize(rendererName(r))!=normalize(p.group))continue;auto key=std::make_pair(r,load<Ptr>(r+0x10));if(!chains.has(key)){if(!budget)break;budget--;}{auto c=chain(r);if(!namesMatch(m.names,c)||(m.id&&std::find(c.begin(),c.end(),"avatar")==c.end()))continue;}
     Ptr mesh=originalMesh(r);if(!alive(mesh))continue;auto fp=fingerprint(mesh);if(lowerLod(fp.mesh))continue;fp.renderer=rendererName(r);learned[m.path][p.name]=fp;changed=true;log("target-learned",m.name+"/"+p.name+" by name "+m.names[0]+" ("+fp.mesh+", "+std::to_string(fp.vertices)+" vertices)");
     if(!m.id&&world0.count(r)&&ch.entity&&!learnedId.count(m.path)){learnedId[m.path]=ch.config;}
     break;}}
@@ -337,7 +346,7 @@ struct Runtime::Impl {
 
  // ---------------------------------------------------------------- build (one part per tick)
  void createTextures(Set& s){for(auto& kv:s.data->materials){MatTex t;t.original=kv.second.original;if(!t.original){t.main=makeTexture(s,*kv.second.main,false);if(kv.second.light)t.light=makeTexture(s,*kv.second.light,true);if(kv.second.normal)t.normal=makeTexture(s,*kv.second.normal,true);}s.textures[kv.first]=t;}}
- void setSubmeshes(Set& s,BuiltPart& bp){Owned tmp;try{auto& subs=bp.subs[s.combo];e.op(abi::setSubmeshCount,bp.mesh,int(subs.size()));
+ void setSubmeshes(Set& s,BuiltPart& bp){activeDraws(bp.draws,s.assignment,bp.subs,bp.rows);Owned tmp;try{auto& subs=bp.subs;e.op(abi::setSubmeshCount,bp.mesh,int(subs.size()));
    for(size_t i=0;i<subs.size();i++){Ptr a=arrayOf(tmp,arrayClasses.i32,bp.indices.data()+subs[i].start*4ull,subs[i].count,4);e.call<void>(abi::setSubmeshTriangles,bp.mesh,a,int(i),Ptr(0));}}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}
  void buildStep(Set& s,const Seen& tpl){
   auto& pf=s.data->parts[s.parts.size()];Ptr owner=tpl.renderer,ownerMesh=tpl.mesh;require(alive(owner)&&alive(ownerMesh),"Template renderer expired");
@@ -346,10 +355,13 @@ struct Runtime::Impl {
    Ptr boneArray=e.get(abi::getBones,owner);pin(tmp,boneArray);auto bones=pointers(boneArray,512);Ptr binds=e.get(abi::getBindposes,ownerMesh);pin(tmp,binds);require(length(binds,512)==bones.size(),"Target bone/bindpose count");
    std::vector<std::string> target;for(Ptr b:bones)target.push_back(name(b));Skin weights{pf.weights,pf.used};std::vector<int> mapping;
    if(pf.sourceBones.empty()){mapping.assign(pf.spec.bones,-1);for(unsigned i:weights.used){require(i<bones.size(),"Model uses bone "+std::to_string(i)+" but the target skeleton has "+std::to_string(bones.size()));mapping[i]=int(i);}}
-   else mapping=mapBones(pf.sourceBones,target,pf.sourceBinds,arrayBytes(binds,64,512),weights.used);
+   else{std::vector<int> parents;for(Ptr b:bones){Ptr up=alive(b)?e.get(abi::getParent,b):0;auto at=std::find(bones.begin(),bones.end(),up);parents.push_back(up&&at!=bones.end()?int(at-bones.begin()):-1);}
+    auto bm=mapBones(pf.sourceBones,target,pf.sourceBinds,arrayBytes(binds,64,512),weights.used,pf.sourceParents,parents);mapping=bm.target;
+    for(auto& mv:bm.moved){unsigned n=0;for(size_t v=0;v+32<=weights.data.size();v+=32)for(int j=0;j<4;j++)if(f32(weights.data.data()+v+4*j)>0&&u32(weights.data.data()+v+16+4*j)==mv.first){n++;break;}
+     log("bone-fallback",s.name+"/"+pf.spec.name+": "+pf.sourceBones[mv.first]+" -> "+target[size_t(mv.second)]+" ("+std::to_string(n)+" vertices; the game's skeleton has no such bone)");}}
    remap(weights,mapping);
    std::string report="source_index\ttarget_index\tsource_name\ttarget_name\n";for(size_t i=0;i<mapping.size();i++)report+=std::to_string(i)+'\t'+std::to_string(mapping[i])+'\t'+(pf.sourceBones.empty()?"#"+std::to_string(i):pf.sourceBones[i])+'\t'+(mapping[i]>=0?target[mapping[i]]:"")+"\n";writeLater(s.path+"/bonemap-"+pf.spec.name+".tsv",report);
-   BuiltPart bp;bp.name=pf.spec.name;bp.target=s.targets[s.parts.size()];bp.bones=target;bp.subs=pf.subs;bp.rows=pf.rows;bp.indices.assign(pf.geo.idx(),pf.geo.idx()+4ull*pf.geo.ni);
+   BuiltPart bp;bp.name=pf.spec.name;bp.target=s.targets[s.parts.size()];bp.bones=target;bp.draws=pf.draws;bp.indices.assign(pf.geo.idx(),pf.geo.idx()+4ull*pf.geo.ni);
    const auto& geo=pf.geo;bp.mesh=clone(s,ownerMesh);
    Ptr native=load<Ptr>(bp.mesh+0x10),data=load<Ptr>(native+0x48);require(data!=0&&load<uint64_t>(data+0xe0)==bones.size()&&load<uint32_t>(data+0xf8)==15,"Native Mesh layout");
    learnArrayClasses(ownerMesh);const auto& k=arrayClasses;
@@ -376,12 +388,15 @@ struct Runtime::Impl {
 
  Set* startSet(const ModelInfo& m,LoadResult& res,const std::vector<Fingerprint>& targets,uint64_t now){
   auto s=std::make_unique<Set>();s->name=m.name;s->path=m.path;s->generation=m.generation;s->id=m.id;s->data=res.data;s->targets=targets;s->variants=res.data->variants;s->originalMaterials=res.data->originalMaterials;
-  auto v=ctl.variables.find(s->name);s->combo=pick(s->variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second);s->used=now;Set* cur=s.get();sets.push_back(std::move(s));log("loading",m.name+" "+m.generation);return cur;}
+  // Estimated memory once built: vertex arrays and the clone's skin, indices (ours and the engine's), RGBA textures.
+  for(auto& p:res.data->parts){s->bytes+=uint64_t(p.geo.n)*(12+12+8+32+32);for(auto& c:p.channels)s->bytes+=c.second.size();s->bytes+=uint64_t(p.geo.ni)*8;}
+  for(auto& kv:res.data->materials)for(auto* t:{kv.second.main.get(),kv.second.light.get(),kv.second.normal.get()})if(t)s->bytes+=uint64_t(t->w)*t->h*4;
+  auto v=ctl.variables.find(s->name);s->assignment=pick(s->variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second);s->used=now;Set* cur=s.get();sets.push_back(std::move(s));log("loading",m.name+" "+m.generation);return cur;}
 
  // ---------------------------------------------------------------- attachments
  void applyMaterials(Attachment& a){Set& s=*a.set;auto& bp=s.parts[a.part];if(s.originalMaterials){e.set(abi::setMaterials,a.renderer,a.originalMaterials);return;}
   auto originals=pointers(a.originalMaterials,64);std::vector<Ptr> mats;
-  for(auto& row:bp.rows[s.combo]){auto key=row.name+"#"+std::to_string(row.slot);auto it=a.clones.find(key);Ptr m=0;if(it!=a.clones.end()&&alive(it->second))m=it->second;
+  for(auto& row:bp.rows){auto key=row.name+"#"+std::to_string(row.slot);auto it=a.clones.find(key);Ptr m=0;if(it!=a.clones.end()&&alive(it->second))m=it->second;
    else{require(row.slot<originals.size()&&alive(originals[row.slot]),"Original material missing");m=clone(a,originals[row.slot]);auto& t=s.textures.at(row.name);
     if(!t.original){e.set(abi::mainTexture,m,t.main);if(t.light)extraTexture(m,t.light,{"_LightMap","_LightMapTex","_Lightmap","_LightmapTex"});if(t.normal)extraTexture(m,t.normal,{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"});}a.clones[key]=m;}
    mats.push_back(m);}
@@ -473,8 +488,10 @@ struct Runtime::Impl {
   std::vector<Set*> old;for(auto& x:sets)if(x.get()!=&s&&x->path==s.path)old.push_back(x.get());for(Set* o:old)releaseSet(o);
   for(auto& m:moved){if(!alive(m.first)||!alive(m.second))continue;auto fp=fingerprint(m.second);for(size_t i=0;i<s.parts.size();i++)if(matches(s.parts[i].target,fp)){try{attach(m.first,m.second,s,i,now);}catch(const std::exception& ex){note(s.name+": "+ex.what());}break;}}
   attachSeen({&s},now);}
- void applyVariant(Set& s,unsigned combo){if(combo==s.combo||combo>=s.variants.combos.size())return;s.combo=combo;for(auto& bp:s.parts){setSubmeshes(s,bp);e.op(abi::meshUpload,bp.mesh,0);}
-  for(auto& kv:attachments){if(kv.second->set==&s)applyMaterials(*kv.second);}log("variant",s.name+" combo "+std::to_string(combo));}
+ // All or nothing: if a part or a renderer cannot take the new values, every part and renderer goes back to the old ones.
+ void applyVariant(Set& s,const Assignment& a){if(a==s.assignment)return;Assignment old=s.assignment;
+  auto apply=[&]{for(auto& bp:s.parts){setSubmeshes(s,bp);e.op(abi::meshUpload,bp.mesh,0);}for(auto& kv:attachments){if(kv.second->set==&s)applyMaterials(*kv.second);}};
+  s.assignment=a;try{apply();}catch(...){s.assignment=old;try{apply();}catch(const std::exception& ex){log("variant-error",s.name+": going back failed too: "+ex.what());}throw;}std::string text;for(auto& kv:a)text+=(text.empty()?"":" ")+kv.first+"="+std::to_string(kv.second);log("variant",s.name+" "+text);}
 
  // ---------------------------------------------------------------- async hand-off (JDIIHHFJKBM.AAKKKEMMMCA)
  // The game hands a freshly made, still inactive model GameObject to its entity here (party screen, detail page). Its
@@ -525,7 +542,7 @@ struct Runtime::Impl {
  // hashes. On a renderer we attached, a request for the original mesh or one of its LODs is answered with ours, so the
  // setter and the bone binding both use our mesh (whose hashes are the LOD0 template's): nothing to put back afterwards.
  // Everything else passes unchanged: no attachment, another mesh, another thread, or a call made inside our own work.
- bool knownMesh(Ptr native,Fingerprint& fp){auto it=fpCache.find({native,load<uint32_t>(native+8)});if(it!=fpCache.end()){fp=it->second;return true;}
+ bool knownMesh(Ptr native,Fingerprint& fp){if(auto* hit=fpCache.find({native,load<uint32_t>(native+8)})){fp=*hit;return true;}
   Ptr managed=e.call<Ptr>(abi::wrapperFor,native);if(!alive(managed)||load<Ptr>(managed+0x10)!=native)return false;fp=fingerprint(managed);return true;}
  bool bindable(Attachment& a){auto& bp=a.set->parts[a.part];if(bp.bindable>=0)return bp.bindable==1;if(!alive(a.original))return false;
   uint64_t ours=load<uint64_t>(load<Ptr>(bp.mesh+0x10)+0x90),theirs=load<uint64_t>(load<Ptr>(a.original+0x10)+0x90);bp.bindable=ours&&ours==theirs?1:0;
@@ -636,11 +653,13 @@ struct Runtime::Impl {
     catch(const std::exception& ex){libraryRetry[ch.config]=now+10000;auto& last=libraryError[ch.config];if(last!=ex.what()){last=ex.what();log("bone-library-error",std::to_string(ch.config)+": "+ex.what());}}}
    if(!ctl.enabled){if(!sets.empty()||!attachments.empty())releaseAll();status("disabled","",{},{});inTick=false;return;}
    auto wanted=chooseModels();wantedNow=wanted;std::set<std::string> wantedPaths;for(auto* m:wanted)wantedPaths.insert(m->path);
-   // Sets no longer wanted give their renderers back; at most three of them stay built for quick switching. Wanted sets
-   // stay built while unused, so the hand-off can attach them the moment the character appears.
+   // Sets no longer wanted give their renderers back and stay built for quick switching back: released after a minute
+   // unused, or sooner, oldest first, while they hold more than 256 MiB together. Wanted sets stay built while unused,
+   // so the hand-off can attach them the moment the character appears.
    for(auto& s:sets)if(!wantedPaths.count(s->path))detachSet(*s);
    {std::vector<Set*> idle;for(auto& s:sets){bool attached=false;for(auto& a:attachments)attached|=a.second->set==s.get();if(attached)s->used=now;else if(!wantedPaths.count(s->path))idle.push_back(s.get());}
-    std::sort(idle.begin(),idle.end(),[](Set* a,Set* b){return a->used>b->used;});for(size_t i=3;i<idle.size();i++)releaseSet(idle[i]);}
+    std::sort(idle.begin(),idle.end(),[](Set* a,Set* b){return a->used>b->used;});uint64_t kept=0;
+    for(Set* x:idle){if(now>x->used+idleMs||kept+x->bytes>idleBudget){releaseSet(x);}else{kept+=x->bytes;}}}
    std::vector<Set*> live;for(auto* m:wanted)if(Set* s=liveSet(*m))live.push_back(s);
    if(now>=discoverAt){discoverAt=now+500;discover(live,now);if(rendererTypeObject&&!goClass)try{seedGameObjectClass();}catch(const std::exception& ex){log("spawn-ready-error",ex.what());}for(auto* m:wanted)try{learnTargets(*m);}catch(const std::exception& ex){log("target-error",ex.what());}
     live.clear();for(auto* m:wanted)if(Set* s=liveSet(*m))live.push_back(s);}  // a moved target releases its set

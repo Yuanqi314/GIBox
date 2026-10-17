@@ -5,7 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** The switchable variables of a converted model (model.json "variants"), their values, and the default combination's values. */
+/** The switchable variables of a converted model (model.json "variants"), their values, and the values they start with. */
 public final class Variants {
     public final Map<String, List<Integer>> values = new LinkedHashMap<>();
     public final Map<String, Integer> defaults = new LinkedHashMap<>();
@@ -15,7 +15,7 @@ public final class Variants {
         try {
             ModelManifest m = ModelManifest.read(model);
             s.values.putAll(m.vars);
-            if (m.defaultCombo < m.combos.size()) s.defaults.putAll(m.combos.get(m.defaultCombo));
+            s.defaults.putAll(m.defaults);
         } catch (Exception e) { s.values.clear(); s.defaults.clear(); }
         return s;
     }

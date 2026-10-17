@@ -50,8 +50,8 @@ public class GimiPatternsTest {
   // Toggle mods: only variables that change the draw list become in-game variants ($active and $creditinfo do not).
   String toggle=ini("global $active\nglobal $creditinfo = 0\nglobal persist $swapvar = 0\n","$active = 1\n","","").replace("[TextureOverrideCitlaliHead]\nhash = 44444444\nmatch_first_index = 0\nib = ResourceCitlaliHeadIB\n","[TextureOverrideCitlaliHead]\nhash = 44444444\nmatch_first_index = 0\nif $swapvar == 0\nib = ResourceCitlaliHeadIB\nelse\nib = null\nendif\n")+"\n[KeySwap]\ncondition = $active == 1\nkey = x\ntype = cycle\n$swapvar = 0,1\n";
   File src=mod(base,"modToggle",toggle);File out=new File(base,"out/toggle");ModelConverter.convert(src,bones,out,10000107,new ModelConverter.Options().mapping(MAP).variants(true),dec,new StringBuilder());
-  ModelManifest m=ModelManifest.read(out);if(!m.vars.toString().equals("{$swapvar=[0, 1]}")||!m.combos.toString().equals("[{$swapvar=0}, {$swapvar=1}]")||m.defaultCombo!=0)throw new AssertionError("toggle variants="+m.vars+" "+m.combos);
-  if(Fixtures.draws(out,0,0).size()!=2||Fixtures.draws(out,0,1).size()!=1)throw new AssertionError("toggle hides the head in combo 1");
+  ModelManifest m=ModelManifest.read(out);if(!m.vars.toString().equals("{$swapvar=[0, 1]}")||!m.defaults.toString().equals("{$swapvar=0}")||!m.combos.isEmpty())throw new AssertionError("toggle variants="+m.vars+" "+m.defaults);
+  if(Fixtures.draws(out,0,Fixtures.set("$swapvar",0)).size()!=2||Fixtures.draws(out,0,Fixtures.set("$swapvar",1)).size()!=1)throw new AssertionError("toggle hides the head with $swapvar=1");
   System.out.println("GIMI patterns: PASS (external CommandList, $active, uninitialised globals, namespace line, null texture slot, hash-based renderer, 17 globals, toggle variants)");
  }
  static String varDecls(int n){StringBuilder s=new StringBuilder();for(int i=0;i<n;i++)s.append("global $v").append(i).append(" = 0\n");return s.toString();}

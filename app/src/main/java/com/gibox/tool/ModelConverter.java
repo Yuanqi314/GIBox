@@ -181,7 +181,46 @@ public final class ModelConverter {
         for(Draw d:draws)if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part))))resolveStreams(d,providers,rs);
         return draws;
     }
-    static final class Bones {String name;Map<String,Object> target;List<String> names;byte[] binds;int count;boolean synthetic;
+    static final int MAX_ASSIGNMENTS=4096;
+    /** Variables an if / else if of a drawing, CommandList or Resource section reads: the only ones that can change what is drawn. */
+    static List<String> conditionVars(Ini ini){
+        Set<String> used=new HashSet<>();Pattern var=Pattern.compile("\\$[a-z_][a-z0-9_]*");
+        for(Section s:ini.sections.values()){String n=lower(s.name);if(n.startsWith("key")||n.equals("present")||n.equals("constants"))continue;
+            for(String l:s.lines){String a=lower(l);String c=a.startsWith("if ")?a.substring(3):a.startsWith("else if ")?a.substring(8):a.startsWith("elseif ")?a.substring(7):null;if(c==null)continue;Matcher m=var.matcher(c);while(m.find())used.add(m.group());}}
+        List<String> out=new ArrayList<>();for(String k:ini.vars.keySet())if(used.contains(k)&&ini.choices.containsKey(k))out.add(k);return out;}
+    /** All assignments of some variables (mixed radix: the first variable changes slowest), the others at their initial values. */
+    static final class Variation {
+        final Ini ini;final List<String> names;final List<List<Integer>> values=new ArrayList<>();final int[] stride;final int total;final int defaultIndex;
+        Variation(Ini ini,List<String> names){this.ini=ini;this.names=names;long t=1;for(String k:names){values.add(new ArrayList<>(ini.choices.get(k)));t*=ini.choices.get(k).size();if(t>Integer.MAX_VALUE/2)t=Integer.MAX_VALUE/2;}
+            total=(int)Math.min(t,Integer.MAX_VALUE/2);stride=new int[names.size()];int st=1;for(int i=names.size()-1;i>=0;i--){stride[i]=st;st=(int)Math.min((long)st*values.get(i).size(),Integer.MAX_VALUE/2);}
+            int d=0;if(total<=MAX_ASSIGNMENTS)for(int i=0;i<names.size();i++)d+=stride[i]*values.get(i).indexOf(ini.vars.get(names.get(i)));defaultIndex=d;}
+        int digit(int index,int v){return index/stride[v]%values.get(v).size();}
+        Map<String,Integer> assignment(int index){Map<String,Integer> a=new LinkedHashMap<>(ini.vars);for(int v=0;v<names.size();v++)a.put(names.get(v),values.get(v).get(digit(index,v)));return a;}
+        List<Integer> tuple(int index,List<Integer> vars){List<Integer> t=new ArrayList<>();for(int v:vars)t.add(values.get(v).get(digit(index,v)));return t;}
+    }
+    /**
+     * One part's draws (model.json version 2): each distinct draw once, in order of first use, with "when" (the variables
+     * it depends on and the value tuples it is drawn for) unless it is always drawn. A variable is a dependency when
+     * changing it alone turns the draw on or off somewhere; then the draw depends on those variables only.
+     */
+    static List<Object> drawTable(Group g,Variation var,int[] sigOf,int signatures,Set<String> shown){
+        List<String> keys=new ArrayList<>();Map<String,String[]> fields=new HashMap<>();List<Set<String>> present=new ArrayList<>();
+        for(int c=0;c<signatures;c++){Set<String> on=new HashSet<>();ComboRows cr=g.combos.get(c);
+            if(cr!=null){check(cr.subs.size()<=64,"子网格超过 64");for(int i=0;i<cr.subs.size();i++){String k=cr.subs.get(i)[0]+","+cr.subs.get(i)[1]+","+cr.rows.get(i)[0]+","+cr.rows.get(i)[1];if(!fields.containsKey(k)){keys.add(k);fields.put(k,new String[]{Integer.toString(cr.subs.get(i)[0]),Integer.toString(cr.subs.get(i)[1]),cr.rows.get(i)[0],cr.rows.get(i)[1]});}on.add(k);}}
+            present.add(on);}
+        check(!keys.isEmpty()&&keys.size()<=1024,"部件绘制段数量："+keys.size());
+        List<Object> out=new ArrayList<>();
+        for(String k:keys){List<Integer> deps=new ArrayList<>();
+            for(int v=0;v<var.names.size();v++){boolean depends=false;int n=var.values.get(v).size();
+                for(int i=0;i<var.total&&!depends;i++){if(var.digit(i,v)+1>=n)continue;depends=present.get(sigOf[i]).contains(k)!=present.get(sigOf[i+var.stride[v]]).contains(k);}
+                if(depends)deps.add(v);}
+            String[] f=fields.get(k);Map<String,Object> d=Json.of("start",Integer.parseInt(f[0]),"count",Integer.parseInt(f[1]),"material",f[2],"slot",Integer.parseInt(f[3]));
+            if(!deps.isEmpty()){LinkedHashSet<List<Integer>> allow=new LinkedHashSet<>();for(int i=0;i<var.total;i++)if(present.get(sigOf[i]).contains(k))allow.add(var.tuple(i,deps));
+                List<Object> names=new ArrayList<>();for(int v:deps){names.add(var.names.get(v));shown.add(var.names.get(v));}
+                d.put("when",Json.of("vars",names,"allow",new ArrayList<Object>(allow)));}
+            out.add(d);}
+        return out;}
+    static final class Bones {String name;Map<String,Object> target;List<String> names;List<Integer> parents;byte[] binds;int count;boolean synthetic;
         Bones(String n,List<String> a,byte[] b,Map<String,Object> t){name=n;names=a;binds=b;target=t;count=a.size();check(count>0&&count<=512&&b.length==64*count,"骨骼记录无效："+n);}
         /** No skeleton library: a renderer known only by name; the runtime takes the skeleton from the game (GIMI indices are the game's own order). */
         Bones(String n){name=n;count=512;synthetic=true;} }
@@ -199,11 +238,11 @@ public final class ModelConverter {
         for(Object r:Json.arr(j.get("renderers"),"renderers",1,64)){
             Map<String,Object> x=Json.obj(r,"renderer");String n=safe(Json.str(x.get("name"),"renderer.name",64));check(seen.add(lower(n)),"重复的渲染器："+n);
             List<String> names=new ArrayList<>();for(Object b:Json.arr(x.get("bones"),n+".bones",1,512)){String bn=Json.str(b,n+".bones",256);check(bn.indexOf('\t')<0&&bn.indexOf('\n')<0&&bn.indexOf('\r')<0,"骨骼名无效："+n);names.add(bn);}
-            List<Object> parents=Json.arr(x.get("parents"),n+".parents",names.size(),names.size());for(Object p:parents)Json.integer(p,n+".parents",-1,names.size()-1);
+            List<Integer> parents=new ArrayList<>();for(Object p:Json.arr(x.get("parents"),n+".parents",names.size(),names.size()))parents.add((int)Json.integer(p,n+".parents",-1,names.size()-1));
             ByteBuffer binds=buf(new byte[64*names.size()]);for(Object v:Json.arr(x.get("bindposes"),n+".bindposes",16*names.size(),16*names.size()))binds.putFloat(Json.finite(v,n+".bindposes"));
             Map<String,Object> target=fingerprint(x.get("target"));
             check(target==null||!ModelManifest.lowerLod((String)target.get("mesh")),"骨骼记录里 "+n+" 是低精度模型 "+(target==null?"":target.get("mesh"))+"（角色刚加载时记下的），骨骼比完整模型少。让角色在大世界出场一次（骨骼库会自动更新）或靠近角色重新导出后再转换");
-            out.add(new Bones(n,names,binds.array(),target));
+            Bones b=new Bones(n,names,binds.array(),target);b.parents=parents;out.add(b);
         }
         return out;}
     /** The original mesh's identity (model.hpp fingerprintOf); one that does not check out is left for the runtime to learn. */
@@ -218,12 +257,19 @@ public final class ModelConverter {
     /** Submeshes and material rows of one renderer part in one variant combination. */
     static final class ComboRows {final List<int[]> subs=new ArrayList<>();final List<String[]> rows=new ArrayList<>();String key(){StringBuilder s=new StringBuilder();for(int i=0;i<subs.size();i++)s.append(subs.get(i)[0]).append(',').append(subs.get(i)[1]).append(':').append(rows.get(i)[0]).append('#').append(rows.get(i)[1]).append(';');return s.toString();}}
     /** One renderer: union of every combination's vertices and index ranges, plus per-combination submeshes. */
-    static final class Group {Bones bones;String name;List<Vertex> vertices=new ArrayList<>();List<Integer> indices=new ArrayList<>();Map<String,Integer> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();Group(Bones b,String n){bones=b;name=n;} }
+    static final class Group {Bones bones;String name;List<Vertex> vertices=new ArrayList<>();List<Integer> indices=new ArrayList<>();Map<String,Integer> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();List<Object> draws;Group(Bones b,String n){bones=b;name=n;} }
     static final class MaterialDef {String name;Resource diffuse,light,normal;}
     static final class Build {final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final Map<File,byte[]> cache=new HashMap<>();}
     private static Vertex vertex(Resource position,Resource blend,Resource tex,byte[] p,byte[] b,byte[] t,int i,int boneCount){
-        check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);v.uv=uv(t,to+4);for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(t,to+k));v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float sum=0;float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);check(Float.isFinite(w[k])&&w[k]>=0,"非法权重");check(w[k]==0||(ids[k]>=0&&ids[k]<boneCount),"骨骼索引越界");sum+=w[k];}check(Float.isFinite(sum),"非法权重");if(sum>0){for(int k=0;k<4;k++){wo.putFloat(4*k,w[k]/sum);wo.putInt(16+4*k,w[k]>0?ids[k]:0);}}else v.unweighted=true;for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
+        check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);v.uv=uv(t,to+4);for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(t,to+k));v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float sum=0;float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);check(Float.isFinite(w[k])&&w[k]>=0,"非法权重");check(w[k]==0||(ids[k]>=0&&ids[k]<boneCount),"骨骼索引越界");sum+=w[k];}check(Float.isFinite(sum),"非法权重");if(sum>0)tidy(w,ids,wo);else v.unweighted=true;for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
     }
+    /** One vertex's four weights: the same bone listed twice added together, largest first, summing to 1; empty slots 0 on bone 0. */
+    static void tidy(float[] w,int[] ids,ByteBuffer out){
+        float[] tw=new float[4];int[] ti=new int[4];int n=0;
+        for(int k=0;k<4;k++){if(!(w[k]>0))continue;int j=0;while(j<n&&ti[j]!=ids[k])j++;if(j<n)tw[j]+=w[k];else{tw[n]=w[k];ti[n]=ids[k];n++;}}
+        Integer[] order=new Integer[n];for(int k=0;k<n;k++)order[k]=k;final float[] fw=tw;final int[] fi=ti;Arrays.sort(order,(x,y)->fw[x]!=fw[y]?Float.compare(fw[y],fw[x]):Integer.compare(fi[x],fi[y]));
+        float sum=0;for(int k=0;k<n;k++)sum+=tw[k];
+        for(int k=0;k<4;k++){out.putFloat(4*k,k<n?tw[order[k]]/sum:0f);out.putInt(16+4*k,k<n?ti[order[k]]:0);}}
     private static byte[] uv(byte[] t,int p){ByteBuffer b=buf(t);float u=b.getFloat(p),v=b.getFloat(p+4);check(Float.isFinite(u)&&Float.isFinite(v),"非法 UV");return buf(new byte[8]).putFloat(u).putFloat(1-v).array();}
     /** A DDS texture as RGBA8, at most 1024 on a side, rows bottom to top: {width, height, data view}. */
     private static Map<String,Object> texture(File f,TextureDecoder decoder,BlobWriter blob,Map<File,Map<String,Object>> done)throws Exception {
@@ -301,9 +347,6 @@ public final class ModelConverter {
         try(BlobWriter blob=new BlobWriter(new File(out,"model.bin"))){
             for(Group g:b.groups.values()){
                 int n=g.vertices.size(),ni=g.indices.size();
-                ComboRows any=null;for(int c=0;c<combos&&any==null;c++)any=g.combos.get(c);
-                // A part absent from a combination is hidden by one empty draw.
-                ComboRows hidden=new ComboRows();hidden.subs.add(new int[]{0,0});hidden.rows.add(new String[]{any.rows.get(0)[0],"0"});
                 check(n>0&&n<=500000&&ni>0&&ni<=15000000&&ni%3==0,"部件尺寸越界");for(ComboRows c:g.combos.values())check(c.subs.size()<=64,"子网格超过 64");
                 int bones=g.bones.count;if(g.bones.synthetic){bones=1;for(Vertex v:g.vertices){ByteBuffer w=buf(v.weights);for(int k=0;k<4;k++)if(w.getFloat(4*k)>0)bones=Math.max(bones,w.getInt(16+4*k)+1);}}
                 Map<String,Object> data=new LinkedHashMap<>();
@@ -313,12 +356,9 @@ public final class ModelConverter {
                 data.put("colors",blob.put(column(g.vertices,4,v->v.color)));data.put("tangents",blob.put(column(g.vertices,16,v->v.tangent)));
                 for(int e=0;e<3;e++){final int extra=e;boolean present=true;for(Vertex v:g.vertices)present&=v.extra.size()>extra;if(present)data.put("uv"+(e+2),blob.put(column(g.vertices,8,v->v.extra.get(extra))));}
                 Map<String,Object> part=Json.of("name",g.name,"renderer",g.bones.name,"bones",bones,"vertices",n,"indices",ni,"data",data);
-                if(!g.bones.synthetic)part.put("skeleton",Json.of("bones",g.bones.names,"bindposes",blob.put(g.bones.binds)));
+                if(!g.bones.synthetic){Map<String,Object> sk=Json.of("bones",g.bones.names,"bindposes",blob.put(g.bones.binds));if(g.bones.parents!=null)sk.put("parents",new ArrayList<Object>(g.bones.parents));part.put("skeleton",sk);}
                 if(g.bones.target!=null)part.put("target",g.bones.target);
-                List<Object> draws=new ArrayList<>();
-                for(int c=0;c<combos;c++){ComboRows cr=g.combos.getOrDefault(c,hidden);List<Object> row=new ArrayList<>();
-                    for(int i=0;i<cr.subs.size();i++)row.add(Json.of("start",cr.subs.get(i)[0],"count",cr.subs.get(i)[1],"material",cr.rows.get(i)[0],"slot",Integer.parseInt(cr.rows.get(i)[1])));draws.add(row);}
-                part.put("draws",draws);parts.add(part);
+                part.put("draws",g.draws);parts.add(part);
             }
             for(MaterialDef m:b.materials.values()){Map<String,Object> e=Json.of("name",m.name);
                 if(m.diffuse==null)e.put("original",true);
@@ -347,31 +387,32 @@ public final class ModelConverter {
         if(boneDir==null){check((id==0&&!o.names.isEmpty())||(id>=10000000&&id<=10001999),"没有骨骼目录时需要角色 ID 或角色名");bones=new ArrayList<>();for(String r:DEFAULT_RENDERERS)bones.add(new Bones(r));if(o.fallback==null)o.fallback="Body";}
         else{check(id>=10000000&&id<=10001999,"角色 ID 越界");bones=bones(boneDir,id);}Map<String,String> map=new LinkedHashMap<>();
         if(!o.mapping.trim().isEmpty())for(String row:o.mapping.split(";")){String[] a=row.trim().split("=",-1);check(a.length==2&&!a[0].trim().isEmpty()&&!a[1].trim().isEmpty(),"映射格式：部件=渲染器;部件=skip");check(map.put(lower(a[0].trim()),a[1].trim())==null,"重复映射");}
-        // Variant combinations: enumerate, keep only variables that change what is drawn, default values first.
-        List<Map<String,Integer>> all;try{all=ini.variants(o.variants);}catch(IllegalArgumentException e){if(!o.variants)throw e;log.append("款式组合过多，只转换默认款式：").append(e.getMessage()).append('\n');all=ini.variants(false);}
-        Map<String,Integer> defaults=new LinkedHashMap<>(ini.vars);List<String> sig=new ArrayList<>();for(Map<String,Integer> v:all)sig.add(signature(ini,src,bones,map,v,o.fallback));
-        List<String> relevant=new ArrayList<>();for(String k:ini.vars.keySet()){boolean changes=false;for(int i=0;i<all.size()&&!changes;i++)for(int j=i+1;j<all.size()&&!changes;j++){Map<String,Integer> a=new HashMap<>(all.get(i)),b=new HashMap<>(all.get(j));if(Objects.equals(a.get(k),b.get(k)))continue;a.remove(k);b.remove(k);if(a.equals(b)&&!sig.get(i).equals(sig.get(j)))changes=true;}if(changes)relevant.add(k);}
-        List<Map<String,Integer>> kept=new ArrayList<>();Set<Map<String,Integer>> seen=new HashSet<>();
-        for(Map<String,Integer> v:all){Map<String,Integer> p=new LinkedHashMap<>();for(String k:relevant)p.put(k,v.get(k));boolean isDefault=true;for(String k:relevant)isDefault&=Objects.equals(v.get(k),defaults.get(k));if(isDefault&&seen.add(p))kept.add(0,v);}
-        for(Map<String,Integer> v:all){Map<String,Integer> p=new LinkedHashMap<>();for(String k:relevant)p.put(k,v.get(k));if(seen.add(p))kept.add(v);}
-        if(kept.isEmpty())kept.add(defaults);
+        // Variants: every assignment of the variables that an if of a drawing section reads (not the ones only key or
+        // Present sections use), one signature each; the distinct signatures are built, and each draw keeps the values of
+        // the variables it depends on.
+        Variation var=new Variation(ini,o.variants?conditionVars(ini):new ArrayList<>());
+        if(var.total>MAX_ASSIGNMENTS){log.append("款式取值组合过多（").append(var.total).append(" 种，上限 ").append(MAX_ASSIGNMENTS).append("），只转换默认款式\n");var=new Variation(ini,new ArrayList<>());}
+        String[] sig=new String[var.total];for(int i=0;i<var.total;i++)sig[i]=signature(ini,src,bones,map,var.assignment(i),o.fallback);
+        List<Map<String,Integer>> kept=new ArrayList<>();Map<String,Integer> sigIndex=new LinkedHashMap<>();int[] sigOf=new int[var.total];
+        for(int k=0;k<var.total;k++){int i=k==0?var.defaultIndex:(k<=var.defaultIndex?k-1:k);Integer c=sigIndex.get(sig[i]);if(c==null){c=kept.size();sigIndex.put(sig[i],c);kept.add(var.assignment(i));}sigOf[i]=c;}
         dest=dest.getCanonicalFile();File parent=dest.getParentFile();check(parent.isDirectory()||parent.mkdirs(),"无法创建输出根目录");check(o.replace||!dest.exists(),"输出目录已存在："+dest);
         check(!dest.getName().isEmpty()&&dest.getName().getBytes(StandardCharsets.UTF_8).length<=255,"模型名过长："+dest.getName());
         File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
         try{
             Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
+            Set<String> shown=new LinkedHashSet<>();for(Group g:b.groups.values())g.draws=drawTable(g,var,sigOf,kept.size(),shown);
             for(Group g:b.groups.values()){int fixed=fixUnweighted(g);if(fixed>0)log.append(g.bones.name).append("：").append(fixed).append(" 个顶点没有权重（MOD 本身的问题，PC 上这些点会被拉到原点），已沿用最近顶点的权重\n");}
             for(Group g:b.groups.values())log.append(g.bones.name).append(": ").append(g.vertices.size()).append(" 顶点，").append(g.indices.size()).append(" 索引").append(g.bones.synthetic?"（骨骼取自游戏内角色）":g.bones.target==null?"（骨骼库没有网格特征，首次在场景中出现时识别）":"").append('\n');
             for(String x:ini.external)log.append("已忽略外部 CommandList：").append(x).append('\n');ini.external.clear();
             Map<String,Object> data=emit(tmp,b,kept.size(),decoder);
             String generation;synchronized(ModelConverter.class){generation=System.currentTimeMillis()+"-"+(++generationCounter);}
-            Map<String,Object> manifest=Json.of("format","gibox-model","version",1,"name",dest.getName(),"generation",generation,
+            Map<String,Object> manifest=Json.of("format","gibox-model","version",2,"name",dest.getName(),"generation",generation,
                 "character",Json.of("id",id,"names",new ArrayList<Object>(o.names)),"flags",Json.of("originalMaterials",false,"diffuseOnly",false));
-            if(kept.size()>1){
-                List<Object> vars=new ArrayList<>();for(String k:relevant){TreeSet<Integer> values=new TreeSet<>();for(Map<String,Integer> m:kept)values.add(m.get(k));for(int x:values)check(Math.abs(x)<=1000000,"款式变量值过大："+k);vars.add(Json.of("name",k,"values",new ArrayList<Object>(values)));}
-                check(vars.size()<=16,"款式变量过多");List<Object> combos=new ArrayList<>();for(Map<String,Integer> m:kept){Map<String,Object> c=new LinkedHashMap<>();for(String k:relevant)c.put(k,m.get(k));combos.add(c);}
-                manifest.put("variants",Json.of("vars",vars,"combos",combos,"default",0));
-                log.append("款式变量：").append(relevant).append("，").append(kept.size()).append(" 种组合（游戏内切换，无需重新转换）\n");}
+            if(!shown.isEmpty()){
+                List<Object> vars=new ArrayList<>();Map<String,Object> defaults=new LinkedHashMap<>();long product=1;
+                for(String k:var.names){if(!shown.contains(k))continue;List<Integer> values=var.values.get(var.names.indexOf(k));for(int x:values)check(Math.abs(x)<=1000000,"款式变量值过大："+k);vars.add(Json.of("name",k,"values",new ArrayList<Object>(values)));defaults.put(k,ini.vars.get(k));product*=values.size();}
+                check(vars.size()<=16,"款式变量过多");manifest.put("variants",Json.of("vars",vars,"default",defaults));
+                log.append("款式变量：").append(shown).append("，").append(product).append(" 种取值组合（游戏内切换，无需重新转换）\n");}
             manifest.putAll(data);
             if(o.sourcePath!=null)manifest.put("source",Json.of("path",o.sourcePath,"signature",o.sourceSignature==null?"":o.sourceSignature));
             write(tmp,"conversion.log",text(log.toString()));

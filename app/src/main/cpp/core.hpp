@@ -40,12 +40,52 @@ struct Material {std::string name;unsigned slot;};
 struct Skin {Bytes data;std::set<unsigned> used;};
 struct Submesh {unsigned start,count;};
 struct Texture {unsigned w,h;Bytes pixels;};
-inline std::vector<int> mapBones(const std::vector<std::string>& src,const std::vector<std::string>& dst,const Bytes& sb,const Bytes& tb,const std::set<unsigned>& used){
+// ---------------------------------------------------------------- bones
+// Source bones (the model's skeleton) to the bones of the renderer it goes on. Each bone the weights use is matched by
+//  1. its exact name, when that name is on one target bone;
+//  2. its name without case, spaces and punctuation, when that is on one target bone;
+//  3. among several target bones of that name: the one whose ancestors carry the source bone's ancestors' names the
+//     furthest up (needs both parent lists); a tie stays ambiguous and is refused.
+// A matched bone's bindpose must agree with the source's (each element within 0.1 %, relative). A bone the target lacks
+// hands its weight to its nearest ancestor that matches — only a helper bone (hair, cloth, accessories), never a body
+// bone — and is listed in `moved` for the log. Anything else is refused with the bone's name.
+struct BoneMap {std::vector<int> target;std::vector<std::pair<unsigned,int>> moved;};
+inline bool bodyBone(const std::string& name){auto k=normalize(name,true);
+ for(const char* w:{"pelvis","spine","neck","head","clavicle","shoulder","upperarm","forearm","arm","elbow","hand","finger","thigh","calf","knee","leg","foot","toe","jaw","eye","hip","chest"})if(k.find(w)!=k.npos)return true;
+ return false;}
+inline std::vector<std::string> lineage(size_t i,const std::vector<std::string>& names,const std::vector<int>& parents){std::vector<std::string> out;if(parents.size()!=names.size())return out;
+ for(int k=parents[i];k>=0&&out.size()<64;k=parents[size_t(k)]){out.push_back(normalize(names[size_t(k)],true));}return out;}
+inline bool bindposeAgrees(const Bytes& sb,size_t i,const Bytes& tb,size_t t){for(int j=0;j<16;j++){float a=f32(sb.data()+64*i+4*j),b=f32(tb.data()+64*t+4*j);
+  if(!(std::isfinite(a)&&std::isfinite(b)&&std::abs(a-b)<=.001f*(1+std::max(std::abs(a),std::abs(b)))))return false;}return true;}
+inline BoneMap mapBones(const std::vector<std::string>& src,const std::vector<std::string>& dst,const Bytes& sb,const Bytes& tb,const std::set<unsigned>& used,
+                        const std::vector<int>& srcParents={},const std::vector<int>& dstParents={}){
  require(!src.empty()&&src.size()<=512&&!dst.empty()&&dst.size()<=512&&sb.size()==64*src.size()&&tb.size()==64*dst.size(),"Bone count/bindpose length");
- std::map<std::string,std::vector<int>> sm,tm;for(size_t i=0;i<src.size();i++)sm[normalize(src[i],true)].push_back(i);for(size_t i=0;i<dst.size();i++)tm[normalize(dst[i],true)].push_back(i);std::vector<int> out(src.size(),-1);
- for(unsigned i:used){require(i<src.size(),"Bone source index");auto k=normalize(src[i],true);require(!k.empty()&&sm[k].size()==1&&tm[k].size()==1,"Bone name missing/ambiguous: "+src[i]);int t=tm[k][0];for(int j=0;j<16;j++){float a=f32(sb.data()+64*i+4*j),b=f32(tb.data()+64*t+4*j);require(std::isfinite(a)&&std::isfinite(b)&&std::abs(a-b)<=.001f*(1+std::max(std::abs(a),std::abs(b))),"Bindpose mismatch: "+src[i]);}out[i]=t;}return out;
-}
-inline void remap(Skin& s,const std::vector<int>& map){for(size_t i=0;i<s.data.size();i+=32)for(int j=0;j<4;j++){auto bi=u32(s.data.data()+i+16+4*j);bool weighted=f32(s.data.data()+i+4*j)>0;require(!weighted||(bi<map.size()&&map[bi]>=0),"Unmapped bone");put32(s.data.data()+i+16+4*j,weighted?map[bi]:0);}}
+ std::map<std::string,std::vector<size_t>> exact,loose;for(size_t t=0;t<dst.size();t++){exact[dst[t]].push_back(t);loose[normalize(dst[t],true)].push_back(t);}
+ // >=0 target bone; -1 no bone of that name; -2 several, not told apart by their ancestors.
+ auto find=[&](size_t i)->int{auto e=exact.find(src[i]);if(e!=exact.end()&&e->second.size()==1)return int(e->second[0]);
+  auto k=normalize(src[i],true);if(k.empty())return -1;std::vector<size_t> c;if(e!=exact.end())c=e->second;else{auto l=loose.find(k);if(l!=loose.end())c=l->second;}
+  if(c.empty()){return -1;}if(c.size()==1){return int(c[0]);}
+  auto mine=lineage(i,src,srcParents);if(mine.empty()||dstParents.size()!=dst.size())return -2;
+  int best=-1;size_t score=0;bool tie=false;
+  for(size_t t:c){auto theirs=lineage(t,dst,dstParents);size_t n=0;while(n<mine.size()&&n<theirs.size()&&mine[n]==theirs[n])n++;if(n>score){score=n;best=int(t);tie=false;}else if(n==score)tie=true;}
+  return best<0||tie?-2:best;};
+ BoneMap m;m.target.assign(src.size(),-1);
+ for(unsigned i:used){require(i<src.size(),"Bone source index");int t=find(i);
+  if(t>=0){require(bindposeAgrees(sb,i,tb,size_t(t)),"Bindpose mismatch: "+src[i]);m.target[i]=t;continue;}
+  require(t==-1,"Bone name ambiguous: "+src[i]);
+  require(!bodyBone(src[i])&&srcParents.size()==src.size(),"Bone name missing: "+src[i]);
+  int a=-1;for(int k=srcParents[i];k>=0;k=srcParents[size_t(k)]){int x=find(size_t(k));if(x>=0&&bindposeAgrees(sb,size_t(k),tb,size_t(x))){a=x;break;}if(x==-2)break;}
+  require(a>=0,"Bone name missing: "+src[i]+" (and no ancestor of it matches)");m.target[i]=a;m.moved.push_back({i,a});}
+ return m;}
+// Source bone indices to target ones, then per vertex: the weights going to one target bone added together, largest
+// first, summing to 1; unused slots weigh 0 on bone 0.
+inline void remap(Skin& s,const std::vector<int>& map){
+ for(size_t i=0;i+32<=s.data.size();i+=32){uint8_t* v=s.data.data()+i;std::pair<float,unsigned> slot[4];int n=0;
+  for(int j=0;j<4;j++){float w=f32(v+4*j);if(!(w>0))continue;unsigned b=u32(v+16+4*j);require(b<map.size()&&map[b]>=0,"Unmapped bone");unsigned t=unsigned(map[b]);
+   int k=0;while(k<n&&slot[k].second!=t)k++;if(k<n){slot[k].first+=w;}else{slot[n++]={w,t};}}
+  std::sort(slot,slot+n,[](const std::pair<float,unsigned>& a,const std::pair<float,unsigned>& b){return a.first>b.first||(a.first==b.first&&a.second<b.second);});
+  float sum=0;for(int k=0;k<n;k++)sum+=slot[k].first;
+  for(int j=0;j<4;j++){float w=j<n&&sum>0?slot[j].first/sum:0.f;std::memcpy(v+4*j,&w,4);put32(v+16+4*j,j<n?slot[j].second:0);}}}
 Texture decodeDds(const Bytes& b);
 
 // Identity of an original Mesh asset, readable without CPU vertex data:
@@ -58,9 +98,17 @@ inline bool lowerLod(const std::string& s){std::string o;for(unsigned char c:s)o
  auto p=o.rfind("_lod");if(p==o.npos||p+4>=o.size()||o.find_first_not_of("0123456789",p+4)!=o.npos)return false;return o.find_first_not_of('0',p+4)!=o.npos;}
 inline bool matches(const Fingerprint& t,const Fingerprint& f){return t.vertices==f.vertices&&t.submeshes==f.submeshes&&t.bones==f.bones&&(t.mesh.empty()?normalize(t.renderer)==normalize(f.renderer):meshName(t.mesh)==meshName(f.mesh));}
 
-// Switchable variants of a model (GIBox model format, "variants"): variables, their combinations, the default one.
-struct Variants {std::vector<std::pair<std::string,std::vector<int>>> vars;std::vector<std::map<std::string,int>> combos;unsigned def=0;};
+// Switchable variables of a model (GIBox model format, "variants"): each with its values, and the value it starts with.
+// combos: only for version 1 files, whose combinations are the only valid assignments.
+using Assignment=std::map<std::string,int>;
+struct Variants {std::vector<std::pair<std::string,std::vector<int>>> vars;Assignment defaults;std::vector<Assignment> combos;};
+// When a draw is drawn: the variables it depends on and the value tuples it is drawn for. No variables: always.
+struct When {std::vector<std::string> vars;std::set<std::vector<int>> allow;};
+inline bool drawn(const When& w,const Assignment& a){if(w.vars.empty())return true;std::vector<int> t;for(auto& n:w.vars){auto it=a.find(n);if(it==a.end())return false;t.push_back(it->second);}return w.allow.count(t)>0;}
 inline int integer(const std::string& s){require(!s.empty()&&s.size()<11&&s.find_first_not_of("-0123456789")==s.npos&&s.find('-',1)==s.npos&&s!="-","Invalid integer: "+s);return std::stoi(s);}
-// Desired values start from the default combo; unknown names are ignored; no exact combo falls back to the default.
-inline unsigned pick(const Variants& v,const std::map<std::string,int>& chosen){auto want=v.combos[v.def];for(auto& kv:chosen)if(want.count(kv.first))want[kv.first]=kv.second;for(unsigned i=0;i<v.combos.size();i++)if(v.combos[i]==want)return i;return v.def;}
+// The values in effect: the chosen ones where the variable has that value, else where it starts. A version 1 model
+// knows only its listed combinations: any other assignment is its default one.
+inline Assignment pick(const Variants& v,const std::map<std::string,int>& chosen){Assignment a=v.defaults;
+ for(auto& x:v.vars){auto c=chosen.find(x.first);if(c!=chosen.end()&&std::find(x.second.begin(),x.second.end(),c->second)!=x.second.end())a[x.first]=c->second;}
+ if(!v.combos.empty()&&std::find(v.combos.begin(),v.combos.end(),a)==v.combos.end()){a=v.defaults;}return a;}
 }

@@ -40,13 +40,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
 
 /**
  * Home: top bar (日志 / 设置), module card, the replacement switch, import, and the mods by character (a row per
@@ -56,12 +54,6 @@ import kotlinx.coroutines.delay
 @Composable
 fun HomeScreen(state: AppState, pickZip: () -> Unit) {
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
-    LaunchedEffect(state.game) {
-        while (true) {
-            state.refreshStatus()
-            delay(2000)
-        }
-    }
     Scaffold(
         modifier = Modifier.nestedScroll(scroll.nestedScrollConnection),
         topBar = {
@@ -96,11 +88,10 @@ fun HomeScreen(state: AppState, pickZip: () -> Unit) {
     }
 }
 
-/** Whether LSPosed loaded the module, plus what the game side last reported. */
+/** Whether LSPosed loaded the module; without file access, the button to grant it. */
 @Composable
 private fun ModuleCard(state: AppState) {
     val active = state.moduleActive
-    val st = state.status
     val warn = !active || !state.storage
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -116,17 +107,7 @@ private fun ModuleCard(state: AppState) {
                 Spacer(Modifier.width(12.dp))
                 Text(if (active) "模块已激活" else "模块未激活", style = MaterialTheme.typography.titleLarge)
             }
-            Text(
-                if (active) "LSPosed API ${state.frameworkApi} · ${serverName(state.game)}"
-                else "在 LSPosed 里启用 GIBox，作用域勾选原神和 GIBox 自己，然后重新打开 GIBox、彻底重启游戏。",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            if (st.loaded) {
-                val (label, detail) = statusText(st)
-                Text("游戏端：$label" + if (st.characterId != 0) "（${Characters.nameOf(st.characterId)}）" else "", style = MaterialTheme.typography.bodyMedium)
-                if (st.models.isNotEmpty()) Text("生效模型：${st.models.joinToString("、")}", style = MaterialTheme.typography.bodySmall)
-                if (detail.isNotEmpty() && (st.state == "error" || st.state == "buildid-mismatch" || st.scan == "off")) Text(detail, style = MaterialTheme.typography.bodySmall)
-            }
+            if (!active) Text("在 LSPosed 里启用 GIBox，作用域勾选原神和 GIBox 自己，然后重新打开 GIBox、彻底重启游戏。", style = MaterialTheme.typography.bodyMedium)
             if (!state.storage) {
                 Text("还没有文件访问权限：模型放在原神的目录里，需要“所有文件访问权限”。", style = MaterialTheme.typography.bodyMedium)
                 FilledTonalButton(onClick = { state.grantStorage() }) { Text("授予文件访问权限") }
@@ -151,22 +132,6 @@ private fun ReplacementSwitch(state: AppState) {
             Switch(checked = state.enabled, onCheckedChange = { state.setReplacement(it) })
         }
     }
-}
-
-/** What the game side last wrote to status.json, in words. */
-private fun statusText(st: Control.Status): Pair<String, String> {
-    val label = when (st.state) {
-        "active" -> "正在替换"
-        "loading" -> "正在加载模型"
-        "waiting" -> "已就绪"
-        "disabled" -> "替换已关闭"
-        "ready" -> "已就绪"
-        "error" -> "出错了"
-        "buildid-mismatch" -> "游戏版本不匹配"
-        else -> st.state.ifEmpty { "未知" }
-    }
-    val scan = if (st.scan == "off") "全场景扫描不可用：只替换当前操控的角色" else ""
-    return Pair(label, listOf(st.detail, scan).filter { it.isNotEmpty() }.joinToString("\n"))
 }
 
 @Composable

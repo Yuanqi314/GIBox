@@ -1,5 +1,6 @@
 #pragma once
-// GIBox model format, version 1 — GIBox's own model folder, written by the converter (ModelWriter.java) and read here.
+// GIBox model format, versions 1 and 2 — GIBox's own model folder, written by the converter (ModelConverter.java) and read here.
+// Version 2 gives each draw the variable values it is drawn for ("when") instead of one draw list per combination.
 //
 //   models/<name>/model.json    manifest: character, parts, materials, variants, and where each array sits in model.bin
 //   models/<name>/model.bin     every binary array, each starting on a 16-byte boundary; CRC-32 of the whole file in the manifest
@@ -14,7 +15,7 @@
 #include <memory>
 namespace ms {
 namespace model {
-inline constexpr unsigned maxParts=64,maxBones=512,maxVertices=500000,maxIndices=15000000,maxDraws=64,maxSlot=64,maxMaterials=256,maxTexture=4096,maxCombos=32,maxVars=16;
+inline constexpr unsigned maxParts=64,maxBones=512,maxVertices=500000,maxIndices=15000000,maxDraws=64,maxSlot=64,maxMaterials=256,maxTexture=4096,maxCombos=32,maxVars=16,maxPartDraws=1024,maxAllow=4096;
 inline constexpr uint64_t maxBlob=768ull*1024*1024;
 }
 
@@ -42,21 +43,33 @@ inline Fingerprint fingerprintOf(const Json& j){Fingerprint f;require(j.type==Js
 inline std::string fingerprintJson(const Fingerprint& f){return "{\"renderer\":"+quote(f.renderer)+",\"mesh\":"+quote(f.mesh)+",\"vertices\":"+std::to_string(f.vertices)+",\"submeshes\":"+std::to_string(f.submeshes)+",\"bones\":"+std::to_string(f.bones)+"}";}
 
 // ---------------------------------------------------------------- variants
-inline Variants variantsOf(const Json& o){Variants v;
- if(o.type==Json::Null){v.combos.push_back({});return v;}
+inline const std::vector<int>* valuesOf(const Variants& v,const std::string& n){for(auto& y:v.vars)if(y.first==n)return &y.second;return nullptr;}
+// Version 1: "combos" (1–32, each sets every variable) and "default" (an index). Version 2: "default" sets every variable.
+inline Variants variantsOf(const Json& o,unsigned version){Variants v;
+ if(o.type==Json::Null){if(version==1)v.combos.push_back({});return v;}
  require(o.type==Json::Object,"Variants object");
  for(auto& x:jarr(o,"vars",0,model::maxVars)){auto n=jstr(x,"name",64);require(n.size()>1&&n[0]=='$',"Variant name: "+n);for(auto& y:v.vars)require(y.first!=n,"Duplicate variant "+n);
-  std::vector<int> values;for(auto& k:jarr(x,"values",1,64))values.push_back(jint(k,"variant value"));v.vars.push_back({n,values});}
- for(auto& c:jarr(o,"combos",1,model::maxCombos)){require(c.type==Json::Object,"Variant combination");std::map<std::string,int> m;
-  for(auto& kv:c.object){bool known=false;for(auto& y:v.vars)known|=y.first==kv.first;require(known,"Variant undeclared: "+kv.first);m[kv.first]=jint(kv.second,"variant value");}
-  require(m.size()==v.vars.size(),"Variant combination must set every variable");for(auto& y:v.combos)require(y!=m,"Duplicate variant combination");v.combos.push_back(m);}
- v.def=unsigned(juint(o,"default",0,v.combos.size()-1));return v;}
+  std::vector<int> values;for(auto& k:jarr(x,"values",1,64)){int value=jint(k,"variant value");require(std::find(values.begin(),values.end(),value)==values.end(),"Duplicate value of "+n);values.push_back(value);}v.vars.push_back({n,values});}
+ auto assignment=[&](const Json& c,const char* what){require(c.type==Json::Object,what);Assignment m;
+  for(auto& kv:c.object){auto* values=valuesOf(v,kv.first);require(values!=nullptr,"Variant undeclared: "+kv.first);int x=jint(kv.second,"variant value");require(std::find(values->begin(),values->end(),x)!=values->end(),"Variant value not listed: "+kv.first);m[kv.first]=x;}
+  require(m.size()==v.vars.size(),std::string(what)+" must set every variable");return m;};
+ if(version==1){for(auto& c:jarr(o,"combos",1,model::maxCombos)){auto m=assignment(c,"Variant combination");for(auto& y:v.combos)require(y!=m,"Duplicate variant combination");v.combos.push_back(m);}
+  v.defaults=v.combos[size_t(juint(o,"default",0,v.combos.size()-1))];}
+ else v.defaults=assignment(jfield(o,"default"),"Variant default");
+ return v;}
+// Version 2 "when": declared variables, each once; tuples of their listed values.
+inline When whenOf(const Json& w,const Variants& v,const std::string& what){When out;if(w.type==Json::Null)return out;require(w.type==Json::Object,what+": when");
+ for(auto& n:jarr(w,"vars",1,model::maxVars)){require(n.type==Json::String&&valuesOf(v,n.string)!=nullptr,what+": when names an undeclared variable");require(std::find(out.vars.begin(),out.vars.end(),n.string)==out.vars.end(),what+": when repeats a variable");out.vars.push_back(n.string);}
+ for(auto& t:jarr(w,"allow",1,model::maxAllow)){require(t.type==Json::Array&&t.array.size()==out.vars.size(),what+": when tuple size");std::vector<int> tuple;
+  for(size_t i=0;i<t.array.size();i++){int x=jint(t.array[i],what+" when value");auto* values=valuesOf(v,out.vars[i]);require(std::find(values->begin(),values->end(),x)!=values->end(),what+": when value not listed for "+out.vars[i]);tuple.push_back(x);}
+  out.allow.insert(tuple);}
+ return out;}
 
 // ---------------------------------------------------------------- manifest summary (what the runtime scans every second)
 struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false;Fingerprint target;};
 struct ModelSummary {std::string name,generation;unsigned id=0;std::vector<std::string> names;std::vector<PartSummary> parts;};
 inline void checkFormat(const Json& m){require(m.type==Json::Object,"model.json: not an object");require(m.at("format").type==Json::String&&m.at("format").string=="gibox-model","model.json: not a GIBox model");
- auto version=juint(m,"version",1,1000000);require(version==1,"model.json: unsupported version "+std::to_string(version)+" (made by a newer GIBox?)");}
+ auto version=juint(m,"version",1,1000000);require(version==1||version==2,"model.json: unsupported version "+std::to_string(version)+" (made by a newer GIBox?)");}
 inline void characterOf(const Json& m,unsigned& id,std::vector<std::string>& names){const auto& c=jfield(m,"character");id=unsigned(juint(c,"id",0,10001999));require(id==0||id>=10000000,"Character ID out of range");
  const auto& n=c.at("names");if(n.type!=Json::Null){require(n.type==Json::Array&&n.array.size()<=16,"Character names");for(auto& x:n.array){require(x.type==Json::String&&nameToken(x.string),"Character name");names.push_back(x.string);}}
  require(id!=0||!names.empty(),"A model needs a character ID or names");}
@@ -70,7 +83,14 @@ inline ModelSummary readSummary(const std::string& dir){return summaryOf(JsonPar
 // ---------------------------------------------------------------- full model
 struct Geometry {unsigned n=0,ni=0;Bytes positions,normals,uvs,indices;
  const uint8_t* pos()const{return positions.data();}const uint8_t* norm()const{return normals.data();}const uint8_t* uv()const{return uvs.data();}const uint8_t* idx()const{return indices.data();}};
-struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;std::vector<std::vector<Submesh>> subs;std::vector<std::vector<Material>> rows;std::vector<std::pair<std::string,Bytes>> channels;std::vector<std::string> sourceBones;Bytes sourceBinds;};
+// One draw of a part: an index range, the material in a renderer slot, and when it is drawn.
+struct DrawSpec {Submesh sub;Material row;When when;};
+// The draws in effect for an assignment, in file order; none: one empty draw, so the part shows nothing (at most 64).
+inline void activeDraws(const std::vector<DrawSpec>& draws,const Assignment& a,std::vector<Submesh>& subs,std::vector<Material>& rows){subs.clear();rows.clear();
+ for(auto& d:draws)if(drawn(d.when,a)){subs.push_back(d.sub);rows.push_back(d.row);}
+ if(subs.empty()&&!draws.empty()){subs.push_back({0,0});rows.push_back({draws[0].row.name,0});}
+ require(subs.size()<=64,"More than 64 draws at once");}
+struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;std::vector<DrawSpec> draws;std::vector<std::pair<std::string,Bytes>> channels;std::vector<std::string> sourceBones;std::vector<int> sourceParents;Bytes sourceBinds;};
 struct MaterialFile {bool original=true;std::shared_ptr<Texture> main,light,normal;};
 struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;};
 
@@ -100,7 +120,7 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir){
  auto m=JsonParser(manifestText(dir)).parse();auto summary=summaryOf(m);
  auto out=std::make_shared<ModelFile>();out->name=summary.name;out->path=dir;out->generation=summary.generation;out->id=summary.id;out->names=summary.names;
  const auto& flags=m.at("flags");if(flags.type!=Json::Null){out->originalMaterials=jbool(flags,"originalMaterials",false);out->diffuseOnly=jbool(flags,"diffuseOnly",false);}
- out->variants=variantsOf(m.at("variants"));
+ auto version=unsigned(juint(m,"version",1,2));out->variants=variantsOf(m.at("variants"),version);
  // The data file: exact size and CRC-32 before any view is taken from it.
  const auto& blobInfo=jfield(m,"blob");require(jstr(blobInfo,"file",64)=="model.bin","blob.file must be model.bin");
  auto size=juint(blobInfo,"size",1,model::maxBlob);auto crc=uint32_t(juint(blobInfo,"crc32",0,0xffffffffull));
@@ -127,13 +147,22 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir){
    if(d.at(ch.first).type==Json::Null){continue;}auto b=at(ch.first,uint64_t(ch.second)*n);if(ch.second!=4){detail::finite(b,ps.name+"."+ch.first);}f.channels.push_back({std::string(".")+ch.first,std::move(b)});}
   const auto& sk=p.at("skeleton");
   if(sk.type!=Json::Null){for(auto& b:jarr(sk,"bones",ps.bones,ps.bones)){require(b.type==Json::String&&!b.string.empty()&&b.string.size()<=256&&b.string.find_first_of("\t\r\n")==b.string.npos,ps.name+": bone name");f.sourceBones.push_back(b.string);}
-   f.sourceBinds=detail::view(jfield(sk,"bindposes"),blob,64ull*ps.bones,ps.name+".bindposes");detail::finite(f.sourceBinds,ps.name+".bindposes");}
-  // Draws per variant combination: index ranges and the material each one uses.
-  const auto& draws=jarr(p,"draws",out->variants.combos.size(),out->variants.combos.size());
-  for(auto& combo:draws){require(combo.type==Json::Array&&!combo.array.empty()&&combo.array.size()<=model::maxDraws,ps.name+": draws");std::vector<Submesh> subs;std::vector<Material> rows;
-   for(auto& dr:combo.array){auto start=unsigned(juint(dr,"start",0,ni));auto count=unsigned(juint(dr,"count",0,ni));require(count<=ni-start&&count%3==0,ps.name+": draw range");
-    auto mat=jstr(dr,"material",64);require(out->materials.count(mat),ps.name+": unknown material "+mat);subs.push_back({start,count});rows.push_back({mat,unsigned(juint(dr,"slot",0,model::maxSlot-1))});}
-   f.subs.push_back(subs);f.rows.push_back(rows);}
+   f.sourceBinds=detail::view(jfield(sk,"bindposes"),blob,64ull*ps.bones,ps.name+".bindposes");detail::finite(f.sourceBinds,ps.name+".bindposes");
+   // Optional: each bone's parent in this list (-1: none), so a bone the game lacks can hand its weight to an ancestor.
+   if(sk.at("parents").type!=Json::Null){const auto& pa=jarr(sk,"parents",ps.bones,ps.bones);
+    for(size_t i=0;i<pa.size();i++){int x=jint(pa[i],ps.name+": bone parent");require(x>=-1&&x<int(ps.bones)&&x!=int(i),ps.name+": bone parent out of range");f.sourceParents.push_back(x);}
+    for(size_t i=0;i<f.sourceParents.size();i++){size_t steps=0;for(int k=int(i);k>=0;k=f.sourceParents[size_t(k)])require(++steps<=ps.bones,ps.name+": bone parents form a loop");}}}
+  auto drawOf=[&](const Json& dr){auto start=unsigned(juint(dr,"start",0,ni));auto count=unsigned(juint(dr,"count",0,ni));require(count<=ni-start&&count%3==0,ps.name+": draw range");
+   auto mat=jstr(dr,"material",64);require(out->materials.count(mat),ps.name+": unknown material "+mat);return DrawSpec{{start,count},{mat,unsigned(juint(dr,"slot",0,model::maxSlot-1))},{}};};
+  if(version==1){
+   // One draw list per combination; read as draws that each know the combinations they belong to.
+   const auto& lists=jarr(p,"draws",out->variants.combos.size(),out->variants.combos.size());std::vector<std::string> names;for(auto& y:out->variants.vars)names.push_back(y.first);
+   for(size_t c=0;c<lists.size();c++){const auto& list=lists[c];require(list.type==Json::Array&&!list.array.empty()&&list.array.size()<=model::maxDraws,ps.name+": draws");
+    std::vector<int> tuple;for(auto& n:names)tuple.push_back(out->variants.combos[c].at(n));
+    for(auto& dr:list.array){auto d=drawOf(dr);DrawSpec* same=nullptr;for(auto& x:f.draws)if(x.sub.start==d.sub.start&&x.sub.count==d.sub.count&&x.row.name==d.row.name&&x.row.slot==d.row.slot)same=&x;
+     if(!same){d.when.vars=names;f.draws.push_back(d);same=&f.draws.back();}same->when.allow.insert(tuple);}}
+   for(auto& d:f.draws)if(d.when.allow.size()==out->variants.combos.size()){d.when.vars.clear();d.when.allow.clear();}}
+  else for(auto& dr:jarr(p,"draws",1,model::maxPartDraws)){auto d=drawOf(dr);d.when=whenOf(dr.at("when"),out->variants,ps.name);f.draws.push_back(d);}
   out->parts.push_back(std::move(f));}
  return out;}
 

@@ -93,7 +93,7 @@ gradle --no-daemon :app:assembleDebug
 
 | 位置 | 内容 |
 |---|---|
-| `app/src/main/java/dev/modelswap/only/` | App 与转换器 |
+| `app/src/main/java/com/gibox/tool/` | App 与转换器 |
 | `app/src/main/cpp/` | 游戏内运行时 |
 | `tests/` | 宿主测试（Java / C++） |
 | `tools/` | 检查与测试脚本 |

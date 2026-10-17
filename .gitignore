@@ -13,7 +13,7 @@ local.properties
 *.p12
 keystore.properties
 .env
-.bak
+*.bak
 
 # IDE
 .idea/

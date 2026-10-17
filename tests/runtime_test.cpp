@@ -301,6 +301,30 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   {Runtime again(e,pkg,root+"/private8b",media8,false);again.tick(803000);again.tick(803600);again.shutdown();}
   for(auto& d:std::filesystem::directory_iterator(bones8))assert(d.path().filename()=="10000107");
   assert(f->handles.empty());}
+ // 20. A version 2 model: draws carry their conditions. The default shows one draw; $halo=3 (with $legs at its default 1)
+ //     adds the second in place; a value the model does not list keeps the default.
+ {std::string media9=root+"/media9",shared9=media9+"/"+pkg+"/GIBox",models9=shared9+"/models";
+  {Spec w;w.version=2;w.withTarget(fixture::target("Body"));w.variants="{\"vars\":[{\"name\":\"$halo\",\"values\":[0,1,3]},{\"name\":\"$legs\",\"values\":[0,1]}],\"default\":{\"$halo\":0,\"$legs\":1}}";
+   w.draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0},{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0,\"when\":{\"vars\":[\"$halo\",\"$legs\"],\"allow\":[[3,1]]}}]"};writeModel(models9+"/W",w);}
+  std::filesystem::create_directories(shared9);auto ctl9=[&](const char* vars){write(shared9+"/control.json.tmp",std::string("{\"enabled\":true,\"selected\":[\"W\"],\"variables\":")+vars+"}");std::filesystem::rename(shared9+"/control.json.tmp",shared9+"/control.json");};
+  ctl9("{}");Ptr w9=f->renderer(original);f->world(w9);f->scene={w9};
+  Runtime v2(e,pkg,root+"/private9",media9,false);v2.tick(900000);v2.tick(900600);Ptr ours=meshOf(w9);auto subs=[&]{return load<uint32_t>(f->obj[ours].shared+0xc0);};
+  assert(ours!=original&&subs()==1);
+  ctl9("{\"W\":{\"$halo\":3}}");v2.tick(901200);v2.tick(901800);assert(meshOf(w9)==ours&&subs()==2);
+  ctl9("{\"W\":{\"$halo\":7}}");v2.tick(902400);v2.tick(903000);assert(meshOf(w9)==ours&&subs()==1);
+  // A renderer refusing the new materials puts the whole switch back (the next try goes through).
+  f->failMaterials=true;ctl9("{\"W\":{\"$halo\":3}}");for(uint64_t t=903600;f->failMaterials&&t<910000;t+=600)v2.tick(t);
+  assert(!f->failMaterials&&subs()==1&&meshOf(w9)==ours);v2.tick(911000);assert(subs()==2);
+  v2.shutdown();assert(meshOf(w9)==original&&f->handles.empty());}
+ // 21. A set nobody wants any more stays built for a quick switch back, and is released after a minute unused.
+ {std::string media10=root+"/media10",shared10=media10+"/"+pkg+"/GIBox",models10=shared10+"/models",logFile=shared10+"/GIBox Log.txt";writeModel(models10+"/A",Spec().withTarget(fixture::target("Body")));
+  std::filesystem::create_directories(shared10);auto ctl10=[&](const char* sel){write(shared10+"/control.json.tmp",std::string("{\"enabled\":true,\"selected\":")+sel+"}");std::filesystem::rename(shared10+"/control.json.tmp",shared10+"/control.json");};
+  ctl10("[\"A\"]");Ptr w10=f->renderer(original);f->world(w10);f->scene={w10};
+  Runtime idle(e,pkg,root+"/private10",media10,false);idle.tick(1000000);idle.tick(1000600);assert(meshOf(w10)!=original);unsigned built=f->meshClones;
+  ctl10("[]");idle.tick(1001200);idle.tick(1001800);assert(meshOf(w10)==original&&text(logFile).find("model-released")==std::string::npos);
+  ctl10("[\"A\"]");idle.tick(1002400);idle.tick(1003000);assert(meshOf(w10)!=original&&f->meshClones==built);
+  ctl10("[]");idle.tick(1003600);idle.tick(1030000);assert(text(logFile).find("model-released")==std::string::npos);idle.tick(1070000);assert(text(logFile).find("model-released A")!=std::string::npos);
+  idle.shutdown();assert(f->handles.empty());}
  std::filesystem::remove_all(root);
- std::cout<<"Native runtime: PASS (lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
+ std::cout<<"Native runtime: PASS (idle sets released after a minute, version 2 conditional draws switched in place, lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }
