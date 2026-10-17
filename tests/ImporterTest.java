@@ -88,14 +88,6 @@ public class ImporterTest {
   ok(byName.get("Pack").converted&&byName.get("Pack").id==10000107&&!byName.get("Pack").outdated&&byName.get("Legacy").source==null&&byName.get("Legacy").id==0,"list entries");
   ok(!byName.get("RaidenShogun Kimono").converted&&byName.get("RaidenShogun Kimono").id==0&&byName.get("hutao_v1").outdated,"unconverted / changed character");
   Importer.delete(byName.get("hutao_v1"));ok(!new File(mods,"hutao_v1").exists()&&!hm.exists()&&good.isFile(),"delete keeps the original file");
-  // 9. 0.5 → 0.6: mods leave the old shared folder for private storage, control.json is carried over once.
-  File old=new File(base,"独立模型替换"),shared=new File(base,"GIBox"),priv=new File(base,"private/mods/com.miHoYo.Yuanshen");new File(old,"mods/.pending/x").mkdirs();
-  File oldMod=renamed(new File(old,"mods"),"Nahida Dress","Nahida");ModLibrary.setOverride(oldMod,"id","10000073");GimiPatternsTest.put(old,"control.json","{\"enabled\":true,\"selected\":[\"Nahida Dress\"]}");
-  new File(priv,"Nahida Dress").mkdirs();
-  ok(Migration.needed(old,shared),"migration needed");Migration.Report mr=Migration.run(old,shared,priv);
-  ok(mr.errors.isEmpty()&&mr.control&&mr.mods.size()==1&&mr.mods.get(0).getName().equals("Nahida Dress (2)")&&ModLibrary.overrides(mr.mods.get(0)).get("id").equals("10000073")&&ModLibrary.modRoot(mr.mods.get(0)).isDirectory(),"mods moved: "+mr.mods+" "+mr.errors);
-  ok(!oldMod.exists()&&!new File(old,"mods/.pending").exists()&&read(new File(shared,"control.json")).contains("Nahida Dress")&&!Migration.needed(old,shared),"moved once");
-  GimiPatternsTest.put(old,"control.json","{}");ok(!Migration.needed(old,shared)&&Migration.run(old,shared,priv).mods.isEmpty()&&read(new File(shared,"control.json")).contains("Nahida"),"existing control.json kept");
   // 10. Names given to mods: kept apart from folders and models; blank, or the entry name itself, removes one.
   File lf=new File(base,"labels/com.miHoYo.Yuanshen.json");ok(Labels.read(lf).isEmpty(),"no labels yet");
   Labels.set(lf,"Pack","夏日\n茜特菈莉");Labels.set(lf,"hutao_v1","胡桃");Map<String,String> lab=Labels.read(lf);
@@ -120,6 +112,6 @@ public class ImporterTest {
   Files.write(packJson.toPath(),full.replace("\"mesh\":\"Body\"","\"mesh\":\"Body_LOD3\"").getBytes(StandardCharsets.UTF_8));
   Importer.Mod pk=null;for(Importer.Mod m:Importer.list(mods,models))if(m.name.equals("Pack"))pk=m;
   ok(pk!=null&&pk.outdated&&pk.reason.contains("Body_LOD3")&&ModelManifest.read(pack).lodMesh.equals("Body_LOD3")&&!ModelManifest.lowerLod("Body_LOD0")&&ModelManifest.lowerLod("body_lod1 (Clone)"),"LOD model listed for re-conversion");
-  System.out.println("Importer: PASS (lower-LOD library records and models, mod names, 0.5 → 0.6 migration, unreadable models listed, 7.1 character table, search by ID/name, recommended character first, folder/zip staging, picker prepare/commit/discard, zip-slip guard, bone-library and ID conversion, character change, Mods list, delete, XXMI log line and levels)");
+  System.out.println("Importer: PASS (lower-LOD library records and models, mod names, unreadable models listed, 7.1 character table, search by ID/name, recommended character first, folder/zip staging, picker prepare/commit/discard, zip-slip guard, bone-library and ID conversion, character change, Mods list, delete, XXMI log line and levels)");
  }
 }

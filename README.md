@@ -111,7 +111,7 @@ gradle --no-daemon :app:assembleDebug
 | `Importer.java` / `SafSource.kt` / `Characters.java` / `Labels.java` | 导入（zip 解压）、角色表与推荐、MOD 显示名 |
 | `ModelConverter.java` | 转换器：合并款式，写 `model.json` + `model.bin`，原子替换 |
 | `ModelManifest.java` / `Variants.java` / `Json.java` | 读清单、款式变量、严格 JSON |
-| `ModLibrary.java` / `Control.java` / `Migration.java` | 骨骼库与 Mods 目录、控制与状态文件、旧版本目录迁移 |
+| `ModLibrary.java` / `Control.java` | 骨骼库与 Mods 目录、控制与状态文件 |
 | `bootstrap.cpp` | 检查 Build ID、安装 Tick hook、DDS JNI |
 | `runtime.cpp` | 识别、构建、挂载、恢复、热重载、款式、骨骼库 |
 | `model.hpp` | 模型格式读取与全部检查、CRC-32、`learned.json`、`skeleton.json` |

@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.ActivityNotFoundException
+import android.content.pm.LabeledIntent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -83,8 +84,6 @@ class AppState(private val activity: Activity) {
     var revision by mutableStateOf(0)
         private set
     val stack = mutableStateListOf<Screen>(Screen.Home)
-    /** Servers whose old folders were already looked at this run (declared before init, which refreshes). */
-    private val migrationChecked = mutableSetOf<String>()
 
     /** Imported mods: GIBox's private storage. Models, skeletons, control/status and the log: the game's media folder. */
     val modsRoot: File get() = Control.mods(activity.filesDir, game)
@@ -114,7 +113,6 @@ class AppState(private val activity: Activity) {
     // ---------------------------------------------------------------- state
     fun refresh() {
         storage = hasStorage()
-        if (storage && busy == null && game !in migrationChecked) migrate()
         moduleActive = ModuleStatus.active
         frameworkApi = ModuleStatus.api
         mods = Importer.list(modsRoot, modelsRoot)
@@ -126,50 +124,6 @@ class AppState(private val activity: Activity) {
     }
     fun refreshStatus() { status = Control.status(game) }
 
-    // ---------------------------------------------------------------- 0.5 → 0.6
-    /** Moves mods and control.json out of the old folders once per server (Migration), then offers to convert the mods again. */
-    private fun migrate() {
-        val pkg = game
-        migrationChecked.add(pkg)
-        val legacy = Migration.legacy(pkg)
-        if (!Migration.needed(legacy, Control.shared(pkg))) return
-        work("迁移旧版数据", "正在把已导入的 MOD 移到 GIBox 自己的目录…", { Migration.run(legacy, Control.shared(pkg), Control.mods(activity.filesDir, pkg)) }) { r ->
-            AppLog.info(pkg, "app", "迁移：${r.mods.size} 个 MOD" + (if (r.control) "，control.json" else "") + (if (r.errors.isEmpty()) "" else "；失败：" + r.errors.joinToString("；")))
-            refresh()
-            val failed = if (r.errors.isEmpty()) "" else "\n\n没能移动：\n" + r.errors.joinToString("\n")
-            prompt = if (r.mods.isEmpty()) Prompt("已迁移旧版数据", "开关、勾选和款式设置已沿用。$failed")
-            else Prompt(
-                title = "已迁移旧版数据",
-                text = "${r.mods.size} 个已导入的 MOD 移到了 GIBox 自己的目录。\n模型换成了 GIBox 自己的格式，旧模型不再读取，需要重新转换（用导入时选的角色）。$failed",
-                confirm = "全部转换", onConfirm = { convertAll(r.mods.map { it.name }) }, dismiss = "稍后",
-            )
-        }
-    }
-    /** Re-converts the named mods for the character recorded in each; mods without one are left for the character page. */
-    private fun convertAll(names: List<String>) {
-        work("转换", "正在转换 ${names.size} 个 MOD…", { log ->
-            val done = mutableListOf<String>()
-            val skipped = mutableListOf<String>()
-            val failed = mutableListOf<String>()
-            for (m in Importer.list(modsRoot, modelsRoot)) {
-                if (m.source == null || m.sourceName !in names) continue
-                if (m.id == 0) { skipped.add(m.name); continue }
-                val one = StringBuilder()
-                try { Importer.convert(m.source, m.id, modelsRoot, boneRoot, decoder, one); done.add(m.name) }
-                catch (e: Throwable) { failed.add("${m.name}：${e.message ?: e}") }
-                AppLog.debug(game, "converter", one.toString().trim())
-            }
-            log.append("完成 ${done.size} 个")
-            Triple(done, skipped, failed)
-        }) { (done, skipped, failed) ->
-            AppLog.info(game, LOGGER, "全部转换：完成 ${done.size}，未选角色 ${skipped.size}，失败 ${failed.size}")
-            refresh()
-            val text = StringBuilder("已转换 ${done.size} 个。")
-            if (skipped.isNotEmpty()) text.append("\n\n还没选角色（在 MOD 详情里选）：\n").append(skipped.joinToString("\n"))
-            if (failed.isNotEmpty()) text.append("\n\n失败：\n").append(failed.joinToString("\n"))
-            prompt = Prompt("全部转换", text.toString())
-        }
-    }
     fun mod(name: String): Importer.Mod? = mods.firstOrNull { it.name == name }
     /** The name shown for a mod: the one given to it, else its Mods entry name. */
     fun label(name: String): String = Labels.of(labels, name)
@@ -390,13 +344,22 @@ class AppState(private val activity: Activity) {
         if (!logFile.isFile) { toast("暂无日志文件"); return }
         try {
             val uri = DocumentsContract.buildDocumentUri(DirectoryProvider.AUTHORITY, "$game:shared/${logFile.name}")
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                clipData = ClipData.newRawUri("运行日志", uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            // "Open with" (VIEW) is what text editors and file managers such as MT 管理器 register for;
+            // SEND adds the chat and cloud apps. Both go in one chooser, each app listed once.
+            fun grant(i: Intent) = i.apply { clipData = ClipData.newRawUri("运行日志", uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            val view = grant(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "text/plain"))
+            val send = grant(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri))
+            val chooser = Intent.createChooser(view, "打开运行日志")
+            if (Build.VERSION.SDK_INT >= 29) chooser.putExtra(Intent.EXTRA_ALTERNATE_INTENTS, arrayOf(send))
+            else {
+                val pm = activity.packageManager
+                val viewers = pm.queryIntentActivities(view, 0).map { it.activityInfo.packageName }.toSet()
+                val extra = pm.queryIntentActivities(send, 0).filter { it.activityInfo.packageName !in viewers }.map {
+                    LabeledIntent(Intent(send).setClassName(it.activityInfo.packageName, it.activityInfo.name), it.activityInfo.packageName, it.loadLabel(pm), it.iconResource)
+                }
+                if (extra.isNotEmpty()) chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, extra.toTypedArray())
             }
-            activity.startActivity(Intent.createChooser(intent, "分享运行日志"))
+            activity.startActivity(chooser)
         } catch (e: Throwable) { fail("分享日志", e, null) }
     }
     fun readLog(): String = AppLog.tail(logFile, 128 * 1024)

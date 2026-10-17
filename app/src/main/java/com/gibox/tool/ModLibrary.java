@@ -97,7 +97,7 @@ public final class ModLibrary {
     }
     private static void walk(File d, List<File> out, int depth) {
         File[] a = d.listFiles(); if (a == null || depth > 8) return;
-        for (File f : a) { if (f.isDirectory()) walk(f, out, depth + 1); else if (out.size() < 5000 && !f.getName().equals("modelswap.txt")) out.add(f); }
+        for (File f : a) { if (f.isDirectory()) walk(f, out, depth + 1); else if (out.size() < 5000 && !f.getName().equals("modelswap.txt") && !f.getName().equals(".gibox.tmp")) out.add(f); }
     }
     static String modelName(String folder) {
         String n = folder.replaceAll("[/\\\\:*?\"<>|\\p{Cntrl}]", "_").trim(); while (n.startsWith(".")) n = n.substring(1);
@@ -112,7 +112,7 @@ public final class ModLibrary {
     static void setOverride(File mod, String key, String value) throws Exception {
         Map<String, String> o = overrides(mod); if (value == null) o.remove(key); else o.put(key, value);
         StringBuilder s = new StringBuilder(); for (Map.Entry<String, String> e : o.entrySet()) s.append(e.getKey()).append(' ').append(e.getValue()).append('\n');
-        File tmp = new File(mod, "modelswap.txt.tmp"); Files.write(tmp.toPath(), s.toString().getBytes(StandardCharsets.UTF_8));
+        File tmp = new File(mod, ".gibox.tmp"); Files.write(tmp.toPath(), s.toString().getBytes(StandardCharsets.UTF_8));
         Files.move(tmp.toPath(), new File(mod, "modelswap.txt").toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
     }
 
