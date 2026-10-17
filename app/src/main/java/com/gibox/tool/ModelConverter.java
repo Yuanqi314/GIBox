@@ -29,6 +29,7 @@ public final class ModelConverter {
         final LinkedHashMap<String,Section> sections=new LinkedHashMap<>();
         final LinkedHashMap<String,Integer> vars=new LinkedHashMap<>();
         final LinkedHashMap<String,TreeSet<Integer>> choices=new LinkedHashMap<>();
+        final LinkedHashMap<String,TreeSet<Integer>> excludedChoices=new LinkedHashMap<>();
         Ini(File root)throws Exception {
             File[] files=root.listFiles(f->f.isFile()&&lower(f.getName()).endsWith(".ini"));check(files!=null&&files.length==1,"MOD 根目录必须有且只有一个 INI");
             Section current=null;for(String raw:new String(read(files[0]),StandardCharsets.UTF_8).replace("\uFEFF","").split("\\r?\\n")) {
@@ -42,6 +43,22 @@ public final class ModelConverter {
                 if(lower(s.name).startsWith("key")){int eq=l.indexOf('=');if(eq>0&&l.substring(0,eq).trim().startsWith("$")){String v=lower(l.substring(0,eq).trim());for(String a:l.substring(eq+1).split(","))if(a.trim().matches("-?\\d+"))choices.computeIfAbsent(v,k->new TreeSet<>()).add(Integer.parseInt(a.trim()));}}
             }
             for(String v:choices.keySet())check(vars.containsKey(v),"条件变量缺少初始值："+v);
+            // A variable a key sets can only take the values the keys list (cycle, toggle, hold or activate), the value it
+            // starts with, and literal values other sections assign to it. Constants that only appear in comparisons may
+            // be old, disabled states or bounds; they must not add variants (Ayaka's key cycles $dress = 0,1,2, while old
+            // ifs still test 3..7). A variable no key sets keeps the values its comparisons name.
+            Map<String,TreeSet<Integer>> cycles=new LinkedHashMap<>();
+            for(Section s:sections.values())if(lower(s.name).startsWith("key"))
+                for(String l:s.lines){String[] a=kv(l);if(a==null||!vars.containsKey(a[0])||!a[1].matches("-?\\d+(?:\\s*,\\s*-?\\d+)*"))continue;
+                    TreeSet<Integer> values=cycles.computeIfAbsent(a[0],k->new TreeSet<>());for(String n:a[1].split(","))values.add(Integer.parseInt(n.trim()));}
+            for(Section s:sections.values()){String n=lower(s.name);if(n.startsWith("key")||n.equals("constants"))continue;
+                for(String l:s.lines){String[] a=kv(l);if(a!=null&&cycles.containsKey(a[0])&&a[1].matches("-?\\d+"))cycles.get(a[0]).add(Integer.parseInt(a[1]));}}
+            for(Map.Entry<String,TreeSet<Integer>> e:cycles.entrySet()){
+                e.getValue().add(vars.get(e.getKey())); // The declared initial state is reachable even outside the cycle.
+                TreeSet<Integer> excluded=new TreeSet<>(choices.get(e.getKey()));excluded.removeAll(e.getValue());
+                if(!excluded.isEmpty())excludedChoices.put(e.getKey(),excluded);
+                choices.put(e.getKey(),e.getValue());
+            }
         }
         Section section(String n) { Section s=sections.get(lower(n));check(s!=null,"缺少段："+n);return s; }
         final LinkedHashSet<String> external=new LinkedHashSet<>();
@@ -350,7 +367,11 @@ public final class ModelConverter {
         LinkedHashMap<Draw,Bones> ordered=new LinkedHashMap<>();for(Draw d:draws)if(targets.containsKey(d))ordered.put(d,targets.get(d));check(!ordered.isEmpty()||!required,"全部部件均已跳过");return ordered;
     }
     private static Resource[] textures(Draw d,Map<String,Resource> rs){Resource diffuse=null,light=null,normal=null;
-        for(Map.Entry<String,String> binding:d.bindings.entrySet())if(binding.getKey().startsWith("ps-t")&&!unbound(binding.getValue())){Resource r=resource(rs,binding.getValue());String file=lower(r.file.getName());if(file.contains("lightmap"))light=r;else if(file.contains("normalmap")||file.contains("normal"))normal=r;else if(file.contains("diffuse"))diffuse=r;}
+        for(Map.Entry<String,String> binding:d.bindings.entrySet())if(binding.getKey().startsWith("ps-t")&&!unbound(binding.getValue())){Resource r=resource(rs,binding.getValue());String file=lower(r.file.getName());
+            // Resource names often keep the semantic role when the file is called Skin.dds or has a typo (Ayaka's
+            // ResourceAyakaHeadDiffuse.hair_type_2.black points at HairDifuse_Type_2_black.dds). Preserve file hints first.
+            String role=file.contains("lightmap")||file.contains("normal")||file.contains("diffuse")?file:lower(binding.getValue());
+            if(role.contains("lightmap"))light=r;else if(role.contains("normal"))normal=r;else if(role.contains("diffuse"))diffuse=r;}
         return new Resource[]{diffuse,light,normal};}
     private static String path(Resource r){return r==null?"-":r.file.getPath();}
     /**
@@ -455,6 +476,8 @@ public final class ModelConverter {
     /** Converts one PC mod into one GIBox model folder. Variant combinations share the vertices; each has its own draws. */
     public static File convert(File src,File boneDir,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log)throws Exception {
         Ini ini=new Ini(src);List<Bones> bones;
+        if(o.variants)for(Map.Entry<String,TreeSet<Integer>> e:ini.excludedChoices.entrySet())
+            log.append("款式 ").append(e.getKey()).append(" 按按键列出的值和初始值取 ").append(ini.choices.get(e.getKey())).append("；仅在条件中出现的值不作为可选款式：").append(e.getValue()).append('\n');
         check(o.names.size()<=16,"角色名过多");for(String n:o.names)check(n.matches("[a-z0-9]{3,40}"),"角色名格式："+n);
         if(boneDir==null){check((id==0&&!o.names.isEmpty())||(id>=10000000&&id<=10001999),"没有骨骼目录时需要角色 ID 或角色名");bones=new ArrayList<>();for(String r:DEFAULT_RENDERERS)bones.add(new Bones(r));if(o.fallback==null)o.fallback="Body";}
         else{check(id>=10000000&&id<=10001999,"角色 ID 越界");bones=bones(boneDir,id);}Map<String,String> map=new LinkedHashMap<>();

@@ -41,6 +41,28 @@ public final class ConverterTest {
    Map<String,Object> f=Json.obj(Fixtures.draws(manyOut,0,ef).get(2),"draw");ok(Json.obj(f.get("when"),"when").get("vars").equals(Arrays.asList("$e","$f"))&&Json.write(f.get("when")).replaceAll("\\s","").contains("[[1,1]]"),"nested condition kept: "+Json.write(f));
    ok(!ml.toString().contains("只转换默认款式"),"no fallback to the default variant");}
   // 3DMigoto operators: === and !== (as == and !=), // (floor division), ** (power).
+  // A Resource's semantic name still identifies a texture when the filename has no role or misspells "Diffuse".
+  {File renamed=new File(root,"renamed_texture");renamed.mkdirs();for(String f:new String[]{"Position.buf","Blend.buf","Texcoord.buf","Index.buf"})Files.copy(new File(src,f).toPath(),new File(renamed,f).toPath());
+   put(renamed,"HairDifuse_Type_2_black.dds",new byte[]{1});put(renamed,"mod.ini",ini.replace("filename = Diffuse.dds","filename = HairDifuse_Type_2_black.dds"));
+   File renamedOut=new File(root,"renamed_texture_out");ModelConverter.convert(renamed,bones,renamedOut,10000107,"",true,dds->rgba,new StringBuilder());
+   Map<String,Object> material=Fixtures.material(renamedOut,"Material0");ok(material.containsKey("main")&&!Boolean.TRUE.equals(material.get("original")),"ResourceDiffuse must not silently use the game's original texture: "+material);}
+  // A literal key cycle defines selectable states; inactive legacy branches are not additional variants. Keep the
+  // initial value, union several cycles, and keep condition inference for variables that have no literal cycle.
+  {File cycle=new File(root,"cycle");cycle.mkdirs();for(String f:new String[]{"Position.buf","Blend.buf","Texcoord.buf","Index.buf","Diffuse.dds"})Files.copy(new File(src,f).toPath(),new File(cycle,f).toPath());
+   String text=ini.replace("[TextureOverridePosition]","[KeyDress]\ntype = cycle\n$variant = 0,1\n[TextureOverridePosition]")
+    .replace("ps-t0 = ResourceDiffuse\nif $variant", "if $variant < 2\nps-t0 = ResourceDiffuse\nendif\nif $variant")
+    .replace("else if $variant == 1", "else if $variant == 1 || $variant == 3 || $variant == 4");
+   put(cycle,"mod.ini",text);ModelConverter.Ini ci=new ModelConverter.Ini(cycle);
+   ok(ci.choices.get("$variant").equals(new TreeSet<>(Arrays.asList(0,1))),"comparison constants must not extend a cycle: "+ci.choices);
+   File cycleOut=new File(root,"cycle_out");StringBuilder cl=new StringBuilder();ModelConverter.convert(cycle,bones,cycleOut,10000107,"",true,dds->rgba,cl);
+   ok(ModelManifest.read(cycleOut).vars.get("$variant").equals(Arrays.asList(0,1))&&cl.toString().contains("按按键列出的值"),"only reachable states are exported: "+cl);
+   for(int v:new int[]{0,1})for(Object d:Fixtures.draws(cycleOut,0,Fixtures.set("$variant",v)))ok(!Boolean.TRUE.equals(Fixtures.material(cycleOut,(String)Json.obj(d,"draw").get("material")).get("original")),"legacy untextured state leaked");
+   put(cycle,"mod.ini",text.replace("global persist $variant = 0","global persist $variant = 9")+"\n[KeyMore]\ntype = cycle\n$variant = 5,6\n");ci=new ModelConverter.Ini(cycle);
+   ok(ci.choices.get("$variant").equals(new TreeSet<>(Arrays.asList(0,1,5,6,9))),"cycles union and initial value: "+ci.choices);
+   put(cycle,"mod.ini",text.replace("type = cycle","type = hold").replace("[TextureOverridePosition]","[TextureOverridePosition]\n$variant = 7"));ci=new ModelConverter.Ini(cycle);
+   ok(ci.choices.get("$variant").equals(new TreeSet<>(Arrays.asList(0,1,7))),"any key type, plus values sections assign: "+ci.choices);
+   put(cycle,"mod.ini",text.replace("[KeyDress]\ntype = cycle\n$variant = 0,1\n",""));ci=new ModelConverter.Ini(cycle);
+   ok(ci.choices.get("$variant").containsAll(Arrays.asList(2,3,4)),"a variable no key sets keeps its comparison values");}
   {Map<String,Integer> v=new HashMap<>();v.put("$dress",4);v.put("$a",2);
    ok(new ModelConverter.Expr("$dress!==4",v).eval()==0&&new ModelConverter.Expr("$dress !== 3",v).eval()==1&&new ModelConverter.Expr("$a===2",v).eval()==1&&new ModelConverter.Expr("-7//2",v).eval()==-4&&new ModelConverter.Expr("2**3+$a",v).eval()==10,"3DMigoto operators");}
   // 13 toggles, each in its own section: 8192 assignments in all, but 13 independent groups of 2, so every toggle is
