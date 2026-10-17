@@ -10,14 +10,32 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: android-actions/setup-android@v3
+        with:
+          # The default ('tools platform-tools') fails: the legacy 'tools' package no longer exists.
+          packages: 'platform-tools'
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.7.1'
       # compileSdk 37.1 and build-tools are downloaded by AGP (licenses accepted by setup-android).
       - run: sdkmanager 'ndk;27.2.12479018' 'cmake;3.22.1'
       - run: python3 tools/check_source.py && python3 tools/test_host.py
-      - run: gradle --no-daemon :app:assembleDebug
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then echo "::error::KEYSTORE_BASE64 secret is not set"; exit 1; fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+      - name: Build signed release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle --no-daemon :app:assembleRelease
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
       - uses: actions/upload-artifact@v4
         with:
-          name: GIBox-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: GIBox-release
+          path: app/build/outputs/apk/release/*.apk
