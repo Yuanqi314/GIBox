@@ -4,10 +4,12 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -16,7 +18,7 @@ import androidx.compose.runtime.setValue
 import java.io.File
 import kotlin.concurrent.thread
 
-const val VERSION = "0.7.3"
+const val VERSION = "0.7.4"
 const val BUILD_ID = "2b4dd73155e845a2ef698ec500509baa4eb3bfa8"
 private const val LOGGER = "importer"
 
@@ -223,7 +225,7 @@ class AppState(private val activity: Activity) {
     fun changeLogLevel(level: String) = save("保存") { Control.setLogLevel(game, level) }
     fun exportBones() = save("保存") {
         Control.requestBoneExport(game)
-        toast("已通知游戏：当前角色在场时导出骨骼")
+        toast("已通知游戏：骨骼采集校验通过后导出，未通过会自动重试")
     }
     private fun save(what: String, change: () -> Unit) {
         try { change() } catch (e: Throwable) { fail(what, e, null) }
@@ -348,6 +350,55 @@ class AppState(private val activity: Activity) {
         toast("已复制：$label")
     }
     fun toast(text: String) { Toast.makeText(activity, text, Toast.LENGTH_SHORT).show() }
+    /**
+     * An implicit VIEW, so the system resolves it to the user's default file manager. Folders on shared storage use the
+     * system's own document URI (com.android.externalstorage.documents), which file managers understand; the private
+     * Mods folder, or a manager that does not take that URI, goes through GIBox's DocumentsProvider with a tree grant.
+     */
+    fun openFolder(folder: File) {
+        if (folder != modsRoot && !storage) { needStorage(); return }
+        try {
+            check(folder.isDirectory || folder.mkdirs()) { "无法创建目录：$folder" }
+            DocumentPaths.externalDocumentId(folder)?.let { external ->
+                val uri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", external)
+                for (mime in listOf(DocumentsContract.Document.MIME_TYPE_DIR, "resource/folder")) {
+                    try { activity.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)); return } catch (_: ActivityNotFoundException) {}
+                }
+            }
+            val id = when (folder) {
+                modsRoot -> "$game:mods"
+                modelsRoot -> "$game:shared/models"
+                boneRoot -> "$game:shared/skeletons"
+                else -> error("不支持的目录：$folder")
+            }
+            val tree = DocumentsContract.buildTreeDocumentUri(DirectoryProvider.AUTHORITY, id)
+            val document = DocumentsContract.buildDocumentUriUsingTree(tree, id)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(document, DocumentsContract.Document.MIME_TYPE_DIR)
+                clipData = ClipData.newRawUri("GIBox 目录", tree)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+            }
+            try { activity.startActivity(intent) }
+            catch (_: ActivityNotFoundException) {
+                // Some managers register the older folder MIME type. This remains an implicit request to the system.
+                intent.setDataAndType(document, "resource/folder")
+                activity.startActivity(intent)
+            }
+        } catch (e: Throwable) { fail("打开文件夹", e, null) }
+    }
+    fun shareLog() {
+        if (!logFile.isFile) { toast("暂无日志文件"); return }
+        try {
+            val uri = DocumentsContract.buildDocumentUri(DirectoryProvider.AUTHORITY, "$game:shared/${logFile.name}")
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newRawUri("运行日志", uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activity.startActivity(Intent.createChooser(intent, "分享运行日志"))
+        } catch (e: Throwable) { fail("分享日志", e, null) }
+    }
     fun readLog(): String = AppLog.tail(logFile, 128 * 1024)
     fun clearLog() {
         File(logFile.path + ".1").delete()

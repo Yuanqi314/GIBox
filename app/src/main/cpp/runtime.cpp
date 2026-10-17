@@ -76,11 +76,13 @@ std::shared_ptr<ModelFile> loadModel(const ModelInfo& info){
  auto m=loadModelFile(info.path);require("g:"+m->generation==info.generation,"model.json changed while loading");
  m->name=info.name;m->id=info.id;require(m->parts.size()==info.parts.size(),"model.json changed while loading");return m;
 }
-// skeletons/<name>/skeleton.json, swapped in whole.
+// skeletons/<name>/skeleton.json, verified before an atomic file replacement; keep the last good record on failure.
 void writeSkeleton(const std::string& root,const std::string& name,bool replace,const std::string& json){
- auto dest=root+"/"+name,tmp=root+"/."+name+".tmp";std::filesystem::remove_all(tmp);
- if(!replace){require(!exists(dest),"Skeleton export directory exists");}std::filesystem::create_directories(tmp);
- write(tmp+"/skeleton.json",json);if(replace)std::filesystem::remove_all(dest);std::filesystem::rename(tmp,dest);
+ auto dest=root+"/"+name;if(!replace)require(!exists(dest),"Skeleton export directory exists");std::filesystem::create_directories(dest);
+ auto file=dest+"/skeleton.json",tmp=file+".tmp";
+ {std::ofstream out(tmp,std::ios::binary|std::ios::trunc);out.write(json.data(),std::streamsize(json.size()));out.flush();require(bool(out),"Skeleton write failed: "+tmp);}
+ require(text(tmp)==json,"Skeleton temporary-file verification failed");std::filesystem::rename(tmp,file);
+ require(text(file)==json,"Skeleton read-back verification failed");
 }
 void writeAtomic(const std::string& file,const std::string& body){write(file+".tmp",body);std::filesystem::rename(file+".tmp",file);}
 
@@ -124,6 +126,7 @@ struct Runtime::Impl {
  std::mutex sm;std::optional<ControlState> pendingControl;std::string controlError;std::vector<ModelInfo> scanned;bool scannedFresh=false;
  struct LoadResult {std::string generation,error;std::shared_ptr<ModelFile> data;};
  std::map<std::string,LoadResult> loaded;std::set<std::string> inflight;
+ struct BoneResult {unsigned id;bool library;long long request;std::string error;};std::deque<BoneResult> boneResults;
  // ---- worker only
  std::string controlRaw;uint64_t controlAt=0,scanAt=0;std::map<std::string,ModelInfo> scanCache;
  // ---- game thread only
@@ -144,6 +147,8 @@ struct Runtime::Impl {
  std::map<std::string,std::map<std::string,Fingerprint>> learned;            // path -> part -> target from the world character
  std::map<std::string,Ptr> learnTried;std::set<unsigned> library;std::map<std::string,unsigned> learnedId;Recent<std::pair<Ptr,Ptr>,std::vector<std::string>> chains{1024};Recent<std::pair<Ptr,Ptr>,std::string> rendererNames{2048};std::map<unsigned,uint64_t> libraryRetry;std::map<unsigned,std::string> libraryError;std::map<std::string,unsigned> attempts;  // path|generation -> failed builds
  std::map<std::string,std::string> staleNote;
+ std::set<unsigned> libraryPending;std::map<std::string,std::string> boneRefreshCause;
+ std::string boneCandidate,manualWait,boneBadList;unsigned boneBadStreak=0;Ptr boneCandidateEntity=0;unsigned boneCandidateId=0;uint64_t boneCandidateAt=0,manualRetryAt=0;bool manualPending=false;
  // Async hand-off: wanted models of the last tick (valid until the next tick's consume), GameObject class, Tick thread.
  std::vector<const ModelInfo*> wantedNow;std::vector<Ptr> spawnAttached;Ptr goClass=0;std::atomic<int> tickTid{0};std::atomic<uint64_t> offThread{0};uint64_t spawnOffThread=0,reclaims=0,guardAt=0,binds=0,passes=0;
  std::atomic<int> logLevel{int(Level::Info)};std::map<std::string,std::string> learnedGen;  // log threshold (control.json "logLevel"); generation the learned targets belong to
@@ -208,7 +213,7 @@ struct Runtime::Impl {
  std::vector<Ptr> worldRenderers(){if(!ch.entity)return {};Ptr o=load<Ptr>(ch.entity+0xf8);if(!o)return {};Ptr list=load<Ptr>(o+0x68);if(!list)return {};return pointers(list,64);}
  // Original mesh asset under a renderer, even while one of our meshes is attached to it.
  Ptr originalMesh(Ptr r){auto a=attachments.find(r);if(a!=attachments.end()&&a->second->native==load<Ptr>(r+0x10))return a->second->original;return e.get(abi::getMesh,r);}
- Fingerprint fingerprint(Ptr mesh){Ptr native=load<Ptr>(mesh+0x10);auto key=std::make_pair(native,load<uint32_t>(native+8));if(auto* hit=fpCache.find(key))return *hit;
+ Fingerprint fingerprint(Ptr mesh,bool fresh=false){Ptr native=load<Ptr>(mesh+0x10);auto key=std::make_pair(native,load<uint32_t>(native+8));if(!fresh)if(auto* hit=fpCache.find(key))return *hit;
   Ptr data=load<Ptr>(native+0x48);Fingerprint f;f.mesh=name(mesh);f.vertices=load<uint32_t>(data+0x74);f.submeshes=load<uint32_t>(data+0xc0);f.bones=uint32_t(load<uint64_t>(data+0xe0));
   fpCache.put(key,f);return f;}
  // System.Type of SkinnedMeshRenderer, for FindObjectsOfType. Il2CppClass is laid out differently in this game, so the
@@ -326,7 +331,8 @@ struct Runtime::Impl {
    if(!present||lod){continue;}  // still loading, or showing another level of detail of the same mesh
    for(size_t j=0;j<world.size();j++)if(normalize(world[j].fp.renderer)==normalize(t.renderer)&&meshName(world[j].fp.mesh)==meshName(t.mesh)&&!lodName(world[j].fp.mesh)&&!lodName(t.mesh))hit.push_back(j);
    if(hit.size()!=1){std::string now;for(auto& w:world)if(normalize(w.fp.renderer)==normalize(t.renderer)){now=w.fp.mesh;break;}changed.push_back(t.renderer+" "+t.mesh+"→"+now);continue;}auto fp=world[hit[0]].fp;
-   if(fp.bones!=t.bones){changed.push_back(t.renderer+" 骨骼数 "+std::to_string(t.bones)+"→"+std::to_string(fp.bones));continue;}
+   if(fp.bones!=t.bones){if(m.id==ch.config){auto cause=fingerprintJson(fp),key=m.path+"|"+m.parts[i].name;if(boneRefreshCause[key]!=cause){boneRefreshCause[key]=cause;library.erase(ch.config);libraryRetry[ch.config]=0;boneCandidate.clear();}}
+    changed.push_back(t.renderer+" 骨骼数 "+std::to_string(t.bones)+"→"+std::to_string(fp.bones));continue;}
    learned[m.path][m.parts[i].name]=fp;moved=true;
    log("target-updated",m.name+"/"+m.parts[i].name+": "+t.mesh+" vertices "+std::to_string(t.vertices)+"->"+std::to_string(fp.vertices)+", submeshes "+std::to_string(t.submeshes)+"->"+std::to_string(fp.submeshes));}
   if(moved){saveLearned(m);Set* old=nullptr;for(auto& s:sets)if(s->path==m.path){old=s.get();break;}if(old)releaseSet(old);failed.erase(m.path);}
@@ -560,34 +566,50 @@ struct Runtime::Impl {
   inTick=false;return out;}
 
  // ---------------------------------------------------------------- bone library
- // Records the world character's skeleton. Returns false while the character is still loading (no renderer with a mesh
- // and bones yet): the caller tries again shortly, nothing is logged as an error. Renderers that are there but cannot be
- // recorded are skipped; if none is left, the error says why for each kind.
+ // One complete capture of the world character. Every listed renderer must be usable; a partial capture is retried.
+ // Two identical healthy captures are required before writing. Completion is acknowledged from the worker only.
  bool exportBones(uint64_t now,bool libraryDir){
   // Right after loading, the character shows a lower level of detail (Body_LOD3: fewer vertices and a shorter bone
   // list) for a moment. A record of that would not fit mods made for the full model: wait for the full meshes.
-  exportWait.clear();for(Ptr r:worldRenderers()){if(!alive(r))continue;Ptr mesh=originalMesh(r);if(!alive(mesh))continue;auto fp=fingerprint(mesh);if(lowerLod(fp.mesh)){exportWait=rendererName(r)+" shows "+fp.mesh+" (a lower level of detail)";return false;}}
-  std::vector<SkeletonRenderer> records;std::set<std::string> used;std::string chain;Owned roots;unsigned seenCount=0,loading=0,mismatch=0,unnamed=0,badNames=0;std::string example;
-  try{for(Ptr r:worldRenderers()){seenCount++;if(!alive(r)){loading++;continue;}Ptr mesh=originalMesh(r);if(!alive(mesh)){loading++;continue;}Ptr ba=e.get(abi::getBones,r);if(!ba){loading++;continue;}pin(roots,ba);auto bones=pointers(ba,512);
+  auto renderers=worldRenderers();exportWait.clear();for(Ptr r:renderers){if(!alive(r))continue;Ptr mesh=originalMesh(r);if(!alive(mesh))continue;auto fp=fingerprint(mesh,true);if(lowerLod(fp.mesh)){boneCandidate.clear();library.erase(ch.config);exportWait=rendererName(r)+" shows "+fp.mesh+" (a lower level of detail)";return false;}}
+  std::vector<SkeletonRenderer> records;std::set<std::string> used;std::string chain;Owned roots;unsigned seenCount=0,loading=0,mismatch=0,unnamed=0,badNames=0;std::string example,badList=std::to_string(ch.config)+":";
+  try{for(Ptr r:renderers){seenCount++;if(!alive(r)){loading++;continue;}Ptr mesh=originalMesh(r);if(!alive(mesh)){loading++;continue;}Ptr ba=e.get(abi::getBones,r);if(!ba){loading++;continue;}pin(roots,ba);auto bones=pointers(ba,512);
     Ptr binds=e.get(abi::getBindposes,mesh);if(!binds||bones.empty()){loading++;continue;}pin(roots,binds);
-    auto rn=name(r);if(length(binds,512)!=bones.size()){mismatch++;if(example.empty())example=rn+" "+std::to_string(bones.size())+" bones / "+std::to_string(length(binds,512))+" bindposes";continue;}
-    std::string n;for(char c:rn)if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-')n+=c;if(n.empty()){unnamed++;log("bone-export-skip","unnamed renderer");continue;}if(n.size()>60)n.resize(60);while(!used.insert(n).second)n+="_";
+    auto rn=name(r);if(length(binds,512)!=bones.size()){mismatch++;badList+=rn+" ";if(example.empty())example=rn+" "+std::to_string(bones.size())+" bones / "+std::to_string(length(binds,512))+" bindposes";continue;}
+    std::string n;for(char c:rn)if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-')n+=c;if(n.empty()){unnamed++;badList+="(unnamed) ";continue;}if(n.size()>60)n.resize(60);auto base=n;for(unsigned duplicate=1;!used.insert(n).second;duplicate++)n=base+"_"+std::to_string(duplicate);
     SkeletonRenderer rec;rec.name=n;bool bad=false;
     for(size_t i=0;i<bones.size()&&!bad;i++){if(!alive(bones[i])){bad=true;break;}auto bn=name(bones[i]);if(bn.empty()||bn.size()>256||bn.find_first_of("\t\r\n")!=bn.npos){bad=true;break;}rec.bones.push_back(bn);Ptr parent=e.get(abi::getParent,bones[i]);auto at=std::find(bones.begin(),bones.end(),parent);rec.parents.push_back(at==bones.end()?-1:int(at-bones.begin()));}
-    if(bad){badNames++;if(example.empty())example=rn+": a bone is missing, unnamed, overlong or has a tab/newline";log("bone-export-skip",n+": a bone is missing, unnamed, overlong or has a tab/newline");continue;}
+    if(bad){badNames++;badList+=rn+" ";if(example.empty())example=rn+": a bone is missing, unnamed, overlong or has a tab/newline";continue;}
     // Transform chain from the skeleton up to the scene root: carries the character's internal name for the import guess.
     if(chain.empty()){std::vector<std::string> up;Ptr t=bones[0];for(int i=0;i<24&&t&&alive(t);i++){auto tn=name(t);for(auto& c:tn)if(c=='/'||c=='\n'||c=='\r')c='_';up.push_back(tn);t=e.get(abi::getParent,t);}std::reverse(up.begin(),up.end());for(auto& x:up)chain+=(chain.empty()?"":"/")+x;}
-    rec.target=fingerprint(mesh);rec.target.renderer=rn;rec.bindposes=arrayBytes(binds,64,512);records.push_back(std::move(rec));}}
+    rec.target=fingerprint(mesh,true);rec.target.renderer=rn;rec.bindposes=arrayBytes(binds,64,512);records.push_back(std::move(rec));}}
   catch(...){freeOwned(roots);throw;}
   freeOwned(roots);
-  if(records.empty()){if(seenCount==loading)return false;
-   throw std::runtime_error("No exportable renderer: "+std::to_string(seenCount)+" renderers, "+std::to_string(loading)+" still loading, "+std::to_string(mismatch)+" with bone/bindpose counts that differ, "+std::to_string(unnamed)+" unnamed, "+std::to_string(badNames)+" with unusable bone names"+(example.empty()?"":" (e.g. "+example+")"));}
+  if(records.empty()||records.size()!=seenCount){
+   // A renderer that stays structurally unusable (nothing loading, yet its bone and bindpose counts differ, or it or a
+   // bone has no usable name) while all the others are complete would hold the library back for ever and keep this full
+   // capture running every 500 ms. After 30 s of exactly the same result, the complete renderers are recorded without
+   // it (the two-capture check below still applies) and the log names what was left out.
+   bool structural=!records.empty()&&loading==0&&(mismatch||unnamed||badNames);
+   if(structural&&badList==boneBadList){boneBadStreak++;}else{boneBadList=structural?badList:std::string();boneBadStreak=structural?1:0;}
+   exportWait="Incomplete skeleton: "+std::to_string(seenCount)+" renderers, "+std::to_string(loading)+" still loading, "+std::to_string(mismatch)+" with bone/bindpose counts that differ, "+std::to_string(unnamed)+" unnamed, "+std::to_string(badNames)+" with unusable bone names"+(example.empty()?"":" (e.g. "+example+")");
+   if(!(structural&&boneBadStreak>=60)){boneCandidate.clear();library.erase(ch.config);if(!mismatch&&!unnamed&&!badNames){return false;}throw std::runtime_error(exportWait);}
+   if(boneBadStreak==60)log("bone-library-partial",std::to_string(ch.config)+": recording the complete renderers without "+badList.substr(badList.find(':')+1)+"(unchanged for 30 s: "+exportWait+")");}
+  try{validateSkeleton(ch.config,records);}catch(...){boneCandidate.clear();library.erase(ch.config);throw;}
+  auto stamp=skeletonStamp(chain,records);
+  if(boneCandidateEntity!=ch.entity||boneCandidateId!=ch.config||boneCandidate!=stamp){boneCandidateEntity=ch.entity;boneCandidateId=ch.config;boneCandidate=stamp;boneCandidateAt=now;library.erase(ch.config);exportWait="waiting for a second complete, stable skeleton capture";return false;}
+  if(now<boneCandidateAt+500){exportWait="waiting for a second complete, stable skeleton capture";return false;}
   // Only the engine reads happen here; the JSON is built on the worker, and a library record that has not changed since
   // the last session is left as it is (the skeleton library is checked every session, rewritten only after a game update).
-  auto dir=std::to_string(ch.config)+(libraryDir?"":"-"+std::to_string(now));auto root=boneRoot;unsigned id=ch.config;
-  worker.post([this,root,dir,libraryDir,id,chain,records]{try{auto json=skeletonJson(id,chain,records);auto file=root+"/"+dir+"/skeleton.json";
-    if(libraryDir&&exists(file)){auto old=read(file,64*1024*1024);if(old.size()==json.size()&&std::equal(old.begin(),old.end(),json.begin())){log("bone-library-unchanged",root+"/"+dir);return;}}
-    writeSkeleton(root,dir,libraryDir,json);log(libraryDir?"bone-library":"bones-exported",root+"/"+dir);}catch(const std::exception& ex){log("bone-export-error",ex.what());}});return true;}
+  auto dir=std::to_string(ch.config)+(libraryDir?"":"-"+std::to_string(now));auto root=boneRoot;unsigned id=ch.config;auto request=ctl.exportBones;
+  if(libraryDir)libraryPending.insert(id);else manualPending=true;
+  worker.post([this,root,dir,libraryDir,id,chain,records,request]{BoneResult result{id,libraryDir,request,{}};
+   try{auto json=skeletonJson(id,chain,records);auto file=root+"/"+dir+"/skeleton.json";
+    bool unchanged=libraryDir&&exists(file)&&text(file)==json;
+    if(!unchanged)writeSkeleton(root,dir,libraryDir,json);
+    require(text(file)==json,"Skeleton verification failed");log(unchanged?"bone-library-unchanged":libraryDir?"bone-library":"bones-exported",root+"/"+dir);
+   }catch(const std::exception& ex){result.error=ex.what();}
+   std::lock_guard<std::mutex> lock(sm);boneResults.push_back(std::move(result));});return true;}
 
  // ---------------------------------------------------------------- why a model waits
  // Its targets are known, but no renderer of the last scan shows that mesh. The status line says why in words; the log
@@ -625,11 +647,15 @@ struct Runtime::Impl {
   if(s==lastStatus){return;}lastStatus=s;auto dir=shared;worker.post([dir,s]{write(dir+"/status.json.tmp",s);std::filesystem::rename(dir+"/status.json.tmp",dir+"/status.json");});log(state,detail);}
 
  // ---------------------------------------------------------------- tick
- void consume(){std::optional<ControlState> c;std::string cerr;{std::lock_guard<std::mutex> l(sm);c.swap(pendingControl);cerr.swap(controlError);if(scannedFresh){models=scanned;scannedFresh=false;}}
+ void consume(){std::optional<ControlState> c;std::string cerr;std::deque<BoneResult> bones;{std::lock_guard<std::mutex> l(sm);c.swap(pendingControl);cerr.swap(controlError);bones.swap(boneResults);if(scannedFresh){models=scanned;scannedFresh=false;}}
+  for(auto& b:bones){if(b.library)libraryPending.erase(b.id);else manualPending=false;
+   if(b.error.empty()){if(b.library){library.insert(b.id);libraryError.erase(b.id);}else{exportSeen=b.request;manualWait.clear();}}
+   else{if(b.library)library.erase(b.id);auto& last=b.library?libraryError[b.id]:manualWait;if(last!=b.error){last=b.error;log(b.library?"bone-library-error":"bone-export-error",std::to_string(b.id)+": "+b.error+"; retrying automatically");}}}
   // A re-imported folder (new generation, maybe another character) forgets what was learned for the old one.
   for(auto& m:models){auto g=learnedGen.find(m.path);if(g!=learnedGen.end()&&g->second==m.generation)continue;learned.erase(m.path);learnedId.erase(m.path);learnTried.erase(m.path);staleNote.erase(m.path);learnedGen[m.path]=m.generation;}
   // A bone export is a request made while the game runs: the count found at start-up is not one.
   if(c&&!controlSeen){controlSeen=true;exportSeen=c->exportBones;}
+  if(c&&c->exportBones!=exportSeen&&c->exportBones!=ctl.exportBones){boneCandidate.clear();manualRetryAt=0;manualWait.clear();}
   if(c){ctl=*c;handoff::publishControl(ctl.enabled);failed.clear();attempts.clear();skipped.clear();learnTried.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();}
   if(!cerr.empty())log("control-error",cerr);}
  void tick(uint64_t now){if(inTick)return;if(now<next){guard(now);return;}inTick=true;next=now+100;
@@ -644,13 +670,16 @@ struct Runtime::Impl {
     try{handoff::ProbeScope probe;for(Ptr r:worldRenderers())if(alive(r)){Ptr type=rendererType(r);Ptr go=e.get(static_cast<abi::Offset>(handoff::componentGameObjectRva),r);require(alive(go)&&load<Ptr>(go)!=0,"Renderer GameObject missing");
       pin(handoffTypeRoots,type);handoff::gameObjectClass.store(load<Ptr>(go),std::memory_order_release);handoff::rendererType.store(type,std::memory_order_release);log("handoff-type","SkinnedMeshRenderer Type ready");break;}}
     catch(const std::exception& ex){log("handoff-type-wait",ex.what());}}
-   if(ch.entity&&ctl.exportBones!=exportSeen){exportSeen=ctl.exportBones;try{if(!exportBones(now,false))log("bone-export-error",exportWait.empty()?std::string("the character is still loading; export again once it is on the field"):exportWait+"; export again close to the character");}catch(const std::exception& ex){log("bone-export-error",ex.what());}}
+   if(ch.entity&&ctl.exportBones!=exportSeen&&!manualPending&&now>=manualRetryAt){manualRetryAt=now+500;
+    try{if(!exportBones(now,false)&&manualWait!=exportWait){manualWait=exportWait;log("bone-export-wait",exportWait+"; retrying automatically");}}
+    catch(const std::exception& ex){if(manualWait!=ex.what()){manualWait=ex.what();log("bone-export-error",manualWait+"; retrying automatically");}}}
    // The bone library feeds one-click import, so it is recorded even while replacement is switched off:
-   // once per character per session; renderers that are still loading are retried ten seconds later.
-   // The same failure is reported once per character and session, then retried quietly every ten seconds.
-   if(ch.entity&&!library.count(ch.config)&&now>=libraryRetry[ch.config]){
-    try{if(exportBones(now,true))library.insert(ch.config);else{libraryRetry[ch.config]=now+1000;log("bone-library-wait",std::to_string(ch.config)+(exportWait.empty()?"":": "+exportWait));}}
-    catch(const std::exception& ex){libraryRetry[ch.config]=now+10000;auto& last=libraryError[ch.config];if(last!=ex.what()){last=ex.what();log("bone-library-error",std::to_string(ch.config)+": "+ex.what());}}}
+   // First capture or an explicitly invalidated capture only. Retry every 500 ms without a limit until validated;
+   // after the worker confirms the write/read-back, stop scanning this character until a new capture is requested.
+   if(ch.entity&&!library.count(ch.config)&&!libraryPending.count(ch.config)&&now>=libraryRetry[ch.config]){
+    libraryRetry[ch.config]=now+500;
+    try{if(!exportBones(now,true)){libraryRetry[ch.config]=now+500;log("bone-library-wait",std::to_string(ch.config)+(exportWait.empty()?"":": "+exportWait));}}
+    catch(const std::exception& ex){libraryRetry[ch.config]=now+500;auto& last=libraryError[ch.config];if(last!=ex.what()){last=ex.what();log("bone-library-error",std::to_string(ch.config)+": "+ex.what()+"; retrying automatically");}}}
    if(!ctl.enabled){if(!sets.empty()||!attachments.empty())releaseAll();status("disabled","",{},{});inTick=false;return;}
    auto wanted=chooseModels();wantedNow=wanted;std::set<std::string> wantedPaths;for(auto* m:wanted)wantedPaths.insert(m->path);
    // Sets no longer wanted give their renderers back and stay built for quick switching back: released after a minute

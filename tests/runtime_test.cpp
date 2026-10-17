@@ -13,7 +13,7 @@ namespace {
 struct Obj {std::string kind,name;Ptr mesh=0,materials=0,bones=0,native=0,shared=0,parent=0;std::map<abi::Offset,Ptr> arrays;};
 struct Fake {
  Ptr stringBase=0x7020000000ull,base=0,manager=0,owner=0,klass=0,typeObj=0;std::map<Ptr,Obj> obj;std::vector<void*> allocated;std::map<unsigned,Ptr> handles;unsigned nextHandle=1,nextId=1;
- unsigned clones=0,meshClones=0,textures=0,weightAllocs=0,typeLookups=0,findCalls=0,findAllCalls=0,childCalls=0;std::map<Ptr,Ptr> goOfRenderer;std::map<Ptr,std::vector<Ptr>> goChildren;Ptr lastWeights=0;std::map<Ptr,std::string> strings;std::string lightProperty;bool failMaterials=false,failFind=false;
+ unsigned clones=0,meshClones=0,textures=0,weightAllocs=0,typeLookups=0,findCalls=0,findAllCalls=0,childCalls=0,bindposeReads=0;std::map<Ptr,Ptr> goOfRenderer;std::map<Ptr,std::vector<Ptr>> goChildren;Ptr lastWeights=0;std::map<Ptr,std::string> strings;std::string lightProperty;bool failMaterials=false,failFind=false;
  std::vector<Ptr> scene,assets;/* assets: only in the everything-loaded search (prefabs, inactive pooled instances) */std::vector<std::pair<Ptr,unsigned>> triangles;Ptr skeletonRoot=0,kavehRoot=0;std::map<std::string,Ptr> kinds;
  // Il2CppClass per object kind, laid out unlike stock il2cpp: byval_arg at +0x98 with a type enum that is not the stock
  // 0x12, this_arg (byref bit 0x20) at +0x40, not next to it. Decoys: a pair whose data is the same in every class, and
@@ -57,7 +57,7 @@ void setMesh(Ptr p,Ptr m,Ptr){f->obj.at(p).mesh=m;}void setMaterials(Ptr p,Ptr m
 Ptr newArray(Ptr cls,uint64_t count){return f->array(load<uint16_t>(cls+0xba),count);}void op(Ptr,int,Ptr){}void action(Ptr,Ptr){}
 void submeshCount(Ptr m,int n,Ptr){assert(n>=1);store<uint32_t>(f->obj.at(m).shared+0xc0,n);}
 void sub(Ptr m,Ptr a,int i,Ptr){assert(i>=0&&unsigned(i)<load<uint32_t>(f->obj.at(m).shared+0xc0));f->triangles.push_back({m,unsigned(load<uint64_t>(a+0x18))});}
-Ptr getPos(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getPositions);}Ptr getNorm(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getNormals);}Ptr getUV(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getUV);}Ptr getIdx(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getTriangles);}Ptr getBinds(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getBindposes);}Ptr getColors(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getColors);}Ptr getTangents(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getTangents);}
+Ptr getPos(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getPositions);}Ptr getNorm(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getNormals);}Ptr getUV(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getUV);}Ptr getIdx(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getTriangles);}Ptr getBinds(Ptr p,Ptr){f->bindposeReads++;return f->obj.at(p).arrays.at(abi::getBindposes);}Ptr getColors(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getColors);}Ptr getTangents(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getTangents);}
 // Like il2cpp object_new: the managed shell has no native object until the constructor runs.
 Ptr texType(){Ptr d=f->alloc(8);store<Ptr>(d,f->alloc(0x100));return d;}Ptr objectNew(Ptr cls){assert(cls);Ptr p=f->alloc(0x20);f->obj[p]=Obj{"texture","",0,0,0,0,0,0,{}};return p;}
 void texInit(Ptr o,int w,int h,int fmt,int mip,int linear,Ptr){assert(w>0&&h>0&&fmt==4&&mip==0&&(linear==0||linear==1)&&load<Ptr>(o+0x10)==0);Ptr n=f->alloc(0x80);store<Ptr>(o+0x10,n);f->obj[o].native=n;f->textures++;}
@@ -105,7 +105,7 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
  auto meshOf=[&](Ptr r){return f->obj[r].mesh;};
 
  // 0. The bone library is recorded while replacement is still off (one-click import depends on it).
- control(false,0,0,{});runtime.tick(9000);assert(state()=="disabled"&&exists(boneRoot+"/10000107/skeleton.json")&&meshOf(world)==original&&exists(shared+"/GIBox Log.txt"));
+ control(false,0,0,{});runtime.tick(9000);assert(!exists(boneRoot+"/10000107/skeleton.json"));runtime.tick(9500);assert(state()=="disabled"&&exists(boneRoot+"/10000107/skeleton.json")&&meshOf(world)==original&&exists(shared+"/GIBox Log.txt"));
  // 1. Legacy model A: target learned from the world character, then every renderer showing that asset follows.
  control(true,0,0,{"A","B"});runtime.tick(10000);Ptr a1=meshOf(world);
  assert(state()=="active"&&a1!=original&&meshOf(ui)==a1&&f->obj[ui].materials!=uiMaterials&&f->obj[ui].materials!=f->obj[world].materials);
@@ -131,7 +131,7 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
  for(Ptr r:{world,ui,ui2}){store<Ptr>(r+0x10,0);}f->scene={npc,odd,other};f->world(0);store<uint32_t>(f->manager+0x288,0);runtime.tick(11200);assert(state()=="waiting");
  Ptr world2=f->renderer(original);f->world(world2);f->scene={world2,npc,odd,other};store<uint32_t>(f->manager+0x288,7);runtime.tick(11700);assert(state()=="active"&&meshOf(world2)==a1&&f->meshClones==2);
  // 5. Manual bone export keeps working; renderer names are filtered.
- f->obj[world2].name="Body (1)";control(true,2,1,{"A","B"});runtime.tick(11800);{bool found=false;for(auto& d:std::filesystem::directory_iterator(boneRoot))if(d.path().filename().string().rfind("10000107-",0)==0&&text(d.path().string()+"/skeleton.json").find("\"name\":\"Body1\"")!=std::string::npos)found=true;assert(found&&state()=="active");}f->obj[world2].name="Body";
+ f->obj[world2].name="Body (1)";control(true,2,1,{"A","B"});runtime.tick(11800);runtime.tick(12300);{bool found=false;for(auto& d:std::filesystem::directory_iterator(boneRoot))if(d.path().filename().string().rfind("10000107-",0)==0&&text(d.path().string()+"/skeleton.json").find("\"name\":\"Body1\"")!=std::string::npos)found=true;assert(found&&state()=="active");}f->obj[world2].name="Body";
  // 6. Hot reload: a new generation is built and takes over in one tick; the old mesh is destroyed.
  writeModel(models+"/A",Spec().gen("2"));runtime.tick(13000);Ptr a2=meshOf(world2);assert(a2!=a1&&!alive(a1)&&f->meshClones==3&&state()=="active");
  // A broken edit keeps the last good generation on screen and reports the error.
@@ -272,9 +272,9 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   Runtime lib(e,pkg,root+"/private6",media6,false);lib.tick(600000);lib.tick(600500);
   assert(!exists(shared6+"/skeletons/10000107/skeleton.json")&&(!exists(logFile)||text(logFile).find("bone-library-error")==std::string::npos));
   Ptr broken=f->renderer(f->mesh());store<uint64_t>(f->obj[f->obj[broken].mesh].arrays[abi::getBindposes]+0x18,2);f->world(broken);
-  lib.tick(601200);lib.tick(612000);lib.tick(623000);auto log=text(logFile);auto at=log.find("bone-library-error 10000107: No exportable renderer: 1 renderers, 0 still loading, 1 with bone/bindpose counts that differ");
+  lib.tick(601200);lib.tick(612000);lib.tick(623000);auto log=text(logFile);auto at=log.find("bone-library-error 10000107: Incomplete skeleton: 1 renderers, 0 still loading, 1 with bone/bindpose counts that differ");
   assert(at!=std::string::npos&&log.find("bone-library-error",at+1)==std::string::npos&&log.find("Body 1 bones / 2 bindposes")!=std::string::npos);
-  Ptr good=f->renderer(original);f->world(good);lib.tick(634000);assert(exists(shared6+"/skeletons/10000107/skeleton.json"));lib.shutdown();assert(f->handles.empty());}
+  Ptr good=f->renderer(original);f->world(good);lib.tick(634000);lib.tick(634500);assert(exists(shared6+"/skeletons/10000107/skeleton.json"));lib.shutdown();assert(f->handles.empty());}
  // 18. Why a model waits: before the character is known the scan has not started; then the same mesh at another level of
  //     detail is named with the number that differs (status and log); once LOD0 shows, it attaches.
  {std::string media7=root+"/media7",shared7=media7+"/"+pkg+"/GIBox",models7=shared7+"/models",logFile=shared7+"/GIBox Log.txt";writeModel(models7+"/A",Spec().withTarget(fixture::target("Body")));
@@ -325,6 +325,43 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   ctl10("[\"A\"]");idle.tick(1002400);idle.tick(1003000);assert(meshOf(w10)!=original&&f->meshClones==built);
   ctl10("[]");idle.tick(1003600);idle.tick(1030000);assert(text(logFile).find("model-released")==std::string::npos);idle.tick(1070000);assert(text(logFile).find("model-released A")!=std::string::npos);
   idle.shutdown();assert(f->handles.empty());}
+ // 22. A partially loaded character never produces a partial library/export. A verified library is rechecked after
+ //     a new request, and both bad captures and failed writes retry until healthy, then stop all capture reads.
+ {std::string media11=root+"/media11",shared11=media11+"/"+pkg+"/GIBox",bones11=shared11+"/skeletons",file=bones11+"/10000107/skeleton.json";
+  std::filesystem::create_directories(shared11);auto ctl11=[&](int request){write(shared11+"/control.json","{\"enabled\":false,\"selected\":[],\"exportBones\":"+std::to_string(request)+"}");};ctl11(0);
+  Ptr bm=f->mesh(),fm=f->mesh("Face"),body=f->renderer(bm),face=f->renderer(fm,"FaceBone","Face");Ptr rs[]={body,face};store<Ptr>(f->owner+0x68,f->array(8,2,rs));
+  Ptr faceBinds=f->obj[fm].arrays[abi::getBindposes];store<uint64_t>(faceBinds+0x18,2);
+  Runtime complete(e,pkg,root+"/private11",media11,false);
+  for(uint64_t t=1100000;t<=1103000;t+=500)complete.tick(t);
+  assert(!exists(file)); // Body is good, but Face is not: no successful subset is published.
+  ctl11(1);complete.tick(1103500);assert(!exists(file));
+  store<uint64_t>(faceBinds+0x18,1);complete.tick(1104000);assert(!exists(file));complete.tick(1104500);complete.tick(1105000);
+  auto healthy=text(file);assert(JsonParser(healthy).parse().at("renderers").array.size()==2);
+  auto reads=f->bindposeReads;complete.tick(1106000);complete.tick(1107000);assert(f->bindposeReads==reads);
+  bool exported=false;for(auto& d:std::filesystem::directory_iterator(bones11))if(d.path().filename().string().rfind("10000107-",0)==0){assert(JsonParser(text(d.path().string()+"/skeleton.json")).parse().at("renderers").array.size()==2);exported=true;}assert(exported);
+  // Same renderer objects, a changed skeleton: two bones instead of one; an invalid matrix must keep the good record.
+  Ptr ba=f->obj[body].bones,b1=load<Ptr>(ba+0x20),b2=f->object("bone","BoneB");f->obj[b2].parent=b1;Ptr bs[]={b1,b2};f->obj[body].bones=f->array(8,2,bs);
+  Bytes bind(128);for(int n=0;n<2;n++)for(int j=0;j<4;j++){float one=1;std::memcpy(bind.data()+n*64+j*20,&one,4);}
+  Ptr bindArray=f->array(64,2,bind.data());f->obj[bm].arrays[abi::getBindposes]=bindArray;store<uint64_t>(f->obj[bm].shared+0xe0,2);
+  ctl11(2);store<float>(bindArray+0x20,std::numeric_limits<float>::quiet_NaN());complete.tick(1108000);complete.tick(1108500);assert(text(file)==healthy);
+  store<float>(bindArray+0x20,1);complete.tick(1109000);assert(text(file)==healthy);complete.tick(1109500);complete.tick(1110000);
+  auto updated=text(file);assert(updated!=healthy&&JsonParser(updated).parse().at("renderers").array[0].at("bones").array.size()==2);
+  // A failed write is not marked complete; preserve the old record and recover automatically when storage works.
+  ctl11(3);std::filesystem::create_directory(file+".tmp");f->obj[b2].name="UpdatedBoneB";complete.tick(1113000);complete.tick(1113500);complete.tick(1114000);assert(text(file)==updated);
+  std::filesystem::remove_all(file+".tmp");complete.tick(1114500);complete.tick(1115000);assert(text(file).find("UpdatedBoneB")!=std::string::npos);
+  reads=f->bindposeReads;complete.tick(1116000);complete.tick(1120000);assert(f->bindposeReads==reads);
+  complete.shutdown();assert(f->handles.empty());}
+ // 22. One renderer that never becomes usable (bone and bindpose counts differ) next to a complete one: the capture keeps
+ //     retrying, and after 30 s of the very same result the complete renderer is recorded alone, with a warning.
+ {std::string mediaPartial=root+"/mediaPartial",sharedPartial=mediaPartial+"/"+pkg+"/GIBox",bonesPartial=sharedPartial+"/skeletons",logFile=sharedPartial+"/GIBox Log.txt";std::filesystem::create_directories(sharedPartial);
+  write(sharedPartial+"/control.json","{\"enabled\":false,\"selected\":[]}");
+  Ptr good=f->renderer(original),broken=f->renderer(f->mesh(),"BoneA","Cloak");store<uint64_t>(f->obj[f->obj[broken].mesh].arrays[abi::getBindposes]+0x18,2);
+  store<Ptr>(f->owner+0x68,f->array(8,2,std::vector<Ptr>{good,broken}.data()));
+  Runtime part(e,pkg,root+"/privatePartial",mediaPartial,false);uint64_t t=1100000;
+  for(;t<1100000+20000;t+=500){part.tick(t);}assert(!exists(bonesPartial+"/10000107/skeleton.json"));
+  for(;t<1100000+40000;t+=500){part.tick(t);}auto lib=text(bonesPartial+"/10000107/skeleton.json");auto log=text(logFile);
+  assert(lib.find("\"name\":\"Body\"")!=std::string::npos&&lib.find("Cloak")==std::string::npos&&log.find("runtime WARNING bone-library-partial 10000107: recording the complete renderers without Cloak")!=std::string::npos);
+  part.shutdown();assert(f->handles.empty());}
  std::filesystem::remove_all(root);
- std::cout<<"Native runtime: PASS (idle sets released after a minute, version 2 conditional draws switched in place, lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
+ std::cout<<"Native runtime: PASS (a renderer that never becomes usable left out after 30 s, idle sets released after a minute, version 2 conditional draws switched in place, lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }

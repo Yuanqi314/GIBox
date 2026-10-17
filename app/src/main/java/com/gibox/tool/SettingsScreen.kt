@@ -7,8 +7,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.Create
-import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -27,9 +26,8 @@ import com.alorma.compose.settings.ui.expressive.SettingsMenuLink
 import com.alorma.compose.settings.ui.expressive.SettingsRadioButton
 
 private val SERVERS = listOf("com.miHoYo.Yuanshen", "com.miHoYo.ys.bilibili")
-private val LEVEL_NOTES = listOf("不记录", "只记录警告和错误", "再加导入、加载和替换过程（默认）", "再加逐次细节和转换明细，文件会变大")
 
-/** Settings, built from Compose-Settings (expressive tiles): 通用 / 导入器 / 高级 / 关于, as XXMI's tabs. */
+/** Settings: general access, a log shortcut, advanced tools and file directories. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SettingsScreen(state: AppState) {
@@ -70,22 +68,12 @@ fun SettingsScreen(state: AppState) {
                 }
             }
             item {
-                SettingsGroup(title = { SectionTitle("导入器 · 日志文件输出详细程度") }, verticalArrangement = gap) {
-                    val levels = Control.LOG_LEVELS
-                    levels.forEachIndexed { index, level ->
-                        SettingsRadioButton(
-                            state = state.logLevel == level,
-                            title = { Text(Control.LOG_LEVEL_LABELS[index]) },
-                            subtitle = { Text(LEVEL_NOTES[index]) },
-                            shapes = ListItemDefaults.segmentedShapes(index, levels.size + 1),
-                            onClick = { state.changeLogLevel(level) },
-                        )
-                    }
+                SettingsGroup(title = { SectionTitle("日志") }, verticalArrangement = gap) {
                     SettingsMenuLink(
-                        title = { Text("查看日志") },
+                        title = { Text("查看运行日志") },
                         subtitle = { Text("游戏和 GIBox 写同一个文件：" + AppLog.FILE) },
                         icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = null) },
-                        shapes = ListItemDefaults.segmentedShapes(levels.size, levels.size + 1),
+                        shapes = ListItemDefaults.segmentedShapes(0, 1),
                         onClick = { state.open(Screen.Log) },
                     )
                 }
@@ -110,20 +98,19 @@ fun SettingsScreen(state: AppState) {
             }
             item {
                 val paths = listOf(
-                    "Mods 文件夹" to state.modsRoot.path,
-                    "模型目录" to state.modelsRoot.path,
-                    "骨骼库" to state.boneRoot.path,
-                    "日志文件" to state.logFile.path,
-                    "版本限定 Build ID" to BUILD_ID,
+                    "点击打开 Mods 文件夹" to state.modsRoot,
+                    "点击打开模型文件夹" to state.modelsRoot,
+                    "点击打开骨骼库文件夹" to state.boneRoot,
+                    "分享日志文件" to state.logFile,
                 )
-                SettingsGroup(title = { SectionTitle("关于 GIBox $VERSION（点一项复制）") }, verticalArrangement = gap) {
+                SettingsGroup(title = { SectionTitle("文件目录") }, verticalArrangement = gap) {
                     paths.forEachIndexed { index, (label, value) ->
                         SettingsMenuLink(
                             title = { Text(label) },
-                            subtitle = { Text(value) },
-                            icon = { Icon(if (index == paths.size - 1) Icons.Filled.Info else Icons.Filled.Create, contentDescription = null) },
+                            subtitle = { Text(value.path) },
+                            icon = { Icon(if (index == paths.size - 1) Icons.Filled.Share else Icons.AutoMirrored.Filled.List, contentDescription = null) },
                             shapes = ListItemDefaults.segmentedShapes(index, paths.size),
-                            onClick = { state.copy(label, value) },
+                            onClick = { if (index == paths.size - 1) state.shareLog() else state.openFolder(value) },
                         )
                     }
                 }

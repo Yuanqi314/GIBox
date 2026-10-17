@@ -24,6 +24,7 @@ run([java,'com.sun.tools.javac.Main','--release','8','-d',stubclasses,*stubs])
 sources=sorted((root/'app/src/main/java').rglob('*.java'))
 run([java,'com.sun.tools.javac.Main','--release','8','-cp',stubclasses,'-d',classes,*sources,*sorted((root/'tests').glob('*.java'))])
 run([java,'-cp',classes,'com.gibox.tool.ConverterTest',out/'core_test'])
+run([java,'-cp',classes,'com.gibox.tool.DocumentPathsTest'])
 patterns=out/'gimi-patterns'
 if patterns.exists():shutil.rmtree(patterns)
 patterns.mkdir(parents=True)

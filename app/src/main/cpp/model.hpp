@@ -178,7 +178,28 @@ inline std::string learnedJson(const Learned& l){std::string s="{\"format\":\"gi
 
 // ---------------------------------------------------------------- skeleton library (runtime-written, read by the converter)
 struct SkeletonRenderer {std::string name;Fingerprint target;std::vector<std::string> bones;std::vector<int> parents;Bytes bindposes;};
+// A capture is accepted as a whole. A renderer with a missing bone, cyclic hierarchy or unusable matrix must not
+// silently disappear from a library record while another renderer makes the export look successful.
+inline void validateSkeleton(unsigned id,const std::vector<SkeletonRenderer>& renderers){
+ require(id>=10000000&&id<=10001999&&!renderers.empty()&&renderers.size()<=64,"Skeleton character/renderers");std::set<std::string> names;
+ for(auto& r:renderers){size_t n=r.bones.size();require(safeName(r.name)&&names.insert(r.name).second,"Skeleton renderer name");
+  require(n>0&&n<=512&&r.parents.size()==n&&r.bindposes.size()==64*n&&r.target.bones==n,"Skeleton bone/bindpose count: "+r.name);
+  require(r.target.vertices>0&&r.target.vertices<=model::maxVertices&&r.target.submeshes>0&&r.target.submeshes<=64&&!lowerLod(r.target.mesh),"Skeleton mesh: "+r.name);
+  for(size_t i=0;i<n;i++){auto& bn=r.bones[i];require(!bn.empty()&&bn.size()<=256&&bn.find_first_of("\t\r\n")==bn.npos,"Skeleton bone name: "+r.name);
+   int p=r.parents[i];require(p>=-1&&(p<0||size_t(p)<n),"Skeleton parent range: "+r.name);
+   size_t steps=0;for(int k=int(i);k>=0;k=r.parents[size_t(k)]){require(size_t(k)<n&&++steps<=n,"Skeleton parent cycle: "+r.name);}
+   double a[16];for(int j=0;j<16;j++){a[j]=f32(r.bindposes.data()+64*i+4*j);require(std::isfinite(a[j]),"Skeleton non-finite bindpose: "+r.name);}
+   double det=a[0]*(a[5]*a[10]-a[9]*a[6])-a[4]*(a[1]*a[10]-a[9]*a[2])+a[8]*(a[1]*a[6]-a[5]*a[2]);
+   require(std::isfinite(det)&&std::abs(det)>1e-12&&std::abs(a[15])>1e-12,"Skeleton singular bindpose: "+r.name);
+  }
+ }
+}
+// Exact, bounded comparison of successive engine captures; matrix bytes are kept out of JSON work on the Tick.
+inline std::string skeletonStamp(const std::string& root,const std::vector<SkeletonRenderer>& renderers){std::string out=quote(root);
+ for(auto& r:renderers){out+=quote(r.name)+fingerprintJson(r.target);for(size_t i=0;i<r.bones.size();i++)out+=quote(r.bones[i])+":"+std::to_string(r.parents[i])+";";
+  out.append(reinterpret_cast<const char*>(r.bindposes.data()),r.bindposes.size());}return out;}
 inline std::string skeletonJson(unsigned id,const std::string& root,const std::vector<SkeletonRenderer>& renderers){
+ validateSkeleton(id,renderers);
  std::string s="{\"format\":\"gibox-skeleton\",\"version\":1,\"id\":"+std::to_string(id)+",\"root\":"+quote(root)+",\"renderers\":[";
  for(size_t r=0;r<renderers.size();r++){auto& x=renderers[r];require(x.bindposes.size()==64*x.bones.size()&&x.parents.size()==x.bones.size(),"Skeleton record");
   s+=std::string(r?",":"")+"{\"name\":"+quote(x.name)+",\"target\":"+fingerprintJson(x.target)+",\"bones\":[";

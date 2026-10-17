@@ -89,11 +89,15 @@ int main(int argc,char**argv){
   assert(back.id==10000107&&back.targets.at("Part0").vertices==23521&&back.targets.at("Part0").mesh=="Avatar_Body"&&matches(back.targets.at("Part0"),fp));
   rejects([]{learnedOf(JsonParser("{\"format\":\"gibox-learned\",\"targets\":{\"../x\":{}}}").parse());});rejects([]{learnedOf(JsonParser("{\"format\":\"x\"}").parse());});
   write(root+"/learned.json","{broken");assert(readLearned(root).targets.empty());}
- {SkeletonRenderer r;r.name="Body";r.target={"Body","Avatar_Body",3,1,2};r.bones={"Root","Spine\"1"};r.parents={-1,0};r.bindposes=Bytes(128);floatAt(r.bindposes,0,1.f/3);
+ {SkeletonRenderer r;r.name="Body";r.target={"Body","Avatar_Body",3,1,2};r.bones={"Root","Spine\"1"};r.parents={-1,0};r.bindposes=Bytes(128);for(int b=0;b<2;b++)for(int i=0;i<4;i++)floatAt(r.bindposes,b*64+i*20,1);floatAt(r.bindposes,0,1.f/3);
   auto j=JsonParser(skeletonJson(10000107,"Scene/Avatar_Girl_Catalyst_Citlali",{r})).parse();auto& x=j.at("renderers").array.at(0);
   assert(j.at("format").string=="gibox-skeleton"&&j.at("id").number==10000107&&j.at("root").string.find("Citlali")!=std::string::npos&&x.at("bones").array[1].string=="Spine\"1"&&x.at("parents").array[0].number==-1);
   assert(float(x.at("bindposes").array[0].number)==1.f/3&&x.at("bindposes").array.size()==32&&fingerprintOf(x.at("target")).bones==2);
-  r.parents.pop_back();rejects([&]{skeletonJson(1,"",{r});});}
+  auto good=r;r.parents={1,0};rejects([&]{skeletonJson(10000107,"",{r});});
+  r=good;floatAt(r.bindposes,0,std::numeric_limits<float>::quiet_NaN());rejects([&]{skeletonJson(10000107,"",{r});});
+  r=good;r.bindposes=Bytes(128);rejects([&]{skeletonJson(10000107,"",{r});});
+  r=good;r.target.bones=3;rejects([&]{skeletonJson(10000107,"",{r});});
+  r=good;r.parents.pop_back();rejects([&]{skeletonJson(10000107,"",{r});});}
  assert(crc32(reinterpret_cast<const uint8_t*>("123456789"),9)==0xcbf43926u);
  // ---- shared building blocks
  assert(config(" 10000107\n")==10000107);rejects([]{config("10000107 evil");});
