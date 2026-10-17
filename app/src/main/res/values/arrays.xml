@@ -1,0 +1,1 @@
+<resources><string-array name="xposed_scope"><item>com.miHoYo.Yuanshen</item><item>com.miHoYo.ys.bilibili</item><item>dev.modelswap.only</item></string-array></resources>

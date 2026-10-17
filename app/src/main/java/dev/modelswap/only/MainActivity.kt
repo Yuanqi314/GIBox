@@ -1,0 +1,52 @@
+package dev.modelswap.only
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.runtime.Composable
+
+/** GIBox: the module's app. Pages are a simple back stack in AppState; every page is a full screen. */
+class MainActivity : ComponentActivity() {
+    private lateinit var state: AppState
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        state = AppState(this)
+        setContent { GIBoxTheme { GIBoxApp(state) } }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::state.isInitialized) state.refresh()
+    }
+}
+
+/** Archives only: the system file manager offers .zip files and nothing else. */
+private val ZIP_TYPES = arrayOf("application/zip", "application/x-zip-compressed", "application/x-zip")
+
+@Composable
+fun GIBoxApp(state: AppState) {
+    // The system file manager (Storage Access Framework), .zip only.
+    val zip = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) state.importFrom(uri) }
+    BackHandler(enabled = state.stack.size > 1) { state.back() }
+    AnimatedContent(targetState = state.stack.last(), label = "page") { screen ->
+        when (screen) {
+            Screen.Home -> HomeScreen(state, pickZip = { zip.launch(ZIP_TYPES) })
+            Screen.Settings -> SettingsScreen(state)
+            Screen.Log -> LogScreen(state)
+            Screen.Manual -> ManualScreen(state)
+            is Screen.Character -> CharacterScreen(state, screen.id)
+            is Screen.Detail -> DetailScreen(state, screen.name)
+            is Screen.Pick -> PickScreen(state, screen)
+        }
+    }
+    PromptDialog(state)
+    RenameDialog(state)
+    BusyDialog(state)
+}

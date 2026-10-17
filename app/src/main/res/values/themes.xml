@@ -1,0 +1,4 @@
+<resources>
+    <!-- Window background until Compose draws (MaterialExpressiveTheme takes over); dark variant in values-night. -->
+    <style name="Theme.GIBox" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
