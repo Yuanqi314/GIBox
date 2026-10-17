@@ -2,10 +2,10 @@
 #include <atomic>
 #include <cstdint>
 
-// -DMODELSWAP_HANDOFF_DIAGNOSTICS=1 builds the hand-off diagnostics (handoff_diagnostics_zh.md). Off by default since
+// -DGIBOX_HANDOFF_DIAGNOSTICS=1 builds the hand-off diagnostics (handoff_diagnostics_zh.md). Off by default since
 // 0.3.5: they hook the same hand-off callback that replacement now uses, and need replacement switched off.
-#ifndef MODELSWAP_HANDOFF_DIAGNOSTICS
-#define MODELSWAP_HANDOFF_DIAGNOSTICS 0
+#ifndef GIBOX_HANDOFF_DIAGNOSTICS
+#define GIBOX_HANDOFF_DIAGNOSTICS 0
 #endif
 namespace ms::handoff {
 inline std::atomic<bool> armed{false}, replacementEnabled{true}, controlKnown{false};
@@ -30,6 +30,6 @@ inline void publishControl(bool enabled){
  controlKnown.store(true,std::memory_order_release);
  if(enabled)contaminated.store(true,std::memory_order_release);
 }
-inline bool canSeed(){return MODELSWAP_HANDOFF_DIAGNOSTICS&&armed.load(std::memory_order_acquire)&&controlKnown.load(std::memory_order_acquire)&&!replacementEnabled.load(std::memory_order_acquire)&&!rendererType.load(std::memory_order_acquire);}
+inline bool canSeed(){return GIBOX_HANDOFF_DIAGNOSTICS&&armed.load(std::memory_order_acquire)&&controlKnown.load(std::memory_order_acquire)&&!replacementEnabled.load(std::memory_order_acquire)&&!rendererType.load(std::memory_order_acquire);}
 inline void disarm(){armed.store(false,std::memory_order_release);rendererType.store(0,std::memory_order_release);gameObjectClass.store(0,std::memory_order_release);}
 }

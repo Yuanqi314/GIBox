@@ -20,7 +20,7 @@ void onTick(void*,DobbyRegisterContext*){
  if(auto* d=handoffDiagnostics.load(std::memory_order_acquire))d->onTick();
  if(auto* p=published.load(std::memory_order_acquire))p->tick(now());
 }
-#if !MODELSWAP_HANDOFF_DIAGNOSTICS
+#if !GIBOX_HANDOFF_DIAGNOSTICS
 // The game's async model hand-off (abi::receive): attach before its own callback, check after (Runtime::spawned).
 using ReceiveFn=void(*)(uintptr_t,uint64_t,bool,uint32_t,uintptr_t,uintptr_t);
 ReceiveFn receiveOriginal=nullptr;
@@ -53,7 +53,7 @@ void bootLog(const std::string& pkg,const std::string& state,const std::string& 
  std::filesystem::create_directories(dir);ms::appendLog(dir,ms::logLine("bootstrap",level,detail.empty()?state:state+' '+detail));}catch(const std::exception&){}}
 void bootStatus(const std::string& pkg,const std::string& state,const std::string& detail){auto dir=sharedDir(pkg);try{std::filesystem::create_directories(dir);auto s="{\"state\":"+ms::quote(state)+",\"detail\":"+ms::quote(detail)+",\"characterId\":0,\"model\":\"\"}";ms::write(dir+"/status.json.tmp",s);std::filesystem::rename(dir+"/status.json.tmp",dir+"/status.json");}catch(const std::exception&){}bootLog(pkg,state,detail);}
 }
-extern "C" JNIEXPORT void JNICALL Java_dev_modelswap_only_NativeBridge_start(JNIEnv* env,jclass,jstring jp,jstring jd){try{
+extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv* env,jclass,jstring jp,jstring jd){try{
  auto pkg=jstringValue(env,jp),priv=jstringValue(env,jd);ms::require(pkg=="com.miHoYo.Yuanshen"||pkg=="com.miHoYo.ys.bilibili","Unsupported package");if(started.exchange(true))return;
  std::thread([pkg,priv]{try{bootStatus(pkg,"waiting","等待 libyuanshen.so");Image image;for(unsigned n=0;n<480&&!image.base;n++){dl_iterate_phdr(findImage,&image);if(!image.base)std::this_thread::sleep_for(std::chrono::milliseconds(500));}ms::require(image.base!=0,"libyuanshen.so load timeout");
  auto actual=ms::loadedBuildId(image.base,image.ph,image.count,sizeof(ElfW(Phdr)));if(actual!=ms::abi::buildId){bootStatus(pkg,"buildid-mismatch","实际 Build ID："+actual);return;}
@@ -62,7 +62,7 @@ extern "C" JNIEXPORT void JNICALL Java_dev_modelswap_only_NativeBridge_start(JNI
  runtime=std::move(rt);published.store(runtime.get(),std::memory_order_release);
  int result=DobbyInstrument(reinterpret_cast<void*>(image.base+ms::abi::tick),onTick);
  if(result!=0){published.store(nullptr,std::memory_order_release);runtime.reset();throw std::runtime_error("DobbyInstrument failed: "+std::to_string(result));}bootStatus(pkg,"ready","模型运行时已就绪");
- #if MODELSWAP_HANDOFF_DIAGNOSTICS
+ #if GIBOX_HANDOFF_DIAGNOSTICS
  // A diagnostic failure leaves the existing replacement runtime running.
  try{auto* d=new ms::handoff::Diagnostics(ms::Engine(image.base),sharedDir(pkg)+"/handoff-"+std::to_string(::getpid())+".jsonl");
   handoffDiagnostics.store(d,std::memory_order_release);std::string error;
@@ -82,4 +82,4 @@ extern "C" JNIEXPORT void JNICALL Java_dev_modelswap_only_NativeBridge_start(JNI
  #endif
  }catch(const std::exception& e){bootStatus(pkg,"error",e.what());}}).detach();
  }catch(const std::exception& e){exception(env,e);} }
-extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_modelswap_only_NativeBridge_decodeDds(JNIEnv* env,jclass,jbyteArray input){try{ms::require(input!=nullptr,"Null DDS");auto n=env->GetArrayLength(input);ms::require(n>=128&&n<=256*1024*1024,"DDS input size");ms::Bytes b(n);env->GetByteArrayRegion(input,0,n,reinterpret_cast<jbyte*>(b.data()));if(env->ExceptionCheck())return nullptr;auto t=ms::decodeDds(b);ms::Bytes out(8+t.pixels.size());ms::put32(out.data(),t.w);ms::put32(out.data()+4,t.h);std::memcpy(out.data()+8,t.pixels.data(),t.pixels.size());auto a=env->NewByteArray(out.size());if(!a)return nullptr;env->SetByteArrayRegion(a,0,out.size(),reinterpret_cast<jbyte*>(out.data()));return a;}catch(const std::exception& e){exception(env,e);return nullptr;}}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_gibox_tool_NativeBridge_decodeDds(JNIEnv* env,jclass,jbyteArray input){try{ms::require(input!=nullptr,"Null DDS");auto n=env->GetArrayLength(input);ms::require(n>=128&&n<=256*1024*1024,"DDS input size");ms::Bytes b(n);env->GetByteArrayRegion(input,0,n,reinterpret_cast<jbyte*>(b.data()));if(env->ExceptionCheck())return nullptr;auto t=ms::decodeDds(b);ms::Bytes out(8+t.pixels.size());ms::put32(out.data(),t.w);ms::put32(out.data()+4,t.h);std::memcpy(out.data()+8,t.pixels.data(),t.pixels.size());auto a=env->NewByteArray(out.size());if(!a)return nullptr;env->SetByteArrayRegion(a,0,out.size(),reinterpret_cast<jbyte*>(out.data()));return a;}catch(const std::exception& e){exception(env,e);return nullptr;}}

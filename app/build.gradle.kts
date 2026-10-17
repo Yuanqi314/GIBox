@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "dev.modelswap.only"
+    namespace = "com.gibox.tool"
     // Compose 1.13 / Material 3 1.5 need compileSdk 37.1.
     compileSdk {
         version = release(37) { minorApiLevel = 1 }
@@ -13,11 +13,11 @@ android {
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
-        applicationId = "dev.modelswap.only"
+        applicationId = "com.gibox.tool"
         minSdk = 26
         targetSdk = 34
-        versionCode = 17
-        versionName = "0.6.2-source"
+        versionCode = 18
+        versionName = "0.6.3-source"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             cmake {

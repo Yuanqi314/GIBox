@@ -1,4 +1,4 @@
-package dev.modelswap.only;
+package com.gibox.tool;
 import java.io.*;import java.nio.*;import java.nio.file.*;import java.nio.charset.StandardCharsets;import java.util.*;
 /** Reading converted GIBox model folders and writing skeleton.json records, for the host tests. */
 final class Fixtures {

@@ -10,11 +10,11 @@ root = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("analyze_handoff", root / "tools/analyze_handoff.py")
 analyzer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(analyzer)
-with tempfile.TemporaryDirectory(prefix="modelswap-handoff-") as tmp:
+with tempfile.TemporaryDirectory(prefix="gibox-handoff-") as tmp:
     tmp = Path(tmp)
     (tmp / "dobby.h").write_text('extern "C" int DobbyHook(void*, void*, void**);\n')
     exe = tmp / "handoff_test"
-    subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pthread", "-DMODELSWAP_HANDOFF_DIAGNOSTICS=1",
+    subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pthread", "-DGIBOX_HANDOFF_DIAGNOSTICS=1",
                     "-I" + str(tmp), "-I" + str(root / "app/src/main/cpp"),
                     str(root / "tests/handoff_test.cpp"), "-o", str(exe)], check=True)
     for mode in ("mismatch", "partial", "badlog", "normal"):
@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix="modelswap-handoff-") as tmp:
         assert report["handoffs"][0]["renderers"][0]["mesh_changed"] is True
         assert report["handoffs"][0]["renderers"][0]["material_elements_changed"] is False
         assert report["handoffs"][0]["renderers"][0]["completed_external_setter_calls"] == [1]
-        assert {e["source"] for e in events if e["kind"] == "mesh_setter"} == {"external", "modelswap"}
+        assert {e["source"] for e in events if e["kind"] == "mesh_setter"} == {"external", "gibox"}
         assert any(e["kind"] == "skip" and e.get("reason") == "not_verified_tick_thread" for e in events)
         assert len({e["seq"] for e in events}) == len(events)
         assert len([e for e in events if e["kind"] == "probe_error"]) == 2

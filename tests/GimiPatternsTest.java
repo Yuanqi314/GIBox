@@ -1,4 +1,4 @@
-package dev.modelswap.only;
+package com.gibox.tool;
 import java.io.*;import java.nio.*;import java.nio.file.*;import java.nio.charset.StandardCharsets;import java.util.*;
 /** Common GIMI / XXMI INI patterns that must convert. Host-only regression test. */
 public class GimiPatternsTest {

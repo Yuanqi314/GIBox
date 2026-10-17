@@ -159,7 +159,7 @@ class Diagnostics {
  uint64_t meshEvent(const char* phase,Ptr r,Ptr m,Ptr caller,uint64_t call=0)noexcept{
   if(!armed.load(std::memory_order_acquire)||probeDepth)return 0;
   try{if(!call){call=setterCount.fetch_add(1)+1;if(call>2048){if(call==2049)notice("setter_budget_exhausted","2048 setter calls");return 0;}}
-   auto j=event("mesh_setter");j.str("phase",phase);j.num("call",call);j.ptr("renderer",r);j.ptr("mesh_argument",m);j.ptr("caller",caller);j.str("source",ownWriteDepth?"modelswap":"external");enqueue(j.finish());return call;
+   auto j=event("mesh_setter");j.str("phase",phase);j.num("call",call);j.ptr("renderer",r);j.ptr("mesh_argument",m);j.ptr("caller",caller);j.str("source",ownWriteDepth?"gibox":"external");enqueue(j.finish());return call;
   }catch(...){dropped.fetch_add(1);return 0;}
  }
  static void onReady(Ptr entity,Ptr method){auto* p=instance.load(std::memory_order_acquire);p->snapshot("ready_enter",entity);p->readyOriginal(entity,method);p->snapshot("ready_leave",entity);}

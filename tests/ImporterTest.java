@@ -1,4 +1,4 @@
-package dev.modelswap.only;
+package com.gibox.tool;
 import java.io.*;import java.nio.*;import java.nio.file.*;import java.nio.charset.StandardCharsets;import java.util.*;
 /** Manual import: the 7.1 character table, search, the recommended character, staging folders and zips, conversion with
  *  and without the bone library, character changes, the Mods list, delete, and the XXMI log line. Host-only. */

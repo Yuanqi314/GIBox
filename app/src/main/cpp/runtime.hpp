@@ -13,7 +13,7 @@ struct Engine {
  explicit Engine(Ptr b):base(b){}
  template<class R,class... A>R call(abi::Offset o,A... a){Ptr p=resolver?resolver(o):base+o;require(p!=0,"Unresolved engine function");return reinterpret_cast<R(*)(A...)>(p)(a...);}
  Ptr get(abi::Offset o,Ptr p){return call<Ptr>(o,p,Ptr(0));}
- void set(abi::Offset o,Ptr p,Ptr v){handoff::OwnWriteScope source(MODELSWAP_HANDOFF_DIAGNOSTICS&&(o==abi::setMesh||o==abi::setMaterials));call<void>(o,p,v,Ptr(0));}
+ void set(abi::Offset o,Ptr p,Ptr v){handoff::OwnWriteScope source(GIBOX_HANDOFF_DIAGNOSTICS&&(o==abi::setMesh||o==abi::setMaterials));call<void>(o,p,v,Ptr(0));}
  void op(abi::Offset o,Ptr p,int v){call<void>(o,p,v,Ptr(0));}
  void action(abi::Offset o,Ptr p){call<void>(o,p,Ptr(0));}
 };
