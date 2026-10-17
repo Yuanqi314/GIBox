@@ -110,7 +110,7 @@ public final class ModelConverter {
     private static void commands(Ini ini,Section s,Map<String,Integer> vars,Map<String,Resource> rs,Map<String,String> bindings,List<Draw> draws,String part,int depth){
         check(depth<16,"CommandList 递归过深");for(String l:ini.active(s,vars)){String[] a=kv(l);if(a==null)continue;String k=a[0],v=a[1];if(binding(k))assign(rs,bindings,k,v);
             else if(k.equals("run")){Section target=ini.run(v);if(target!=null)commands(ini,target,vars,rs,bindings,draws,part,depth+1);}
-            else if(k.equals("drawindexed")){String[] f=v.split(",");check(f.length<=3,"drawindexed 参数");int count=f[0].trim().equalsIgnoreCase("auto")?-1:Integer.parseInt(f[0].trim());int start=f.length>1?Integer.parseInt(f[1].trim()):0;check(f.length<3||Integer.parseInt(f[2].trim())==0,"仅支持 baseVertex=0");check(count==-1||count>0,"drawindexed 数量");check(start>=0,"drawindexed 起始");draws.add(new Draw(part,bindings,count,start));}
+            else if(k.equals("drawindexed")){String[] f=v.split(",");check(f.length<=3,"drawindexed 参数");int count=f[0].trim().equalsIgnoreCase("auto")?-1:Integer.parseInt(f[0].trim());int start=f.length>1?Integer.parseInt(f[1].trim()):0;check(f.length<3||Integer.parseInt(f[2].trim())==0,"仅支持 baseVertex=0");check(count>=-1,"drawindexed 数量");check(start>=0,"drawindexed 起始");if(count!=0)draws.add(new Draw(part,bindings,count,start));}
         }
     }
     private static Map<String,Resource> resources(Ini ini,File root,Map<String,Integer> vars)throws Exception {
@@ -207,10 +207,14 @@ public final class ModelConverter {
         Map<String,Set<String>> byHash=new HashMap<>(),resources=new HashMap<>();List<Set<String>> providers=new ArrayList<>();Map<Section,Set<String>> own=new LinkedHashMap<>();
         for(Section s:ini.sections.values()){if(controlSection(s.name))continue;Set<String> vs=sectionVars(ini,s,new HashSet<>());own.put(s,vs);join.accept(vs);if(vs.isEmpty())continue;
             String hash="";boolean draws=false,binds=false;for(String l:s.lines){String[] a=kv(l);if(a==null)continue;if(a[0].equals("hash"))hash=lower(a[1]);if(a[0].equals("drawindexed"))draws=true;if(a[0].matches("vb[0-9]+"))binds=true;}
-            if(!hash.isEmpty())byHash.computeIfAbsent(hash,k->new HashSet<>()).addAll(vs);
+            boolean child=false;for(String l:s.lines){String[] a=kv(l);if(a!=null&&a[0].equals("ib"))child=true;}
+            if(!hash.isEmpty()&&!child)byHash.computeIfAbsent(hash,k->new HashSet<>()).addAll(vs);
             if(lower(s.name).startsWith("resource"))resources.put(lower(s.name),vs);
             else if(lower(s.name).startsWith("textureoverride")&&binds&&!draws)providers.add(vs);}
-        for(Set<String> vs:byHash.values())join.accept(vs);
+        // Sections of one IB hash draw their own parts; only the hash-level section (no ib of its own, e.g. drawindexed =
+        // auto) reaches all of them, so its variables join each of theirs.
+        for(Section s:own.keySet()){String hash="";boolean child=false;for(String l:s.lines){String[] a=kv(l);if(a==null)continue;if(a[0].equals("hash"))hash=lower(a[1]);if(a[0].equals("ib"))child=true;}
+            Set<String> parent=byHash.get(hash);if(!child||parent==null||parent.isEmpty())continue;Set<String> both=new HashSet<>(parent);both.addAll(own.get(s));join.accept(both);}
         // Vertex streams bound by a section without draws can reach any draw: their variables join every section's.
         // A Resource section's variables join those of the sections that name it.
         for(Map.Entry<Section,Set<String>> e:own.entrySet()){Set<String> both=new HashSet<>(e.getValue());
@@ -238,6 +242,13 @@ public final class ModelConverter {
         int run(int g,int i){if(i==local(g,ini.vars))return 0;for(int r=1;r<runs.size();r++)if(runOf.get(r)[0]==g&&runOf.get(r)[1]==i)return r;throw new IllegalStateException();}
     }
     private static Set<String> lines(String signature){Set<String> out=new HashSet<>();for(String l:signature.split("\n"))if(!l.isEmpty())out.add(l);return out;}
+    interface Sig {String of(Map<String,Integer> assignment)throws Exception;}
+    /** What some groups changed together draw, against what each one's own run adds and removes (lines as sets). */
+    static boolean consistent(Ini ini,Variation var,String[] sig,Map<Integer,Integer> set,Sig sigOf)throws Exception{
+        Set<String> base=lines(sig[0]),want=new HashSet<>(base);Map<String,Integer> a=new LinkedHashMap<>(ini.vars);
+        for(Map.Entry<Integer,Integer> e:set.entrySet()){int g=e.getKey(),i=e.getValue();Map<String,Integer> mine=var.assignment(g,i);for(int v:var.groups.get(g))a.put(var.names.get(v),mine.get(var.names.get(v)));
+            Set<String> l=lines(sig[var.run(g,i)]);for(String x:base)if(!l.contains(x))want.remove(x);for(String x:l)if(!base.contains(x))want.add(x);}
+        return lines(sigOf.of(a)).equals(want);}
     /** The t-th pair of n groups (0,1), (0,2) … (n-2,n-1): does it include group g? */
     static boolean pairHas(int t,int n,int g){for(int a=0;a<n;a++)for(int b=a+1;b<n;b++){if(t--==0)return g==a||g==b;}return false;}
     /** Variables a draw depends on in more than one group: the groups were not independent after all. */
@@ -451,25 +462,29 @@ public final class ModelConverter {
         // Variants: every assignment of the variables that an if of a drawing section reads (not the ones only key or
         // Present sections use), one signature each; the distinct signatures are built, and each draw keeps the values of
         // the variables it depends on.
-        List<String> condVars=o.variants?conditionVars(ini):new ArrayList<>();List<List<Integer>> groups=groupVars(ini,condVars);
-        // A group too large to enumerate keeps its variables at their initial values.
-        {List<String> keptVars=new ArrayList<>();List<List<Integer>> keptGroups=new ArrayList<>();Variation probe=new Variation(ini,condVars,new ArrayList<>());
-         for(List<Integer> gr:groups){long t=1;for(int v:gr)t*=probe.values.get(v).size();List<String> vs=new ArrayList<>();for(int v:gr)vs.add(condVars.get(v));
-             if(t>MAX_ASSIGNMENTS){log.append("这几个款式变量互相关联，取值组合过多（").append(t).append(" 种，上限 ").append(MAX_ASSIGNMENTS).append("），只用初始值：").append(vs).append('\n');continue;}
-             List<Integer> idx=new ArrayList<>();for(String v:vs){idx.add(keptVars.size());keptVars.add(v);}keptGroups.add(idx);}
-         condVars=keptVars;groups=keptGroups;}
-        Variation var=new Variation(ini,condVars,groups);
-        Map<Map<String,Integer>,String> sigCache=new HashMap<>();
-        String[] sig=new String[var.runs.size()];for(int i=0;i<sig.length;i++){Map<String,Integer> a=var.runs.get(i);String x=sigCache.get(a);if(x==null){x=signature(ini,src,bones,map,a,o.fallback);sigCache.put(a,x);}sig[i]=x;}
-        // Check that the groups are independent: assignments with several groups away from their initial values must draw
-        // exactly what the groups' own runs add and remove. If not, everything stays at the initial values.
-        if(groups.size()>1){Set<String> base=lines(sig[0]);Random rnd=new Random(1);
-            int pairs=groups.size()*(groups.size()-1)/2,trials=Math.min(pairs,200)+16;
-            for(int t=0;t<trials;t++){Map<String,Integer> a=new LinkedHashMap<>(ini.vars);Set<String> want=new HashSet<>(base);
-                for(int gr=0;gr<groups.size();gr++){if(t<Math.min(pairs,200)?!pairHas(t,groups.size(),gr):rnd.nextBoolean())continue;int i=rnd.nextInt(var.size(gr));Map<String,Integer> mineA=var.assignment(gr,i);for(int v:groups.get(gr))a.put(var.names.get(v),mineA.get(var.names.get(v)));
-                    Set<String> mine=lines(sig[var.run(gr,i)]);for(String l:base)if(!mine.contains(l))want.remove(l);for(String l:mine)if(!base.contains(l))want.add(l);}
-                Set<String> got=lines(signature(ini,src,bones,map,a,o.fallback));
-                if(!got.equals(want)){log.append("款式变量之间相互影响（同时改几组时画出的内容和分别改时对不上），无法分组处理，只转换默认款式\n");var=new Variation(ini,new ArrayList<>(),new ArrayList<>());sig=new String[]{sig[0]};break;}}}
+        List<String> condVars=o.variants?conditionVars(ini):new ArrayList<>();
+        List<List<String>> named=new ArrayList<>();for(List<Integer> gr:groupVars(ini,condVars)){List<String> n=new ArrayList<>();for(int v:gr)n.add(condVars.get(v));named.add(n);}
+        Map<Map<String,Integer>,String> sigCache=new HashMap<>();final Map<String,String> fmap=map;final List<Bones> fbones=bones;
+        Sig sigOf0=a->{String x=sigCache.get(a);if(x==null){x=signature(ini,src,fbones,fmap,a,o.fallback);sigCache.put(new LinkedHashMap<>(a),x);}return x;};
+        Variation var;String[] sig;Random rnd=new Random(1);
+        // Groups that turn out to affect each other (two of them changed together draw something else than each changed
+        // alone predicts) are merged and checked again; a group too large to enumerate keeps its initial values.
+        while(true){
+            List<String> names=new ArrayList<>();List<List<Integer>> groups=new ArrayList<>();
+            for(Iterator<List<String>> it=named.iterator();it.hasNext();){List<String> gr=it.next();long t=1;for(String v:gr)t*=ini.choices.get(v).size();
+                if(t>MAX_ASSIGNMENTS){log.append("这几个款式变量互相关联，取值组合过多（").append(t).append(" 种，上限 ").append(MAX_ASSIGNMENTS).append("），只用初始值：").append(gr).append('\n');it.remove();continue;}
+                List<Integer> idx=new ArrayList<>();for(String v:gr){idx.add(names.size());names.add(v);}groups.add(idx);}
+            var=new Variation(ini,names,groups);sig=new String[var.runs.size()];for(int i=0;i<sig.length;i++)sig[i]=sigOf0.of(var.runs.get(i));
+            if(groups.size()<2)break;
+            int[] bad=null;int pairs=0;
+            for(int a=0;a<groups.size()&&bad==null&&pairs<300;a++)for(int b=a+1;b<groups.size()&&bad==null&&pairs<300;b++,pairs++)
+                {// small pairs: every combination; larger ones: 8 samples
+                 int na=var.size(a),nb=var.size(b);boolean all=(long)na*nb<=16;
+                 for(int t=0;t<(all?na*nb:8)&&bad==null;t++){Map<Integer,Integer> set=new LinkedHashMap<>();set.put(a,all?t/nb:rnd.nextInt(na));set.put(b,all?t%nb:rnd.nextInt(nb));if(!consistent(ini,var,sig,set,sigOf0))bad=new int[]{a,b};}}
+            if(bad!=null){List<String> merged=new ArrayList<>(named.get(bad[0]));merged.addAll(named.get(bad[1]));named.remove(bad[1]);named.set(bad[0],merged);continue;}
+            boolean ok=true;for(int t=0;t<16&&ok;t++){Map<Integer,Integer> set=new LinkedHashMap<>();for(int g=0;g<groups.size();g++)if(rnd.nextBoolean())set.put(g,rnd.nextInt(var.size(g)));ok=consistent(ini,var,sig,set,sigOf0);}
+            if(!ok){log.append("款式变量之间相互影响（同时改几组时画出的内容和分别改时对不上），无法分组处理，只转换默认款式\n");named.clear();continue;}
+            break;}
         List<Map<String,Integer>> kept=new ArrayList<>();Map<String,Integer> sigIndex=new LinkedHashMap<>();int[] sigOf=new int[var.runs.size()];
         for(int i=0;i<var.runs.size();i++){Integer c=sigIndex.get(sig[i]);if(c==null){c=kept.size();sigIndex.put(sig[i],c);kept.add(var.runs.get(i));}sigOf[i]=c;}
         dest=dest.getCanonicalFile();File parent=dest.getParentFile();check(parent.isDirectory()||parent.mkdirs(),"无法创建输出根目录");check(o.replace||!dest.exists(),"输出目录已存在："+dest);

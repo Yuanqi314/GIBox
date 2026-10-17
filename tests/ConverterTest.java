@@ -61,6 +61,17 @@ public final class ConverterTest {
    ok(!m1.equals(m0),"the Resource's variable picks the texture: "+m0+" "+m1);
    // Every draw of the part's sections keeps its slot by match order, whatever else is drawn.
    for(Object d:Fixtures.draws(wideOut,0,bt))ok(Fixtures.number(Json.obj(d,"draw"),"slot")<14,"slot");}
+  // Groups the INI structure does not tie together but that do affect each other (a CommandList binds a Resource whose
+  // file depends on $tex) are found by trying them together and merged; drawindexed = 0 draws nothing.
+  {File cross=new File(root,"cross");cross.mkdirs();for(String f:new String[]{"Position.buf","Blend.buf","Texcoord.buf","Index.buf","Diffuse.dds"})Files.copy(new File(src,f).toPath(),new File(cross,f).toPath());
+   Files.copy(new File(src,"Diffuse.dds").toPath(),new File(cross,"Diffuse2.dds").toPath());
+   String text="[Constants]\nglobal persist $b = 0\nglobal persist $tex = 0\n[TextureOverridePosition]\nvb0 = ResourcePosition\n[TextureOverrideBlend]\nvb1 = ResourceBlend\n[TextureOverrideTexcoord]\nvb2 = ResourceTexcoord\n"
+    +"[TextureOverrideBodyA]\nib = ResourceIndex\nps-t0 = ResourceDiffuse\ndrawindexed = 3, 0, 0\ndrawindexed = 0, 0, 0\n[TextureOverrideBodyB]\nib = ResourceIndex\nif $b == 1\nrun = CommandListSkin\ndrawindexed = 3, 3, 0\nendif\n[CommandListSkin]\nps-t0 = ResourceSkin\n"
+    +ini.substring(ini.indexOf("[ResourcePosition]"))+"[ResourceSkin]\nif $tex == 1\nfilename = Diffuse2.dds\nelse\nfilename = Diffuse.dds\nendif\n";
+   put(cross,"mod.ini",text);File crossOut=new File(root,"cross_out");StringBuilder cl=new StringBuilder();ModelConverter.convert(cross,bones,crossOut,10000107,"",true,dds->rgba,cl);ModelManifest cm=ModelManifest.read(crossOut);
+   Map<String,Integer> both=new HashMap<>();both.put("$b",1);both.put("$tex",1);
+   ok(cm.vars.keySet().equals(new HashSet<>(Arrays.asList("$b","$tex")))&&Fixtures.draws(crossOut,0,new HashMap<>()).size()==1,"merged groups: "+cm.vars.keySet()+"\n"+cl);
+   String m1=(String)Json.obj(Fixtures.draws(crossOut,0,both).get(1),"draw").get("material"),m0=(String)Json.obj(Fixtures.draws(crossOut,0,Fixtures.set("$b",1)).get(1),"draw").get("material");ok(!m1.equals(m0),"texture follows $tex");}
   // One vertex's weights: a bone listed twice is added up, the largest comes first, the sum is 1.
   {float[] w={.1f,.4f,.2f,0};int[] ids={7,3,7,9};ByteBuffer o=b(32);ModelConverter.tidy(w,ids,o);
    ok(Math.abs(o.getFloat(0)-4/7f)<1e-6&&o.getInt(16)==3&&Math.abs(o.getFloat(4)-3/7f)<1e-6&&o.getInt(20)==7&&o.getFloat(8)==0&&o.getInt(24)==0,"weights tidied");}
@@ -134,6 +145,6 @@ public final class ConverterTest {
   for(String j:new String[]{"{\"a\":1,\"a\":2}","[01]","[1,]","{\"a\":1} x","[\"\u0001\"]","[1e999]"}){bad=false;try{Json.parse(j);}catch(IllegalArgumentException e){bad=true;}ok(bad,"JSON accepted: "+j);}
   Object third=((List<?>)Json.parse(Json.write(Arrays.<Object>asList(1f/3,-2.5e-7f)))).get(0);ok(Json.finite(third,"f")==1f/3,"float round trip");
   ok(Json.parse("{\"s\":\"\\u6a21\\\"\"}").equals(Collections.singletonMap("s","模\"")),"escapes");
-  System.out.println("Java converter: PASS (variables enumerated per independent group, 3DMigoto === / !== / // / **, weights merged and sorted, variants by condition beyond 32 assignments, unweighted vertices repaired, GIBox model.json + model.bin, shared vb1, nested commands, inherited auto draw, component scopes, explicit overrides, real ambiguity, merged variants, conditional streams, targets, atomic replace keeping runtime files per character, skeleton.json, no-library conversion, strict JSON, binary interoperability)");
+  System.out.println("Java converter: PASS (groups that affect each other merged after a check, drawindexed = 0 ignored, variables enumerated per independent group, 3DMigoto === / !== / // / **, weights merged and sorted, variants by condition beyond 32 assignments, unweighted vertices repaired, GIBox model.json + model.bin, shared vb1, nested commands, inherited auto draw, component scopes, explicit overrides, real ambiguity, merged variants, conditional streams, targets, atomic replace keeping runtime files per character, skeleton.json, no-library conversion, strict JSON, binary interoperability)");
  }
 }
