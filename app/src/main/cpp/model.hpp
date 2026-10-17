@@ -195,6 +195,15 @@ inline void validateSkeleton(unsigned id,const std::vector<SkeletonRenderer>& re
   }
  }
 }
+// Read back by the runtime: a character showing only a lower level of detail (the world Traveler on some devices) can
+// build on it when its bones and bindposes are exactly the full mesh's recorded here.
+inline std::vector<SkeletonRenderer> readSkeleton(const std::string& file){auto b=read(file,64*1024*1024);auto j=JsonParser(std::string(b.begin(),b.end())).parse();
+ require(j.type==Json::Object&&j.at("format").type==Json::String&&j.at("format").string=="gibox-skeleton","skeleton.json: not a GIBox skeleton");std::vector<SkeletonRenderer> out;
+ for(auto& r:jarr(j,"renderers",1,64)){SkeletonRenderer x;x.name=jstr(r,"name",256);x.target=fingerprintOf(jfield(r,"target"));
+  for(auto& n:jarr(r,"bones",1,512)){require(n.type==Json::String,"skeleton.json: bone name");x.bones.push_back(n.string);}
+  for(auto& p:jarr(r,"bindposes",16*x.bones.size(),16*x.bones.size())){require(p.type==Json::Number,"skeleton.json: bindpose");float f=float(p.number);auto at=x.bindposes.size();x.bindposes.resize(at+4);std::memcpy(x.bindposes.data()+at,&f,4);}
+  out.push_back(std::move(x));}
+ return out;}
 // Exact, bounded comparison of successive engine captures; matrix bytes are kept out of JSON work on the Tick.
 inline std::string skeletonStamp(const std::string& root,const std::vector<SkeletonRenderer>& renderers){std::string out=quote(root);
  for(auto& r:renderers){out+=quote(r.name)+fingerprintJson(r.target);for(size_t i=0;i<r.bones.size();i++)out+=quote(r.bones[i])+":"+std::to_string(r.parents[i])+";";

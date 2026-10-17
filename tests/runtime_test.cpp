@@ -396,6 +396,36 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   Runtime miss(e,pkg,root+"/privateMiss",mediaMiss,false);for(uint64_t t=1500000;t<=1505000;t+=500){miss.tick(t);}
   auto log=text(sharedMiss+"/GIBox Log.txt");auto at=log.find("target-missing Miss/Part0: renderer match missing: Cloak");assert(at!=std::string::npos&&log.find("target-missing",at+1)==std::string::npos&&meshOf(w)==original);
   miss.shutdown();assert(f->handles.empty());}
+ // 27. Phone mesh with fewer materials than the mod's parts (Shenhe: 4 parts, 3 submeshes): the extra slot borrows the
+ //     last material's shader. Clones are taken again after the switch-in effect (twice), adopted copies follow.
+ //     A built model goes onto the controlled character's lower-LOD mesh of the same asset when the bones are the same.
+ {std::string mediaSlot=root+"/mediaSlot",sharedSlot=mediaSlot+"/"+pkg+"/GIBox";Spec s;s.withTarget(fixture::target("Body"));s.textures=true;
+  s.draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0},{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":1}]"};writeModel(sharedSlot+"/models/Slot",s);
+  Ptr full=f->mesh(),w=f->renderer(full);f->world(w);f->scene={w};write(sharedSlot+"/control.json","{\"enabled\":true,\"selected\":[\"Slot\"]}");
+  Runtime slot(e,pkg,root+"/privateSlot",mediaSlot,false);slot.tick(1600000);slot.tick(1600600);slot.tick(1601200);
+  assert(meshOf(w)!=full);Ptr first=f->obj[w].materials;assert(load<uint64_t>(first+0x18)==2);Ptr c0=load<Ptr>(first+0x20),c1=load<Ptr>(first+0x28);assert(c0!=c1&&alive(c0)&&alive(c1));
+  Ptr copy=f->instantiate(w);f->scene={w,copy};slot.tick(1601800);assert(meshOf(copy)==meshOf(w)&&f->obj[copy].materials==first);
+  slot.tick(1602800);Ptr second=f->obj[w].materials;assert(second!=first&&load<Ptr>(second+0x20)!=c0&&load<Ptr>(second+0x28)!=c1&&alive(c0));
+  slot.tick(1605400);assert(f->obj[w].materials!=second);auto third=f->obj[w].materials;assert(load<Ptr>(f->obj[copy].materials+0x20)==load<Ptr>(third+0x20));
+  slot.tick(1609000);assert(f->obj[w].materials==third);
+  auto log=text(sharedSlot+"/GIBox Log.txt");assert(log.find("material-slot-borrowed Slot/Part0: slot 1 has no game material")!=std::string::npos&&log.find("material-slot-borrowed")==log.rfind("material-slot-borrowed"));
+  // The same character now shows only Body_LOD1 (same bone names): ours goes on, and the LOD comes back on restore.
+  Ptr lodMesh=f->mesh("Body_LOD1",2),lod=f->renderer(lodMesh);f->world(lod);f->scene={w,copy,lod};slot.tick(1609600);slot.tick(1610200);
+  assert(meshOf(lod)==meshOf(w)&&text(sharedSlot+"/GIBox Log.txt").find("attached-lod Slot/Part0 over Body_LOD1")!=std::string::npos);
+  Ptr other=f->renderer(f->mesh("Body_LOD1",2),"BoneZ");f->scene={w,copy,lod,other};f->world(other);slot.tick(1610800);slot.tick(1611400);assert(meshOf(other)!=meshOf(w));
+  write(sharedSlot+"/control.json","{\"enabled\":false,\"selected\":[\"Slot\"]}");slot.tick(1612000);assert(meshOf(lod)==lodMesh&&meshOf(w)==full);
+  slot.shutdown();assert(f->handles.empty());}
+ // 28. Only Body_LOD1 in sight from the start: built on it when its bones and bindposes are exactly the bone library's
+ //     record of the full Body; without that record it waits as before.
+ {std::string mediaLod=root+"/mediaLod",sharedLod=mediaLod+"/"+pkg+"/GIBox";Spec s;s.withTarget(fixture::target("Body"));writeModel(sharedLod+"/models/Lod",s);
+  Ptr lodMesh=f->mesh("Body_LOD1",2),lod=f->renderer(lodMesh);f->world(lod);f->scene={lod};write(sharedLod+"/control.json","{\"enabled\":true,\"selected\":[\"Lod\"]}");
+  Runtime first(e,pkg,root+"/privateLod",mediaLod,false);for(uint64_t t=1700000;t<=1702000;t+=500){first.tick(t);}assert(meshOf(lod)==lodMesh);first.shutdown();
+  SkeletonRenderer rec;rec.name="Body";rec.target=fingerprintOf(JsonParser(fixture::target("Body")).parse());rec.bones={"BoneA"};rec.parents={-1};
+  rec.bindposes.assign(reinterpret_cast<const uint8_t*>(f->obj[lodMesh].arrays[abi::getBindposes]+0x20),reinterpret_cast<const uint8_t*>(f->obj[lodMesh].arrays[abi::getBindposes]+0x20+64));
+  std::filesystem::create_directories(sharedLod+"/skeletons/10000107");write(sharedLod+"/skeletons/10000107/skeleton.json",skeletonJson(10000107,"Scene/Avatar_Girl_Catalyst_Citlali",{rec}));
+  Runtime second(e,pkg,root+"/privateLod2",mediaLod,false);for(uint64_t t=1710000;t<=1713000;t+=500){second.tick(t);}
+  auto log=text(sharedLod+"/GIBox Log.txt");assert(meshOf(lod)!=lodMesh&&log.find("template-lod Lod: Body only shows Body_LOD1")!=std::string::npos&&log.find("attached-lod Lod/Part0 over Body_LOD1")!=std::string::npos);
+  second.shutdown();assert(meshOf(lod)==lodMesh&&f->handles.empty());}
  std::filesystem::remove_all(root);
- std::cout<<"Native runtime: PASS (structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
+ std::cout<<"Native runtime: PASS (structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, extra material slots borrow a shader, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }
