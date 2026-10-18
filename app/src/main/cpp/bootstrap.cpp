@@ -36,10 +36,14 @@ using BindFn=uint64_t(*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintp
 BindFn lodBindOriginal=nullptr,meshBonesOriginal=nullptr;
 uint64_t onLodBind(uintptr_t loader,uintptr_t mesh,uintptr_t renderer,uintptr_t a3,uintptr_t a4,uintptr_t a5,uintptr_t a6,uintptr_t a7){
  if(auto* p=published.load(std::memory_order_acquire))mesh=p->bindMesh(renderer,mesh);
- return lodBindOriginal(loader,mesh,renderer,a3,a4,a5,a6,a7);}
+ auto result=lodBindOriginal(loader,mesh,renderer,a3,a4,a5,a6,a7);
+ if(auto* p=published.load(std::memory_order_acquire))p->meshBound(renderer);
+ return result;}
 uint64_t onMeshBones(uintptr_t renderer,uintptr_t mesh,uintptr_t hashes,uintptr_t bones,uintptr_t a4,uintptr_t a5,uintptr_t a6,uintptr_t a7){
  if(auto* p=published.load(std::memory_order_acquire))mesh=p->bindMesh(renderer,mesh);
- return meshBonesOriginal(renderer,mesh,hashes,bones,a4,a5,a6,a7);}
+ auto result=meshBonesOriginal(renderer,mesh,hashes,bones,a4,a5,a6,a7);
+ if(auto* p=published.load(std::memory_order_acquire))p->meshBound(renderer);
+ return result;}
 bool codeMatches(uintptr_t base,const ms::abi::CodeCheck& c){auto* p=reinterpret_cast<const unsigned char*>(base+c.rva);auto digit=[](char x){return x<='9'?x-'0':x-'a'+10;};
  for(size_t i=0;i<16;i++){if(p[i]!=unsigned(digit(c.hex[2*i])*16+digit(c.hex[2*i+1])))return false;}return true;}
 #endif

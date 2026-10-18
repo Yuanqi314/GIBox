@@ -29,6 +29,8 @@ class Runtime {
  void spawned(Ptr gameObject)noexcept;void spawnedAfter()noexcept;
  // The game's mesh + bone binding (abi::lodBind, abi::meshBones): the mesh it should bind instead (native pointers).
  Ptr bindMesh(Ptr rendererNative,Ptr meshNative)noexcept;
+ // Post-call phase of the same mesh/bone hooks: first-time renderers now have their game skeleton bound.
+ void meshBound(Ptr rendererNative)noexcept;
 };
 std::string loadedBuildId(Ptr base,const void* headers,size_t count,size_t stride);
 }

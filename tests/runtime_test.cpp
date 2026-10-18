@@ -13,8 +13,10 @@ namespace {
 struct Obj {std::string kind,name;Ptr mesh=0,materials=0,bones=0,native=0,shared=0,parent=0;std::map<abi::Offset,Ptr> arrays;};
 struct Fake {
  Ptr stringBase=0x7020000000ull,base=0,manager=0,owner=0,klass=0,typeObj=0;std::map<Ptr,Obj> obj;std::vector<void*> allocated;std::map<unsigned,Ptr> handles;unsigned nextHandle=1,nextId=1;
+ // Each built part now clones one restoration snapshot and one mod mesh; count both engine allocations.
  unsigned clones=0,meshClones=0,textures=0,weightAllocs=0,typeLookups=0,findCalls=0,findAllCalls=0,childCalls=0,bindposeReads=0;std::map<Ptr,Ptr> goOfRenderer;std::map<Ptr,std::vector<Ptr>> goChildren;Ptr lastWeights=0;std::map<Ptr,std::string> strings;std::string lightProperty;bool failMaterials=false,failFind=false;
  std::map<Ptr,Ptr> diffuse;std::map<Ptr,float> glow; // material properties copied by Instantiate, including copies made by the game
+ std::map<Ptr,unsigned> nameReads,boneReads; // actual engine getter counts, used to check binding hot-path work
  std::vector<Ptr> scene,assets;/* assets: only in the everything-loaded search (prefabs, inactive pooled instances) */std::vector<std::pair<Ptr,unsigned>> triangles;Ptr skeletonRoot=0,kavehRoot=0;std::map<std::string,Ptr> kinds;
  // Il2CppClass per object kind, laid out unlike stock il2cpp: byval_arg at +0x98 with a type enum that is not the stock
  // 0x12, this_arg (byref bit 0x20) at +0x40, not next to it. Decoys: a pair whose data is the same in every class, and
@@ -49,9 +51,9 @@ struct Fake {
   klass=kindClass("renderer");Ptr scenes=object("transform","Scene");skeletonRoot=object("transform","Avatar_Girl_Catalyst_Citlali");obj[skeletonRoot].parent=scenes;kavehRoot=object("transform","Avatar_Boy_Sword_Kaveh");obj[kavehRoot].parent=scenes;}
  ~Fake(){for(void* p:allocated)std::free(p);munmap(reinterpret_cast<void*>(base),0x16000000);}
 }*f=nullptr;
-Ptr getMesh(Ptr p,Ptr){return f->obj.at(p).mesh;}Ptr getMaterials(Ptr p,Ptr){return f->obj.at(p).materials;}Ptr getBones(Ptr p,Ptr){return f->obj.at(p).bones;}
-Ptr getName(Ptr p,Ptr){auto n=f->obj.at(p).name;Ptr s=f->alloc(0x14+2*n.size());store<uint32_t>(s+0x10,n.size());for(size_t i=0;i<n.size();i++)store<uint16_t>(s+0x14+i*2,n[i]);return s;}
-Ptr clone(Ptr p,Ptr){f->clones++;auto original=f->obj.at(p);if(original.kind!="mesh"){Ptr out=f->object(original.kind,original.name);if(original.kind=="material"){f->diffuse[out]=f->diffuse[p];f->glow[out]=f->glow[p];}return out;}f->meshClones++;Ptr out=f->mesh(original.name,load<uint32_t>(original.shared+0x74));auto& o=f->obj[out];o.arrays=original.arrays;store<uint64_t>(o.shared+0xe0,load<uint64_t>(original.shared+0xe0));return out;}
+Ptr getMesh(Ptr p,Ptr){return f->obj.at(p).mesh;}Ptr getMaterials(Ptr p,Ptr){return f->obj.at(p).materials;}Ptr getBones(Ptr p,Ptr){f->boneReads[p]++;return f->obj.at(p).bones;}
+Ptr getName(Ptr p,Ptr){f->nameReads[p]++;auto n=f->obj.at(p).name;Ptr s=f->alloc(0x14+2*n.size());store<uint32_t>(s+0x10,n.size());for(size_t i=0;i<n.size();i++)store<uint16_t>(s+0x14+i*2,n[i]);return s;}
+Ptr clone(Ptr p,Ptr){f->clones++;auto original=f->obj.at(p);if(original.kind!="mesh"){Ptr out=f->object(original.kind,original.name);if(original.kind=="material"){f->diffuse[out]=f->diffuse[p];f->glow[out]=f->glow[p];}return out;}f->meshClones++;Ptr out=f->mesh(original.name,load<uint32_t>(original.shared+0x74));auto& o=f->obj[out];o.arrays=original.arrays;store<uint64_t>(o.shared+0xe0,load<uint64_t>(original.shared+0xe0));store<uint64_t>(o.native+0x90,load<uint64_t>(original.native+0x90));return out;}
 void destroy(Ptr p,Ptr){store<Ptr>(p+0x10,0);}Ptr parent(Ptr p,Ptr){return f->obj.at(p).parent;}
 uint32_t pin(Ptr p,int,Ptr){auto h=f->nextHandle++;f->handles[h]=p;return h;}void unpin(uint32_t h){assert(f->handles.erase(h)==1);}
 void setMesh(Ptr p,Ptr m,Ptr){f->obj.at(p).mesh=m;}void setMaterials(Ptr p,Ptr m,Ptr){if(f->failMaterials){f->failMaterials=false;throw std::runtime_error("fake-material-failure");}f->obj.at(p).materials=m;}
@@ -122,20 +124,20 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
  // 2. Asset reloaded: a new original mesh with the same fingerprint (name suffix normalised) reuses the built mesh.
  //    B (selected after A, same mesh) is not built: everything it replaces is shown from A.
  Ptr ui2=f->renderer(f->mesh("Body(Clone)"));f->scene.push_back(ui2);unsigned lookups=f->typeLookups;runtime.tick(10100);assert(meshOf(ui2)!=a1);runtime.tick(10500);
- assert(meshOf(ui2)==a1&&f->meshClones==1&&f->typeLookups==lookups&&f->findCalls==2);
+ assert(meshOf(ui2)==a1&&f->meshClones==2&&f->typeLookups==lookups&&f->findCalls==2);
  // 3. Two models of one character: the one switched on first shows. B first: B is built and takes the renderers from A
  //    in the same tick (two textures, LightMap property chosen by name). A first again: A, still built, takes them back.
  control(true,1,0,{"B","A"});runtime.tick(10600);Ptr b1=meshOf(world);
- assert(state()=="active"&&b1!=a1&&meshOf(ui)==b1&&meshOf(ui2)==b1&&f->textures==2&&f->lightProperty=="_LightMapTex"&&f->meshClones==2&&channelSets==3);
+ assert(state()=="active"&&b1!=a1&&meshOf(ui)==b1&&meshOf(ui2)==b1&&f->textures==2&&f->lightProperty=="_LightMapTex"&&f->meshClones==4&&channelSets==3);
  assert(status().at("models").array.size()==1&&status().at("models").array[0].string=="B");
- control(true,2,0,{"A","B"});runtime.tick(10700);assert(meshOf(world)==a1&&meshOf(ui)==a1&&meshOf(ui2)==a1&&f->meshClones==2&&text(shared+"/GIBox Log.txt").find("outranked B/Part0 on Body")!=std::string::npos);
+ control(true,2,0,{"A","B"});runtime.tick(10700);assert(meshOf(world)==a1&&meshOf(ui)==a1&&meshOf(ui2)==a1&&f->meshClones==4&&text(shared+"/GIBox Log.txt").find("outranked B/Part0 on Body")!=std::string::npos);
  // 4. Character leaves (renderers destroyed) and returns as new objects: no rebuild.
  for(Ptr r:{world,ui,ui2}){store<Ptr>(r+0x10,0);}f->scene={npc,odd,other};f->world(0);store<uint32_t>(f->manager+0x288,0);runtime.tick(11200);assert(state()=="waiting");
- Ptr world2=f->renderer(original);f->world(world2);f->scene={world2,npc,odd,other};store<uint32_t>(f->manager+0x288,7);runtime.tick(11700);assert(state()=="active"&&meshOf(world2)==a1&&f->meshClones==2);
+ Ptr world2=f->renderer(original);f->world(world2);f->scene={world2,npc,odd,other};store<uint32_t>(f->manager+0x288,7);runtime.tick(11700);assert(state()=="active"&&meshOf(world2)==a1&&f->meshClones==4);
  // 5. Manual bone export keeps working; renderer names are filtered.
  f->obj[world2].name="Body (1)";control(true,2,1,{"A","B"});runtime.tick(11800);runtime.tick(12300);{bool found=false;for(auto& d:std::filesystem::directory_iterator(boneRoot))if(d.path().filename().string().rfind("10000107-",0)==0&&text(d.path().string()+"/skeleton.json").find("\"name\":\"Body1\"")!=std::string::npos)found=true;assert(found&&state()=="active");}f->obj[world2].name="Body";
  // 6. Hot reload: a new generation is built and takes over in one tick; the old mesh is destroyed.
- writeModel(models+"/A",Spec().gen("2"));runtime.tick(13000);Ptr a2=meshOf(world2);assert(a2!=a1&&!alive(a1)&&f->meshClones==3&&state()=="active");
+ writeModel(models+"/A",Spec().gen("2"));runtime.tick(13000);Ptr a2=meshOf(world2);assert(a2!=a1&&!alive(a1)&&f->meshClones==6&&state()=="active");
  // A broken edit keeps the last good generation on screen and reports the error.
  writeModel(models+"/A",Spec().gen("3"));write(models+"/A/model.bin","bad");runtime.tick(14100);assert(meshOf(world2)==a2&&state()=="active"&&!status().at("errors").array.empty());
  writeModel(models+"/A",Spec().gen("4"));runtime.tick(15200);Ptr a4=meshOf(world2);assert(a4!=a2&&status().at("errors").array.empty());
@@ -180,7 +182,7 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   control(true,4,1,{"A","D"});runtime.tick(26300);
   Ptr spawnMesh=f->mesh("SpawnBody"),dr=f->renderer(spawnMesh,"BoneA","Body",f->kavehRoot),dgo=f->gameObjectOf({dr});unsigned before=f->meshClones;
   runtime.spawned(dr);assert(meshOf(dr)==spawnMesh);
-  runtime.spawned(dgo);runtime.spawnedAfter();assert(meshOf(dr)!=spawnMesh&&f->meshClones==before+1&&text(shared+"/GIBox Log.txt").find("attached 1, adopted 0, built 1")!=std::string::npos);
+  runtime.spawned(dgo);runtime.spawnedAfter();assert(meshOf(dr)!=spawnMesh&&f->meshClones==before+2&&text(shared+"/GIBox Log.txt").find("attached 1, adopted 0, built 1")!=std::string::npos);
   // 12d. Level-of-detail swap by the game between ticks: ours is back on the next frame; disabling later restores the
   //      LOD0 original (the renderer's bones stay bound for that layout).
   Ptr lod=f->mesh("Body_LOD3",2);f->obj[world2].mesh=lod;runtime.tick(26310);assert(meshOf(world2)==model&&text(shared+"/GIBox Log.txt").find("reclaimed A/Part0 <- Body_LOD3")!=std::string::npos);
@@ -374,7 +376,7 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   gateControl("[\"G\"]","{}");Runtime gate(e,pkg,root+"/privateGate",mediaGate,false);gate.tick(1300000);gate.tick(1300600);
   assert(meshOf(w)==original&&f->obj[w].materials==mat&&f->meshClones==built);
   assert(JsonParser(text(sharedGate+"/status.json")).parse().at("detail").string.find("显示替换已关闭")!=std::string::npos);
-  gateControl("[\"G\"]","{\"G\":{\"$vision\":0}}");gate.tick(1301200);gate.tick(1301800);Ptr replaced=meshOf(w);assert(replaced!=original&&f->obj[w].materials!=mat&&f->meshClones==built+1);
+  gateControl("[\"G\"]","{\"G\":{\"$vision\":0}}");gate.tick(1301200);gate.tick(1301800);Ptr replaced=meshOf(w);assert(replaced!=original&&f->obj[w].materials!=mat&&f->meshClones==built+2);
   gateControl("[\"G\"]","{\"G\":{\"$vision\":1}}");gate.tick(1302400);assert(meshOf(w)==original&&f->obj[w].materials==mat);
   gateControl("[\"G\",\"Other\"]","{}");gate.tick(1303000);gate.tick(1303600);assert(meshOf(w)!=original&&meshOf(w)!=replaced&&JsonParser(text(sharedGate+"/status.json")).parse().at("models").array[0].string=="Other");
   gate.shutdown();assert(f->handles.empty());}
@@ -390,7 +392,7 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   assert(st.at("state").string=="waiting"&&st.at("detail").string.find("至少 2 根骨骼")!=std::string::npos&&meshOf(w)==mesh&&meshOf(foreign)==foreignMesh&&f->meshClones==built);
   auto log=text(sharedMin+"/GIBox Log.txt");assert(log.find("build-retry")==std::string::npos&&log.find("spawn-build-error")==std::string::npos);
   twoBones(w);for(uint64_t t=1403500;t<=1406000;t+=500){min.tick(t);}
-  assert(meshOf(w)!=mesh&&meshOf(foreign)==foreignMesh&&learnedAt(dir).targets.at("Part0").bones==2&&f->meshClones==built+1);
+  assert(meshOf(w)!=mesh&&meshOf(foreign)==foreignMesh&&learnedAt(dir).targets.at("Part0").bones==2&&f->meshClones==built+2);
   min.shutdown();assert(f->handles.empty());}
  // 26. A part whose renderer is not on the character is looked for again every scan, but logged once.
  {std::string mediaMiss=root+"/mediaMiss",sharedMiss=mediaMiss+"/"+pkg+"/GIBox";Spec s;s.edit=[](std::string& j){fixture::replaceIn(j,"\"renderer\":\"Body\"","\"renderer\":\"Cloak\"");};writeModel(sharedMiss+"/models/Miss",s);
@@ -519,6 +521,113 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   write(sharedRefresh+"/bone-refresh-result.json","{\"request\":904,\"character\":10000200}");
   {Runtime wrongCharacter(e,pkg,root+"/privateRefreshWrongCharacter",mediaRefresh,false);wrongCharacter.tick(2540000);auto pending=JsonParser(text(sharedRefresh+"/status.json")).parse();assert(pending.at("boneRefreshState").string!="complete");wrongCharacter.tick(2540600);wrongCharacter.tick(2540700);auto done=JsonParser(text(sharedRefresh+"/status.json")).parse();assert(done.at("boneRefreshState").string=="complete");wrongCharacter.shutdown();}
   assert(f->handles.empty());}
+ // 37. Unity Destroy of the saved game mesh/materials cannot poison disable. The independent original snapshot
+ //     remains alive after set release and another on/off cycle. Even an untracked game copy keeps valid assets.
+ {std::string mediaExpired=root+"/mediaExpired",sharedExpired=mediaExpired+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedExpired+"/models/Expired",s);
+  Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh),preview=f->renderer(originalMesh),worldMat=load<Ptr>(f->obj[w].materials+0x20),previewMat=load<Ptr>(f->obj[preview].materials+0x20),texture=f->object("texture","Original game colors");f->diffuse[worldMat]=texture;f->diffuse[previewMat]=texture;f->world(w);f->scene={w,preview};
+  auto request=[&](bool on){write(sharedExpired+"/control.json",std::string("{\"enabled\":")+(on?"true":"false")+",\"selected\":[\"Expired\"]}");};
+  request(true);Runtime expired(e,pkg,root+"/privateExpired",mediaExpired,false);expired.tick(2600000);expired.tick(2600600);Ptr modMesh=meshOf(w);assert(modMesh!=originalMesh&&meshOf(preview)==modMesh);
+  destroy(originalMesh,0);destroy(worldMat,0);destroy(previewMat,0);request(false);expired.tick(2601200);
+  auto st=JsonParser(text(sharedExpired+"/status.json")).parse();Ptr restored=meshOf(w),restoredMat=load<Ptr>(f->obj[w].materials+0x20);
+  assert(st.at("state").string=="disabled"&&alive(restored)&&restored!=modMesh&&restored!=originalMesh&&meshOf(preview)==restored&&f->diffuse[restoredMat]==texture&&!alive(modMesh));
+  request(true);expired.tick(2601800);expired.tick(2602400);Ptr again=meshOf(w);assert(again!=restored&&alive(again));request(false);expired.tick(2603000);
+  assert(meshOf(w)==restored&&meshOf(preview)==restored&&alive(restored)&&alive(restoredMat)&&!alive(again));
+  auto log=text(sharedExpired+"/GIBox Log.txt");assert(log.find("restore-backup Expired")!=std::string::npos&&log.find("Original mesh expired before restore")==std::string::npos&&log.find("tick-error")==std::string::npos);
+  Ptr untracked=f->instantiate(w);destroy(w,0);destroy(preview,0);f->world(0);f->scene={untracked};expired.tick(2603600);
+  assert(meshOf(untracked)==restored&&alive(restored)&&alive(restoredMat)&&f->handles.empty());expired.shutdown();destroy(untracked,0);}
+ // 38. A transient setter failure belongs to one renderer. Other restores complete, and shared clone ownership is
+ //     retained for the still-attached source/follower until its own retry succeeds.
+ {std::string mediaRetry=root+"/mediaRestoreRetry",sharedRetry=mediaRetry+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedRetry+"/models/RetryRestore",s);
+  Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh);f->world(w);f->scene={w};write(sharedRetry+"/control.json","{\"enabled\":true,\"selected\":[\"RetryRestore\"]}");
+  Runtime retry(e,pkg,root+"/privateRestoreRetry",mediaRetry,false);retry.tick(2700000);retry.tick(2700600);Ptr modMesh=meshOf(w),child=f->instantiate(w),go=f->gameObjectOf({child});retry.spawned(go);retry.spawnedAfter();assert(meshOf(child)==modMesh);
+  f->failMaterials=true;write(sharedRetry+"/control.json","{\"enabled\":false,\"selected\":[\"RetryRestore\"]}");retry.tick(2701200);
+  unsigned pending=0;for(Ptr r:{w,child}){if(meshOf(r)==modMesh)pending++;for(Ptr m:{load<Ptr>(f->obj[r].materials+0x20)})assert(alive(m));}
+  assert(pending==1&&alive(modMesh)&&JsonParser(text(sharedRetry+"/status.json")).parse().at("state").string=="waiting");
+  retry.tick(2701800);assert(meshOf(w)==originalMesh&&meshOf(child)==originalMesh&&!alive(modMesh)&&f->handles.empty());
+  assert(text(sharedRetry+"/GIBox Log.txt").find("tick-error")==std::string::npos);retry.shutdown();}
+ // 39. Pre-binding interception retains a fresh incoming original and checks THAT mesh's bone-name hash count, so unloading
+ //     the predecessor does not change the restore target and an incompatible new asset cannot be substituted.
+ {std::string mediaBind=root+"/mediaFreshBind",sharedBind=mediaBind+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedBind+"/models/FreshBind",s);
+  Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh);f->world(w);f->scene={w};write(sharedBind+"/control.json","{\"enabled\":true,\"selected\":[\"FreshBind\"]}");
+  Runtime bind(e,pkg,root+"/privateFreshBind",mediaBind,false);bind.tick(2800000);bind.tick(2800600);Ptr modMesh=meshOf(w),native=load<Ptr>(w+0x10),fresh=f->mesh();
+  Ptr intercepted=bind.bindMesh(native,load<Ptr>(fresh+0x10));assert(intercepted==load<Ptr>(modMesh+0x10));destroy(originalMesh,0);bind.meshBound(native);
+  Ptr incompatible=f->mesh();store<uint64_t>(load<Ptr>(incompatible+0x10)+0x90,0x1234);assert(bind.bindMesh(native,load<Ptr>(incompatible+0x10))==load<Ptr>(incompatible+0x10));
+  write(sharedBind+"/control.json","{\"enabled\":false,\"selected\":[\"FreshBind\"]}");bind.tick(2801200);assert(meshOf(w)==fresh&&f->handles.empty());bind.shutdown();}
+ // 40. A first-time renderer is taken over by the post-binding callback without waiting for another tick/scan.
+ //     Different avatars and off-thread callbacks remain untouched; shutdown does not destroy a displayed fallback.
+ {std::string mediaPost=root+"/mediaPostBind",sharedPost=mediaPost+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedPost+"/models/PostBind",s);
+  Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh);f->world(w);f->scene={w};write(sharedPost+"/control.json","{\"enabled\":true,\"selected\":[\"PostBind\"]}");
+  Runtime post(e,pkg,root+"/privatePostBind",mediaPost,false);post.tick(2900000);post.tick(2900600);Ptr modMesh=meshOf(w),fresh=f->renderer(originalMesh),native=load<Ptr>(fresh+0x10);
+  assert(post.bindMesh(native,load<Ptr>(originalMesh+0x10))==load<Ptr>(originalMesh+0x10));post.meshBound(native);assert(meshOf(fresh)==modMesh&&text(sharedPost+"/GIBox Log.txt").find("bind-attached PostBind")!=std::string::npos);
+  Ptr copy=f->instantiate(fresh);post.meshBound(load<Ptr>(copy+0x10));assert(meshOf(copy)==modMesh);
+  Ptr foreign=f->renderer(originalMesh,"BoneA","Body",f->kavehRoot);post.meshBound(load<Ptr>(foreign+0x10));assert(meshOf(foreign)==originalMesh);
+  Ptr other=f->renderer(originalMesh);std::thread off([&]{post.meshBound(load<Ptr>(other+0x10));});off.join();assert(meshOf(other)==originalMesh);
+  destroy(originalMesh,0);post.shutdown();Ptr restored=meshOf(w);assert(alive(restored)&&restored!=modMesh&&meshOf(fresh)==restored&&meshOf(copy)==restored&&f->handles.empty());}
+ // 41. Disabling one model (global enabled stays true) does not let binding/fast guards revive its pending attachment.
+ {std::string mediaOne=root+"/mediaOneOff",sharedOne=mediaOne+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedOne+"/models/OneOff",s);
+  Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh);f->world(w);f->scene={w};write(sharedOne+"/control.json","{\"enabled\":true,\"selected\":[\"OneOff\"]}");
+  Runtime one(e,pkg,root+"/privateOneOff",mediaOne,false);one.tick(3000000);one.tick(3000600);Ptr modMesh=meshOf(w),native=load<Ptr>(w+0x10),originalNative=load<Ptr>(originalMesh+0x10);assert(modMesh!=originalMesh);
+  f->failMaterials=true;write(sharedOne+"/control.json","{\"enabled\":true,\"selected\":[]}");one.tick(3001200);assert(meshOf(w)==modMesh&&JsonParser(text(sharedOne+"/status.json")).parse().at("state").string=="waiting");
+  assert(one.bindMesh(native,originalNative)==originalNative);f->obj[w].mesh=originalMesh;one.meshBound(native);one.tick(3001210);assert(meshOf(w)==originalMesh);
+  one.tick(3001800);assert(meshOf(w)==originalMesh);one.shutdown();assert(f->handles.empty());}
+ // 42. Repeated unrelated bindings fingerprint once per cache lifetime and never walk the skeleton. Geometry,
+ //     renderer/mesh instance identity, mesh replacement and Tick-time expiry all invalidate the relevant lookup.
+ {std::string mediaFilter=root+"/mediaFilter",sharedFilter=mediaFilter+"/"+pkg+"/GIBox";Spec s;s.withTarget(fixture::target("Body"));writeModel(sharedFilter+"/models/Filter",s);
+  Ptr full=f->mesh(),w=f->renderer(full);f->world(w);f->scene={w};write(sharedFilter+"/control.json","{\"enabled\":true,\"selected\":[\"Filter\"],\"logLevel\":\"debug\"}");
+  Runtime filter(e,pkg,root+"/privateFilter",mediaFilter,false);filter.tick(3100000);filter.tick(3100600);Ptr mod=meshOf(w);assert(mod!=full);
+  Ptr mobMesh=f->mesh("MonsterBody",4),mob=f->renderer(mobMesh),native=load<Ptr>(mob+0x10),mn=load<Ptr>(mobMesh+0x10);unsigned names=f->nameReads[mobMesh],bones=f->boneReads[mob];
+  for(unsigned i=0;i<1000;i++)filter.meshBound(native);
+  assert(meshOf(mob)==mobMesh&&f->nameReads[mobMesh]==names+1&&f->boneReads[mob]==bones);
+  store<uint32_t>(native+8,f->nextId++);filter.meshBound(native);assert(f->nameReads[mobMesh]==names+2);
+  store<uint32_t>(mn+8,f->nextId++);filter.meshBound(native);assert(f->nameReads[mobMesh]==names+3);
+  store<uint32_t>(f->obj[mobMesh].shared+0x74,5);filter.meshBound(native);assert(f->nameReads[mobMesh]==names+4&&f->boneReads[mob]==bones);
+  Ptr ttl=f->renderer(mobMesh);filter.meshBound(load<Ptr>(ttl+0x10));unsigned beforeExpiry=f->nameReads[mobMesh];filter.tick(3102700);
+  filter.meshBound(load<Ptr>(ttl+0x10));filter.meshBound(load<Ptr>(ttl+0x10));assert(f->nameReads[mobMesh]==beforeExpiry+1);
+  assert(text(sharedFilter+"/GIBox Log.txt").find("runtime DEBUG bind-filter-stats checks ")!=std::string::npos);
+  Ptr incoming=f->mesh();f->obj[mob].mesh=incoming;filter.meshBound(native);assert(meshOf(mob)==mod);filter.shutdown();assert(meshOf(mob)==incoming&&f->handles.empty());}
+ // 43. Incomplete headers, bones, parent chains and materials stay retryable on the SAME object. A matching
+ //     fingerprint on the wrong avatar must still be rejected; reparenting a pooled candidate is observed afresh.
+ {std::string mediaLoading=root+"/mediaBindLoading",sharedLoading=mediaLoading+"/"+pkg+"/GIBox";Spec s;s.withTarget(fixture::target("Body"));writeModel(sharedLoading+"/models/Loading",s);
+  Ptr full=f->mesh(),w=f->renderer(full);f->world(w);f->scene={w};write(sharedLoading+"/control.json","{\"enabled\":true,\"selected\":[\"Loading\"]}");
+  Runtime loading(e,pkg,root+"/privateBindLoading",mediaLoading,false);loading.tick(3200000);loading.tick(3200600);Ptr mod=meshOf(w);assert(mod!=full);
+  Ptr preview=f->renderer(full),savedBones=f->obj[preview].bones;f->obj[preview].bones=f->array(8,0);loading.meshBound(load<Ptr>(preview+0x10));assert(meshOf(preview)==full);
+  f->obj[preview].bones=savedBones;loading.meshBound(load<Ptr>(preview+0x10));assert(meshOf(preview)==mod);
+  Ptr worldPending=f->renderer(full),worldBones=f->obj[worldPending].bones;f->obj[worldPending].bones=0;f->world(worldPending);loading.meshBound(load<Ptr>(worldPending+0x10));assert(meshOf(worldPending)==full);
+  f->obj[worldPending].bones=worldBones;loading.meshBound(load<Ptr>(worldPending+0x10));assert(meshOf(worldPending)==mod);f->world(w);
+  Ptr missing=f->renderer(full),mats=f->obj[missing].materials;f->obj[missing].materials=0;loading.meshBound(load<Ptr>(missing+0x10));assert(meshOf(missing)==full);
+  f->obj[missing].materials=mats;loading.meshBound(load<Ptr>(missing+0x10));assert(meshOf(missing)==mod);
+  Ptr empty=f->mesh("",3),unnamed=f->renderer(empty);loading.meshBound(load<Ptr>(unnamed+0x10));assert(meshOf(unnamed)==empty);f->obj[empty].name="Body";loading.meshBound(load<Ptr>(unnamed+0x10));assert(meshOf(unnamed)==mod);
+  Ptr zero=f->mesh("Body",0),partial=f->renderer(zero);loading.meshBound(load<Ptr>(partial+0x10));assert(meshOf(partial)==zero);store<uint32_t>(f->obj[zero].shared+0x74,3);loading.meshBound(load<Ptr>(partial+0x10));assert(meshOf(partial)==mod);
+  Ptr foreign=f->renderer(full,"BoneA","Body",f->kavehRoot);loading.meshBound(load<Ptr>(foreign+0x10));assert(meshOf(foreign)==full);
+  Ptr bone=load<Ptr>(f->obj[foreign].bones+0x20);f->obj[bone].parent=f->skeletonRoot;loading.meshBound(load<Ptr>(foreign+0x10));assert(meshOf(foreign)==mod);
+  loading.shutdown();assert(f->handles.empty());}
+ // 44. LOD candidates pass the coarse filter even when vertex counts differ; the existing world/bone checks decide.
+ {std::string mediaGate=root+"/mediaBindLodGate",sharedGate=mediaGate+"/"+pkg+"/GIBox";Spec s;s.withTarget(fixture::target("Body"));writeModel(sharedGate+"/models/LodGate",s);
+  Ptr full=f->mesh(),w=f->renderer(full);f->world(w);f->scene={w};write(sharedGate+"/control.json","{\"enabled\":true,\"selected\":[\"LodGate\"]}");
+  Runtime gate(e,pkg,root+"/privateBindLodGate",mediaGate,false);gate.tick(3300000);gate.tick(3300600);Ptr mod=meshOf(w),lm=f->mesh("Body_LOD1",2),lr=f->renderer(lm);f->world(lr);gate.meshBound(load<Ptr>(lr+0x10));
+  assert(meshOf(lr)==mod&&text(sharedGate+"/GIBox Log.txt").find("attached-lod LodGate/Part0 over Body_LOD1")!=std::string::npos);
+  gate.shutdown();assert(meshOf(lr)==lm&&f->handles.empty());}
+ // 45. Enabling a new model, hot-reloading an existing target and learning a moved target clear prior rejections.
+ {std::string mediaEpoch=root+"/mediaBindEpoch",sharedEpoch=mediaEpoch+"/"+pkg+"/GIBox";Spec a;a.withTarget(fixture::target("Body"));writeModel(sharedEpoch+"/models/Epoch",a);
+  Spec b;b.character(10000107,{"citlali"}).withTarget(fixture::target("Cape"));writeModel(sharedEpoch+"/models/New",b);Ptr full=f->mesh(),w=f->renderer(full);f->world(w);f->scene={w};
+  write(sharedEpoch+"/control.json","{\"enabled\":true,\"selected\":[\"Epoch\"]}");Runtime epoch(e,pkg,root+"/privateBindEpoch",mediaEpoch,false);epoch.tick(3400000);epoch.tick(3400600);
+  Ptr cape=f->mesh("Cape"),candidate=f->renderer(cape),cn=load<Ptr>(candidate+0x10);epoch.meshBound(cn);assert(meshOf(candidate)==cape);
+  write(sharedEpoch+"/control.json","{\"enabled\":true,\"selected\":[\"Epoch\",\"New\"]}");epoch.tick(3401200);assert(meshOf(candidate)==cape);epoch.meshBound(cn);assert(meshOf(candidate)!=cape);epoch.shutdown();assert(f->handles.empty());
+  // An edit changes the target with no control edit. The rejected renderer is not in the scan, so only meshBound sees it.
+  f->world(w);f->scene={w};write(sharedEpoch+"/control.json","{\"enabled\":true,\"selected\":[\"Epoch\"]}");Runtime reload(e,pkg,root+"/privateBindEpochReload",mediaEpoch,false);reload.tick(3410000);reload.tick(3410600);
+  Ptr pm=f->mesh("NewBody"),pr=f->renderer(pm),pn=load<Ptr>(pr+0x10);reload.meshBound(pn);assert(meshOf(pr)==pm);Spec updated;updated.gen("2").withTarget(fixture::target("NewBody"));writeModel(sharedEpoch+"/models/Epoch",updated);
+  reload.tick(3411700);reload.tick(3412300);unsigned reads=f->nameReads[pm];reload.meshBound(pn);assert(f->nameReads[pm]==reads+1&&meshOf(pr)==pm); // prior rejection was cleared, but the new template is not built yet
+  f->world(pr);reload.tick(3412900);assert(meshOf(pr)!=pm);reload.shutdown();assert(f->handles.empty());
+  // checkStale learns a new vertex count from the world without changing model.json/control.json.
+  writeModel(sharedEpoch+"/models/Epoch",a);f->world(w);f->scene={w};Runtime learned(e,pkg,root+"/privateBindEpochLearned",mediaEpoch,false);learned.tick(3420000);learned.tick(3420600);
+  Ptr moved=f->mesh("Body",4),mr=f->renderer(moved),mn=load<Ptr>(mr+0x10),hidden=f->renderer(moved),hn=load<Ptr>(hidden+0x10);learned.meshBound(mn);learned.meshBound(hn);assert(meshOf(mr)==moved&&meshOf(hidden)==moved);
+  f->world(mr);f->scene={mr};learned.tick(3421200);assert(meshOf(mr)!=moved);learned.meshBound(hn);assert(meshOf(hidden)==meshOf(mr));learned.shutdown();assert(f->handles.empty());}
+ // 46. Unknown targets do not produce negative entries. Once the world renderer teaches the target, an existing
+ //     preview can be taken over immediately without waiting for rejection expiry or recreating its object.
+ {std::string mediaUnknown=root+"/mediaBindUnknown",sharedUnknown=mediaUnknown+"/"+pkg+"/GIBox";writeModel(sharedUnknown+"/models/Unknown");f->world(0);f->scene.clear();f->assets.clear();
+  write(sharedUnknown+"/control.json","{\"enabled\":true,\"selected\":[\"Unknown\"]}");Runtime unknown(e,pkg,root+"/privateBindUnknown",mediaUnknown,false);unknown.tick(3500000);unknown.tick(3500600);
+  Ptr full=f->mesh(),preview=f->renderer(full),native=load<Ptr>(preview+0x10);unsigned reads=f->nameReads[full];unknown.meshBound(native);unknown.meshBound(native);assert(meshOf(preview)==full&&f->nameReads[full]==reads+2);
+  Ptr w=f->renderer(full);f->world(w);f->scene={w};unknown.tick(3501200);assert(meshOf(w)!=full);unknown.meshBound(native);assert(meshOf(preview)==meshOf(w));unknown.shutdown();assert(f->handles.empty());}
  std::filesystem::remove_all(root);
  std::cout<<"Native runtime: PASS (structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }
