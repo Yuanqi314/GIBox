@@ -478,14 +478,21 @@ struct Runtime::Impl {
   auto h=e.call<uint32_t>(abi::pin,renderer,2,Ptr(0));require(h!=0,"GC handle allocation failed");
   try{backup.users.emplace(renderer,RestoreBackup::User{load<Ptr>(renderer+0x10),h});}catch(...){e.call<void>(abi::unpin,h);throw;}}
  bool backupMaterial(RestoreBackup& backup,Ptr palette){if(!palette||!backup.materials)return false;auto originals=pointers(backup.materials,64);
-  for(Ptr m:pointers(palette,64))if(std::find(originals.begin(),originals.end(),m)!=originals.end())return true;return false;}
+  for(Ptr m:pointers(palette,64)){
+   if(std::find(originals.begin(),originals.end(),m)!=originals.end()){return true;}
+  }
+  return false;}
  void keepRestoredResources(Ptr renderer,Ptr mesh,Ptr palette){for(auto& b:restoreBackups)if((mesh&&mesh==b->mesh)||backupMaterial(*b,palette)){
    keepRestored(*b,renderer);if(mesh==b->mesh)b->handed.insert(mesh);
    if(palette)for(Ptr m:pointers(palette,64))if(std::find(b->objects.begin(),b->objects.end(),m)!=b->objects.end())b->handed.insert(m);}}
  void pruneRestoreBackups(bool shutdown=false){for(auto it=restoreBackups.begin();it!=restoreBackups.end();){auto& b=**it;bool held=false;
    try{
     for(auto u=b.users.begin();u!=b.users.end();){Ptr r=u->first;bool uses=false;if(alive(r)&&load<Ptr>(r+0x10)==u->second.native){Ptr mesh=e.get(abi::getMesh,r),mats=e.get(abi::getMaterials,r);
-      if(mesh==b.mesh)uses=true;if(mats)for(Ptr m:pointers(mats,64))if(std::find(b.objects.begin(),b.objects.end(),m)!=b.objects.end())uses=true;}
+      if(mesh==b.mesh){uses=true;}
+      if(mats){for(Ptr m:pointers(mats,64)){
+       if(std::find(b.objects.begin(),b.objects.end(),m)!=b.objects.end()){uses=true;}
+      }}
+     }
      if(uses){++u;}else{e.call<void>(abi::unpin,u->second.handle);u=b.users.erase(u);}}
     for(auto& a:attachments)held=held||a.second->backup==&b||a.second->original==b.mesh||backupMaterial(b,a.second->originalMaterials);
     for(auto& s:sets)for(auto& bp:s->parts)held=held||bp.backup==&b||bp.originMesh==b.mesh||backupMaterial(b,bp.originMaterials);
@@ -496,7 +503,8 @@ struct Runtime::Impl {
    // handed back: unseen game copies may still reference them. Drop our pins/tracking and leave those to Unity's
    // normal unused-asset lifetime; private snapshots that were never handed back can still be destroyed here.
    b.objects.erase(std::remove_if(b.objects.begin(),b.objects.end(),[&](Ptr p){return b.handed.count(p)>0;}),b.objects.end());
-   for(auto& u:b.users)e.call<void>(abi::unpin,u.second.handle);b.users.clear();
+   for(auto& u:b.users){e.call<void>(abi::unpin,u.second.handle);}
+   b.users.clear();
    freeOwned(b);it=restoreBackups.erase(it);
   }}
  // A fresh preview can have the original mesh but materials copied from a replaced renderer. Recover the WHOLE
@@ -643,7 +651,8 @@ struct Runtime::Impl {
    if(ours)keepRestoredResources(a.renderer,original,0);
    restoreMaterials(a,paired);if(ours)e.set(abi::setMesh,a.renderer,original);
    if(fallback)log("restore-backup",a.set->name+"/"+a.set->parts[a.part].name+": original mesh expired, restored the independent original snapshot");
-   if(paired)log("restored",a.set->name+"/"+a.set->parts[a.part].name+": original mesh and materials restored");a.restoreError.clear();return true;
+   if(paired){log("restored",a.set->name+"/"+a.set->parts[a.part].name+": original mesh and materials restored");}
+   a.restoreError.clear();return true;
   }catch(const std::exception& ex){restoreFailure(a,ex.what());return false;}}
  // The game puts its own mesh back on renderers we attached: inside the hand-off callback, and whenever it changes the
  // level of detail (Body, Body_LOD1..3). When the new mesh is the same asset (mesh name without the LOD suffix, same
@@ -843,7 +852,8 @@ struct Runtime::Impl {
    if(skipped.count({r,native})){inTick=false;return;}
    // A game-instantiated copy may already carry our mesh. Register it before the set can be disabled/released.
    for(auto& s:sets)for(size_t i=0;i<s->parts.size();i++)if(mesh==s->parts[i].mesh){adopt(r,*s,i,clockMs());
-    if(++bindAfterHits<=20)log("bind-attached",s->name+": adopted a game copy after mesh/bone binding");inTick=false;return;}
+    if(++bindAfterHits<=20){log("bind-attached",s->name+": adopted a game copy after mesh/bone binding");}
+    inTick=false;return;}
    Ptr meshNative=load<Ptr>(mesh+0x10),data=load<Ptr>(meshNative+0x48);if(!data){inTick=false;return;}
    unsigned vertices=load<uint32_t>(data+0x74),submeshes=load<uint32_t>(data+0xc0),bones=uint32_t(load<uint64_t>(data+0xe0));
    // Identity includes instance ids and the cheap native geometry header: reused addresses or a mesh finishing
@@ -875,7 +885,8 @@ struct Runtime::Impl {
      Ptr buildingRenderer=0;try{while(!cur->built){const auto& used=(*tpl)[cur->parts.size()];buildingRenderer=used.renderer;buildStep(*cur,used);}}
      catch(const std::exception& ex){releaseSet(cur);if(buildingRenderer)skipped.insert({buildingRenderer,alive(buildingRenderer)?load<Ptr>(buildingRenderer+0x10):0});
       if(++attempts[m->path+"|"+m->generation]>=3){failed[m->path]={m->generation,ex.what()};log("model-error",m->name+": "+ex.what());}
-      else log("build-retry",m->name+": "+ex.what());bindingDeferred(m->name,ex.what());break;}
+      else{log("build-retry",m->name+": "+ex.what());}
+      bindingDeferred(m->name,ex.what());break;}
      promote(*cur,clockMs());s=cur;}
     if(!attachments.count(r))attachSeen({s},clockMs());
     if(attachments.count(r)){if(++bindAfterHits<=20)log("bind-attached",m->name+": renderer taken over immediately after the game's mesh/bone binding");}
