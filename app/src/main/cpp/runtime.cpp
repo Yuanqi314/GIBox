@@ -138,7 +138,7 @@ struct Runtime::Impl {
  struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;Variants variants;bool originalMaterials=false,built=false;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
  // source: for a renderer the game created from one of ours (adopted), the renderer whose material clones it shows.
  struct Attachment:Owned {Ptr renderer=0,native=0,original=0,originalMaterials=0,source=0;Set* set=nullptr;size_t part=0;bool adopted=false;std::map<std::string,Ptr> clones;
-  uint64_t refreshAt=0;unsigned refreshes=0;std::map<Ptr,std::string> retired;};  // retired: earlier clones -> key  // material clones made again after the game's switch-in effect (see refreshClones)
+  uint64_t refreshAt=0;unsigned refreshes=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;};  // clone -> canonical game material; retained across refreshes
  struct Seen {Ptr renderer=0,mesh=0;Fingerprint fp;};
  struct Character {Ptr entity=0;unsigned runtime=0,config=0;} ch;
  ControlState ctl;std::vector<ModelInfo> models;long long exportSeen=0;
@@ -147,7 +147,7 @@ struct Runtime::Impl {
  std::map<std::string,std::pair<std::string,std::string>> failed;            // path -> generation, message
  std::map<std::string,std::map<std::string,Fingerprint>> learned;            // path -> part -> target from the world character
  std::set<unsigned> library;std::map<std::string,unsigned> learnedId;Recent<std::pair<Ptr,Ptr>,std::vector<std::string>> chains{1024};Recent<std::pair<Ptr,Ptr>,std::string> rendererNames{2048};std::map<unsigned,uint64_t> libraryRetry;std::map<unsigned,std::string> libraryError;std::map<std::string,unsigned> attempts;  // path|generation -> failed builds
- std::map<std::string,std::string> staleNote;
+ std::map<std::string,std::string> staleNote,materialWait;
  std::set<unsigned> libraryPending;std::map<std::string,std::string> boneRefreshCause;
  std::string boneCandidate,manualWait,boneBadList;unsigned boneBadStreak=0;Ptr boneCandidateEntity=0;unsigned boneCandidateId=0;uint64_t boneCandidateAt=0,manualRetryAt=0;bool manualPending=false;
  // Async hand-off: wanted models of the last tick (valid until the next tick's consume), GameObject class, Tick thread.
@@ -436,14 +436,24 @@ struct Runtime::Impl {
   auto v=ctl.variables.find(s->name);s->assignment=pick(s->variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second);s->used=now;Set* cur=s.get();sets.push_back(std::move(s));log("loading",m.name+" "+m.generation);return cur;}
 
  // ---------------------------------------------------------------- attachments
+ // A fresh preview can have the original mesh but materials copied from a replaced renderer. Recover the WHOLE
+ // original palette (including slot order and count), not just each material: a mod may have four draws over three
+ // game slots, or several draws that all use slot 0. Saving the mod's array shape would itself break restoration.
+ void captureMaterials(Attachment& a,Ptr mats){pin(a,mats);auto incoming=pointers(mats,64);Attachment* source=nullptr;bool known=false;
+  for(auto& kv:attachments){auto& owner=*kv.second;for(Ptr p:incoming)if(owner.materialSources.count(p)){known=true;
+    if(matches(a.set->parts[a.part].target,owner.set->parts[owner.part].target)){source=&owner;break;}}if(source)break;}
+  require(!known||source,"Inherited GIBox materials belong to a different mesh");
+  a.originalMaterials=source?source->originalMaterials:mats;pin(a,a.originalMaterials);
+  if(source)log("material-backup-cleaned",a.set->name+"/"+a.set->parts[a.part].name+": inherited "+std::to_string(incoming.size())+" mod material slots replaced with the original "+std::to_string(length(a.originalMaterials,64))+"-slot palette");}
  void applyMaterials(Attachment& a){Set& s=*a.set;auto& bp=s.parts[a.part];if(s.originalMaterials){e.set(abi::setMaterials,a.renderer,a.originalMaterials);return;}
   auto originals=pointers(a.originalMaterials,64);std::vector<Ptr> mats;
   for(auto& row:bp.rows){auto key=row.name+"#"+std::to_string(row.slot);auto it=a.clones.find(key);Ptr m=0;if(it!=a.clones.end()&&alive(it->second))m=it->second;
    else{Ptr src=row.slot<originals.size()?originals[row.slot]:0;
     // The PC mod can have more parts than the phone's mesh has materials (Shenhe: 4 parts, 3 submeshes): such a slot
     // takes the shader of the renderer's last material, with the mod's own textures.
-    if(!alive(src)){for(size_t k=originals.size();k-->0;)if(alive(originals[k])){src=originals[k];if(extraSlots.insert(s.name+"/"+bp.name+"#"+std::to_string(row.slot)).second)log("material-slot-borrowed",s.name+"/"+bp.name+": slot "+std::to_string(row.slot)+" has no game material on "+rendererName(a.renderer)+" ("+std::to_string(originals.size())+"), using slot "+std::to_string(k)+"'s");break;}}
-    require(alive(src),"Original material missing");m=clone(a,src);auto& t=s.textures.at(row.name);
+    if(row.slot>=originals.size()){for(size_t k=originals.size();k-->0;)if(alive(originals[k])){src=originals[k];std::string layout;for(size_t j=0;j<originals.size();j++)layout+=(layout.empty()?"":"; ")+std::to_string(j)+":"+(alive(originals[j])?name(originals[j]):"(missing)");
+      if(extraSlots.insert(s.path+"|"+s.generation+"|"+bp.name+"#"+std::to_string(row.slot)+"|"+layout).second)log("material-slot-borrowed",s.name+"/"+bp.name+": slot "+std::to_string(row.slot)+" has no game material on "+rendererName(a.renderer)+" ("+std::to_string(originals.size())+"), using slot "+std::to_string(k)+"'s; originals ["+layout+"]");break;}}
+    require(alive(src),"Original material missing (slot "+std::to_string(row.slot)+")");m=clone(a,src);a.materialSources[m]=src;pin(a,src);auto& t=s.textures.at(row.name);
     if(!t.original){e.set(abi::mainTexture,m,t.main);if(t.light)extraTexture(m,t.light,{"_LightMap","_LightMapTex","_Lightmap","_LightmapTex"});if(t.normal)extraTexture(m,t.normal,{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"});}a.clones[key]=m;}
    mats.push_back(m);}
   Owned tmp;try{e.set(abi::setMaterials,a.renderer,array(tmp,a.originalMaterials,mats.data(),mats.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}
@@ -451,9 +461,17 @@ struct Runtime::Impl {
   auto& bp=s.parts[part];auto a=std::make_unique<Attachment>();a->renderer=r;a->native=load<Ptr>(r+0x10);a->original=mesh;a->set=&s;a->part=part;bool meshSet=false;
   try{Ptr ba=e.get(abi::getBones,r);pin(*a,ba);auto bones=pointers(ba,512);bool same=bones.size()==bp.bones.size();for(size_t i=0;same&&i<bones.size();i++)same=alive(bones[i])&&name(bones[i])==bp.bones[i];
    if(!same){skipped.insert({r,a->native});freeOwned(*a);log("attach-skip",name(r)+": bone order differs from "+s.name+"/"+bp.name);return false;}
-   Ptr mats=e.get(abi::getMaterials,r);length(mats,64);pin(*a,r);pin(*a,mesh);pin(*a,mats);a->originalMaterials=mats;
+   Ptr mats=e.get(abi::getMaterials,r);length(mats,64);pin(*a,r);pin(*a,mesh);captureMaterials(*a,mats);
+   // An existing but unavailable material can become ready on the same renderer. Do not borrow another shader for
+   // it, or mark that renderer permanently skipped. The next discovery will retry before any mesh is changed.
+   auto originals=pointers(a->originalMaterials,64);bool any=false;for(Ptr m:originals)any=any||alive(m);int missing=-1;
+   if(!s.originalMaterials)for(auto& row:bp.rows)if(!any||(row.slot<originals.size()&&!alive(originals[row.slot]))){missing=int(row.slot);break;}
+   auto waitKey=s.path+"|material|"+std::to_string(a->native);
+   if(missing>=0){auto reason=bp.name+" 的原材质槽 "+std::to_string(missing)+" 尚未就绪，等待后重试";materialWait[s.path]=reason;
+    if(missingLogged[waitKey]!=reason){missingLogged[waitKey]=reason;log("material-wait",s.name+": "+reason);}freeOwned(*a);return false;}
+   missingLogged.erase(waitKey);
    e.set(abi::setMesh,r,bp.mesh);meshSet=true;applyMaterials(*a);if(!s.originalMaterials)a->refreshAt=now+1500;
-   if(!alive(bp.originMesh)){bp.originMesh=mesh;bp.originMaterials=mats;pin(s,mesh);pin(s,mats);}}
+   if(!alive(bp.originMesh)){bp.originMesh=mesh;bp.originMaterials=a->originalMaterials;pin(s,mesh);pin(s,bp.originMaterials);}}
   catch(...){if(meshSet&&alive(r))e.set(abi::setMesh,r,mesh);freeOwned(*a);throw;}
   log("attached",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);s.used=now;return true;}
  // A character switched in plays an effect on its own material instances (the blue glow), and resets them when it ends.
@@ -475,11 +493,17 @@ struct Runtime::Impl {
   for(auto& kv:attachments){for(auto& c:kv.second->clones)if(current.count(c.second))return true;for(auto& c:kv.second->retired)if(current.count(c.first))return true;}return false;}
  // Original materials go back only while the renderer still shows our clones: once they are destroyed, a renderer still
  // pointing at them draws magenta (0.3.5: the game swaps the mesh, we dropped the attachment and destroyed its clones).
- void restoreMaterials(Attachment& a){if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native||!showsClones(a.renderer))return;
+ void restoreMaterials(Attachment& a,bool knownPair=false){if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native||(!knownPair&&!showsClones(a.renderer)))return;
   unsigned dead=0;for(Ptr m:pointers(a.originalMaterials,64))if(!alive(m))dead++;if(dead)log("restore-materials-dead",std::to_string(dead)+" original material(s) already destroyed by the game");
+  require(dead==0,"Cannot restore destroyed original materials");
   e.set(abi::setMaterials,a.renderer,a.originalMaterials);}
  void restore(Attachment& a){if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
-  if(alive(a.original)&&e.get(abi::getMesh,a.renderer)==a.set->parts[a.part].mesh){e.set(abi::setMesh,a.renderer,a.original);}restoreMaterials(a);}
+  Ptr current=e.get(abi::getMesh,a.renderer);bool ours=current==a.set->parts[a.part].mesh,paired=ours||current==a.original;
+  // The game can instantiate our materials after hand-off, giving them unknown pointers. Owning the mesh is enough
+  // evidence to restore the whole saved pair. Restore materials first so a setter failure cannot leave original UVs
+  // using mod textures; keep unrelated meshes under the narrower material-identity guard.
+  require(!ours||alive(a.original),"Original mesh expired before restore");restoreMaterials(a,paired);if(ours)e.set(abi::setMesh,a.renderer,a.original);
+  if(paired)log("restored",a.set->name+"/"+a.set->parts[a.part].name+": original mesh and materials restored");}
  // The game puts its own mesh back on renderers we attached: inside the hand-off callback, and whenever it changes the
  // level of detail (Body, Body_LOD1..3). When the new mesh is the same asset (mesh name without the LOD suffix, same
  // skeleton), ours goes straight back and the game's mesh becomes the one restored later. Materials are re-applied only
@@ -491,7 +515,9 @@ struct Runtime::Impl {
    if(same){
     // Restoring goes back to the LOD0 original: the renderer's bones stay bound for that layout (ours is built on it).
     if(matches(bp.target,fp)||!alive(a.original)){pin(a,mesh);a.original=mesh;}
-    if(!showsClones(a.renderer)){Ptr mats=e.get(abi::getMaterials,a.renderer);pin(a,mats);a.originalMaterials=mats;e.set(abi::setMesh,a.renderer,bp.mesh);applyMaterials(a);}
+    // The backup belongs to the first clean attachment. A later material array may be the game's own copy of our
+    // textured clones, so it is not a trustworthy replacement for the backup even when its pointers are unfamiliar.
+    if(!showsClones(a.renderer)){e.set(abi::setMesh,a.renderer,bp.mesh);applyMaterials(a);}
     else e.set(abi::setMesh,a.renderer,bp.mesh);
     ok=true;if(++reclaims<=20)log("reclaimed",a.set->name+"/"+bp.name+" <- "+fp.mesh+(reclaims==20?" (further reclaims not logged)":""));}}
   catch(...){freeOwned(tmp);throw;}freeOwned(tmp);return ok;}
@@ -505,7 +531,11 @@ struct Runtime::Impl {
  void detach(Attachment& a,bool restoreFirst){if(restoreFirst)restore(a);Attachment* heir=nullptr;
   for(auto& kv:attachments){auto& o=*kv.second;if(&o==&a||o.source!=a.renderer)continue;if(!heir){heir=&o;}else{o.source=heir->renderer;}}
   if(heir){heir->source=0;for(auto& c:a.clones){if(!alive(c.second))continue;auto it=std::find(a.objects.begin(),a.objects.end(),c.second);if(it==a.objects.end())continue;a.objects.erase(it);pin(*heir,c.second);heir->objects.push_back(c.second);heir->clones[c.first]=c.second;}
-   for(auto& c:a.retired){if(!alive(c.first))continue;auto it=std::find(a.objects.begin(),a.objects.end(),c.first);if(it==a.objects.end())continue;a.objects.erase(it);pin(*heir,c.first);heir->objects.push_back(c.first);heir->retired[c.first]=c.second;}}
+   for(auto& c:a.retired){if(!alive(c.first))continue;auto it=std::find(a.objects.begin(),a.objects.end(),c.first);if(it==a.objects.end())continue;a.objects.erase(it);pin(*heir,c.first);heir->objects.push_back(c.first);heir->retired[c.first]=c.second;}
+   for(auto& source:a.materialSources)if(alive(source.first)){heir->materialSources[source.first]=source.second;pin(*heir,source.second);}
+   // The owner may disappear during the switch-in effect. Its heir now owns these clones and must finish the same
+   // refresh schedule; adopted followers otherwise have no timer and are deliberately skipped by refreshClones().
+   heir->adopted=false;heir->refreshAt=a.refreshAt;heir->refreshes=a.refreshes;}
   freeOwned(a);}
  // Whole groups go away together: every renderer gets its original back before any clone is destroyed.
  template<class F>void detachWhere(F pick){std::vector<Ptr> keys;for(auto& kv:attachments)if(pick(*kv.second))keys.push_back(kv.first);for(Ptr k:keys)restore(*attachments.at(k));for(Ptr k:keys){freeOwned(*attachments.at(k));attachments.erase(k);}}
@@ -538,7 +568,7 @@ struct Runtime::Impl {
    pin(*a,r);pin(*a,original);pin(*a,originalMats);a->original=original;a->originalMaterials=originalMats;a->source=src?src->renderer:0;}
   catch(...){freeOwned(*a);throw;}
   log("adopted",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);s.used=now;}
- void discover(const std::vector<Set*>& live,uint64_t now){
+ void discover(const std::vector<Set*>& live,uint64_t now){materialWait.clear();
   std::map<Ptr,std::pair<Set*,size_t>> ours;for(auto& s:sets)for(size_t i=0;i<s->parts.size();i++)ours[s->parts[i].mesh]={s.get(),i};
   auto list=allRenderers(now);
   for(auto it=attachments.begin();it!=attachments.end();){auto& a=*it->second;bool keep=alive(a.renderer)&&load<Ptr>(a.renderer+0x10)==a.native;
@@ -624,7 +654,7 @@ struct Runtime::Impl {
   Attachment* a=nullptr;for(auto& kv:attachments)if(kv.second->native==rendererNative){a=kv.second.get();break;}
   if(!a){return meshNative;}auto& bp=a->set->parts[a->part];if(!alive(bp.mesh)){return meshNative;}Ptr ours=load<Ptr>(bp.mesh+0x10);if(meshNative==ours)return meshNative;
   inTick=true;Ptr out=meshNative;
-  try{Fingerprint fp;bool known=knownMesh(meshNative,fp);
+  try{if(!alive(a->renderer)||load<Ptr>(a->renderer+0x10)!=rendererNative){inTick=false;return meshNative;}Fingerprint fp;bool known=knownMesh(meshNative,fp);
    if(known&&meshName(fp.mesh)==meshName(bp.target.mesh)&&bindable(*a)){out=ours;if(++binds<=20)log("bind-substituted",a->set->name+"/"+bp.name+": game asked for "+fp.mesh+" ("+std::to_string(fp.vertices)+" vertices)"+(binds==20?" (further binds not logged)":""));}
    else if(++passes<=20)log("bind-passed",rendererName(a->renderer)+" <- "+(known?fp.mesh:std::string("unknown mesh")));}
   catch(const std::exception& ex){log("bind-error",ex.what());out=meshNative;}
@@ -765,7 +795,7 @@ struct Runtime::Impl {
     if(!findSet(m->path,m->generation)&&!liveSet(*m)&&shadowed(*m,wanted))continue;
     auto f=failed.find(m->path);if(f!=failed.end()&&f->second.first==m->generation){errors.push_back(m->name+": "+f->second.second);continue;}
     {auto lod=lodTarget(*m);if(!lod.empty()){errors.push_back(m->name+": 转换时骨骼库记录的是低精度模型 "+lod+"，骨骼对不上；在 App 里重新转换这个 MOD");continue;}}
-    Set* cur=findSet(m->path,m->generation);if(cur&&cur->built){auto st=staleNote.find(m->path);if(st!=staleNote.end()){waiting=m->name+": "+st->second;stale=true;}continue;}
+    Set* cur=findSet(m->path,m->generation);if(cur&&cur->built){auto mw=materialWait.find(m->path),st=staleNote.find(m->path);if(mw!=materialWait.end()){waiting=m->name+": "+mw->second;stale=true;}else if(st!=staleNote.end()){waiting=m->name+": "+st->second;stale=true;}continue;}
     std::vector<Fingerprint> targets;if(!targetsFor(*m,targets)){auto why=staleNote.find(m->path);waiting=m->name+": "+(why!=staleNote.end()?why->second:"等待"+(m->id?std::string("该角色"):"名字含 "+m->names[0]+" 的角色")+"出现以识别部件");stale=why!=staleNote.end();continue;}
     auto tpl=templatesFor(*m,targets);
     if(!cur){if(!tpl){auto st=staleNote.find(m->path);if(st!=staleNote.end()){waiting=m->name+": "+st->second;stale=true;}
