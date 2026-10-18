@@ -9,11 +9,13 @@
 
 GIBox 是一个 xposed 模块，把 PC 上的原神角色 MOD（GIMI / XXMI 格式）转换成自己的模型格式，进游戏后替换对应角色的模型。界面采用 Jetpack Compose（Material 3 Expressive）
 
+当前修订：0.7.11-source（versionCode 33），重采回执、检查替身及两个纳西妲 MOD 的兼容范围见 [修订说明](docs/fix-0.7.11.md)。本源码包未编译、未实机验证。
+
 
 ## 已实现
 
 - **导入**：选 MOD 的 `.zip` 压缩包，选角色（按名字推荐），转换，启用
-- **转换器**：INI 条件、Resource、CommandList、`drawindexed`、顶点解压、权重归一化、UV / 纹理翻转、DDS（BC1–BC7）解码、材质；按键款式合并进同一个模型
+- **转换器**：INI 条件、Resource、CommandList、`drawindexed`、顶点解压、权重归一化、UV / 纹理翻转、DDS（BC1–BC7）与 PNG 解码、材质；按键款式合并进同一个模型
 - **替换**：按原 Mesh 的特征识别渲染器，场景、详情页、组队界面、联机里的同一角色都会换，NPC 不受影响；原资源不修改
 - **骨骼库**：角色出场时自动记录骨骼，转换时按骨骼名对应
 - **多 MOD**：同一角色可同时开多个，同一部件以先开启的为准

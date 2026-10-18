@@ -476,6 +476,49 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   trace.tick(2200600);assert(f->obj[w].materials==copied);trace.tick(2201800);assert(f->obj[w].materials==copied);
   auto traceLog=text(sharedTrace+"/GIBox Log.txt");assert(traceLog.find("material-state Trace/Part0 early-sample")!=std::string::npos&&traceLog.find("current=[0=untracked:")!=std::string::npos&&traceLog.find("attempt 1 skipped (current materials are not the owned clones)")!=std::string::npos);
   trace.shutdown();assert(meshOf(w)==originalMesh&&f->obj[w].materials==saved&&f->handles.empty());}
+ // 34. Party hand-off instantiates each draw's material (two draws sharing one base slot become two instances).
+ //     Repair that recognized palette early, cap early attempts, retain the delayed recovery and original palette.
+ {std::string mediaCopy=root+"/mediaCopy",sharedCopy=mediaCopy+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));s.indices={0,1,2,2,1,0};s.draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0},{\"start\":3,\"count\":3,\"material\":\"Material0\",\"slot\":0}]"};writeModel(sharedCopy+"/models/Copy",s);
+  Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh),saved=f->obj[w].materials,baseMat=load<Ptr>(saved+0x20);f->obj[baseMat].name="Avatar_Mat_Body";f->glow[baseMat]=0;f->world(w);f->scene={w};write(sharedCopy+"/control.json","{\"enabled\":true,\"selected\":[\"Copy\"]}");
+  Runtime copy(e,pkg,root+"/privateCopy",mediaCopy,false);copy.tick(2300000);assert(load<uint64_t>(f->obj[w].materials+0x18)==2);Ptr ourMesh=meshOf(w),texture=f->diffuse[load<Ptr>(f->obj[w].materials+0x20)];std::vector<Ptr> gameCopies;
+  auto instantiatePalette=[&]{Ptr list[2];for(unsigned i=0;i<2;i++){list[i]=clone(load<Ptr>(f->obj[w].materials+0x20+8*i),0);f->obj[list[i]].name="Avatar_Mat_Body(Clone) (Instance) #"+std::to_string(i);f->glow[list[i]]=1;gameCopies.push_back(list[i]);}Ptr arr=f->array(8,2,list);f->obj[w].materials=arr;return arr;};
+  for(uint64_t now:{2300050ull,2300100ull}){Ptr gameArray=instantiatePalette();copy.tick(now);assert(f->obj[w].materials!=gameArray&&meshOf(w)==ourMesh);for(Ptr m:{load<Ptr>(f->obj[w].materials+0x20),load<Ptr>(f->obj[w].materials+0x28)}){assert(f->glow[m]==0&&f->diffuse[m]==texture);}}
+  Ptr third=instantiatePalette();copy.tick(2300150);assert(f->obj[w].materials==third);copy.tick(2301800);assert(f->obj[w].materials!=third&&f->glow[load<Ptr>(f->obj[w].materials+0x20)]==0);
+  auto copyLog=text(sharedCopy+"/GIBox Log.txt");assert(copyLog.find("material-reclaimed Copy/Part0")!=std::string::npos&&copyLog.find("attempt 1 applied")!=std::string::npos&&copyLog.find("skipped (current materials are not the owned clones)")==std::string::npos);
+  copy.shutdown();assert(meshOf(w)==originalMesh&&f->obj[w].materials==saved&&f->handles.empty());for(Ptr m:gameCopies){assert(alive(m));}}
+ // 35. Similar names by themselves are insufficient: wrong row count, another material stem and an unrelated mesh
+ //     must all remain untouched by the early guard.
+ for(int mode=0;mode<3;mode++){
+  std::string mediaGuard=root+"/mediaGuard"+std::to_string(mode),sharedGuard=mediaGuard+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedGuard+"/models/Guard",s);
+  Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh),baseMat=load<Ptr>(f->obj[w].materials+0x20);f->obj[baseMat].name="Avatar_Mat_Body";f->world(w);f->scene={w};write(sharedGuard+"/control.json","{\"enabled\":true,\"selected\":[\"Guard\"]}");
+  Runtime guard(e,pkg,root+"/privateGuard"+std::to_string(mode),mediaGuard,false);guard.tick(2400000);Ptr gameCopy=clone(load<Ptr>(f->obj[w].materials+0x20),0);f->obj[gameCopy].name=(mode==1?"Different_Mat":"Avatar_Mat_Body")+std::string("(Clone) (Instance) #0");Ptr pair[]={gameCopy,gameCopy};Ptr array=f->array(8,mode==0?2:1,pair);f->obj[w].materials=array;
+  Ptr current=mode==2?f->mesh("UnrelatedBody"):meshOf(w);f->obj[w].mesh=current;guard.tick(2400050);assert(f->obj[w].materials==array&&meshOf(w)==current);guard.shutdown();assert(alive(gameCopy)&&f->handles.empty());}
+ // 36. A character-scoped request survives waiting, retries incomplete captures without overwriting the last good
+ //     record, completes only after worker read-back, rejects stale completions and is acknowledged across restart.
+ {std::string mediaRefresh=root+"/mediaRefresh",sharedRefresh=mediaRefresh+"/"+pkg+"/GIBox",bonesRefresh=sharedRefresh+"/skeletons";Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh),completeBones=f->obj[w].bones;f->world(w);f->scene={w};
+  Ptr entity=load<Ptr>(load<Ptr>(load<Ptr>(f->manager+0x10)+0x10)+0x20);store<uint32_t>(entity+0x3a4,10000200);
+  SkeletonRenderer rec;rec.name="Body";rec.target={"Body","Body",3,1,1};rec.bones={"BoneA"};rec.parents={-1};rec.bindposes.resize(64);for(int i=0;i<4;i++){float one=1;std::memcpy(rec.bindposes.data()+i*20,&one,4);}
+  auto old=skeletonJson(10000107,"OldCapture",{rec});std::string file=bonesRefresh+"/10000107/skeleton.json";std::filesystem::create_directories(bonesRefresh+"/10000107");write(file,old);
+  auto request=[&](long long n){write(sharedRefresh+"/control.json","{\"enabled\":false,\"selected\":[],\"refreshBones\":"+std::to_string(n)+",\"refreshBonesCharacter\":10000107}");};
+  request(901);
+  {Runtime refresh(e,pkg,root+"/privateRefresh",mediaRefresh,false);auto st=[&]{return JsonParser(text(sharedRefresh+"/status.json")).parse();};
+   refresh.tick(2500000);assert(st().at("boneRefreshState").string=="waiting-character"&&text(file)==old);
+   store<uint32_t>(entity+0x3a4,10000107);f->obj[w].bones=f->array(8,0);refresh.tick(2500600);refresh.tick(2501200);assert(st().at("boneRefreshState").string!="complete"&&text(file)==old);
+   f->obj[w].bones=completeBones;refresh.tick(2501800);refresh.tick(2502400);assert(st().at("boneRefreshState").string=="saving");refresh.tick(2502500);assert(st().at("boneRefreshState").string=="complete"&&text(file)!=old);
+   auto reads=f->bindposeReads;refresh.tick(2503100);assert(f->bindposeReads==reads);
+   request(902);refresh.tick(2503700);refresh.tick(2504300);request(903);refresh.tick(2504400);assert(st().at("boneRefreshRequest").number==903&&st().at("boneRefreshState").string!="complete");
+   refresh.tick(2505000);refresh.tick(2505100);assert(st().at("boneRefreshState").string=="complete");refresh.shutdown();}
+  {Runtime restarted(e,pkg,root+"/privateRefreshRestart",mediaRefresh,false);restarted.tick(2510000);auto st=JsonParser(text(sharedRefresh+"/status.json")).parse();assert(st.at("boneRefreshRequest").number==903&&st.at("boneRefreshState").string=="complete");restarted.shutdown();}
+  // A request queued while the game is not running is NOT discarded on first control load.
+  request(904);{Runtime queued(e,pkg,root+"/privateRefreshQueued",mediaRefresh,false);queued.tick(2520000);queued.tick(2520600);queued.tick(2520700);auto st=JsonParser(text(sharedRefresh+"/status.json")).parse();assert(st.at("boneRefreshRequest").number==904&&st.at("boneRefreshState").string=="complete");queued.shutdown();}
+  // Rewriting the library later (including automatic captures after an update) must not replay a completed request.
+  // Also accept a legacy 0.7.10 acknowledgement carrying an obsolete CRC: the operation token remains authoritative.
+  write(file,old);write(sharedRefresh+"/bone-refresh-result.json","{\"request\":904,\"character\":10000107,\"crc32\":0}");
+  {Runtime rewritten(e,pkg,root+"/privateRefreshRewritten",mediaRefresh,false);rewritten.tick(2530000);auto done=JsonParser(text(sharedRefresh+"/status.json")).parse();assert(done.at("boneRefreshRequest").number==904&&done.at("boneRefreshState").string=="complete");rewritten.shutdown();}
+  // An acknowledgement belonging to another character must not suppress a real request with the same token.
+  write(sharedRefresh+"/bone-refresh-result.json","{\"request\":904,\"character\":10000200}");
+  {Runtime wrongCharacter(e,pkg,root+"/privateRefreshWrongCharacter",mediaRefresh,false);wrongCharacter.tick(2540000);auto pending=JsonParser(text(sharedRefresh+"/status.json")).parse();assert(pending.at("boneRefreshState").string!="complete");wrongCharacter.tick(2540600);wrongCharacter.tick(2540700);auto done=JsonParser(text(sharedRefresh+"/status.json")).parse();assert(done.at("boneRefreshState").string=="complete");wrongCharacter.shutdown();}
+  assert(f->handles.empty());}
  std::filesystem::remove_all(root);
  std::cout<<"Native runtime: PASS (structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }

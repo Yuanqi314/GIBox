@@ -13,7 +13,7 @@ import java.util.regex.*;
  * the manifest) + conversion.log. The runtime adds learned.json and bonemap-<part>.tsv.
  */
 public final class ModelConverter {
-    public interface TextureDecoder { byte[] decode(byte[] dds) throws Exception; }
+    public interface TextureDecoder { byte[] decode(byte[] image) throws Exception; }
     private static void check(boolean ok,String message) { if(!ok) throw new IllegalArgumentException(message); }
     private static String lower(String s) { return s.toLowerCase(Locale.ROOT); }
     private static String clean(String s) { int p=s.indexOf(';'); return (p<0?s:s.substring(0,p)).trim(); }
@@ -22,7 +22,17 @@ public final class ModelConverter {
     private static byte[] text(String s) { return s.getBytes(StandardCharsets.UTF_8); }
     private static void write(File d,String n,byte[] b)throws Exception { Files.write(new File(d,n).toPath(),b); }
     private static String safe(String s) { check(s.matches("[A-Za-z0-9_-]+"),"不支持的部件文件名："+s);return s; }
-    private static File inside(File root,String path)throws Exception { path=path.replace('\\','/').replace("\"","");File f=new File(root,path).getCanonicalFile();String r=root.getCanonicalPath()+File.separator;check(f.getPath().startsWith(r),"资源超出 MOD 目录："+path);return f; }
+    private static File inside(File root,String path)throws Exception {
+        path=path.replace('\\','/').replace("\"","");File f=new File(root,path).getCanonicalFile();String r=root.getCanonicalPath()+File.separator;
+        check(f.getPath().startsWith(r),"资源超出 MOD 目录："+path);
+        // PC archives commonly differ only in casing (TexCoord / Texcoord, Resources / resources). Resolve each
+        // missing component uniquely; retain the canonical containment check, including after following symlinks.
+        if(!f.exists()){File cursor=root;String relative=f.getPath().substring(r.length());for(String part:relative.split("/")){
+            File exact=new File(cursor,part);if(exact.exists()){cursor=exact;continue;}File[] hits=cursor.listFiles(x->x.getName().equalsIgnoreCase(part));
+            check(hits==null||hits.length<=1,"资源大小写有歧义："+path);cursor=hits!=null&&hits.length==1?hits[0]:exact;
+        }f=cursor.getCanonicalFile();check(f.getPath().startsWith(r),"资源超出 MOD 目录："+path);}
+        return f;
+    }
 
     static final class Section { final String name;final List<String> lines=new ArrayList<>(); Section(String n){name=n;} }
     static final class Ini {
@@ -30,12 +40,20 @@ public final class ModelConverter {
         final LinkedHashMap<String,Integer> vars=new LinkedHashMap<>();
         final LinkedHashMap<String,TreeSet<Integer>> choices=new LinkedHashMap<>();
         final LinkedHashMap<String,TreeSet<Integer>> excludedChoices=new LinkedHashMap<>();
+        final LinkedHashSet<String> compatibility=new LinkedHashSet<>();
+        final File file;
         Ini(File root)throws Exception {
-            File[] files=root.listFiles(f->f.isFile()&&lower(f.getName()).endsWith(".ini"));check(files!=null&&files.length==1,"MOD 根目录必须有且只有一个 INI");
-            Section current=null;for(String raw:new String(read(files[0]),StandardCharsets.UTF_8).replace("\uFEFF","").split("\\r?\\n")) {
+            file=ModConfig.mainIni(root);List<Section> blocks=new ArrayList<>();
+            Section current=null;for(String raw:ModConfig.source(file).split("\\r?\\n")) {
                 String l=clean(raw);if(l.isEmpty())continue;
-                if(l.startsWith("[")&&l.endsWith("]")){String n=l.substring(1,l.length()-1).trim();check(!sections.containsKey(lower(n)),"重复 INI 段："+n);current=new Section(n);sections.put(lower(n),current);}
+                if(l.startsWith("[")&&l.endsWith("]")){String n=l.substring(1,l.length()-1).trim();current=new Section(n);blocks.add(current);}
                 else if(current!=null)current.lines.add(l);
+            }
+            for(Section s:blocks){String key=lower(s.name);Section previous=sections.get(key);
+                if(previous==null)sections.put(key,s);
+                else if(key.equals("present")){previous.lines.addAll(s.lines);compatibility.add("已合并重复 Present 段");}
+                else if(key.startsWith("key")&&previous.lines.equals(s.lines))compatibility.add("已忽略完全相同的重复按键段："+s.name);
+                else check(false,"重复 INI 段："+s.name);
             }
             Pattern decl=Pattern.compile("(?i)^(?:global\\s+)?(?:persist\\s+)?(\\$[a-z_][a-z0-9_]*)(?:\\s*=\\s*(-?\\d+))?\\s*$");
             Pattern cmp=Pattern.compile("(\\$[A-Za-z_][A-Za-z0-9_]*)\\s*(?:===|!==|==|!=|<=|>=|<|>)\\s*(-?\\d+)");
@@ -100,6 +118,17 @@ public final class ModelConverter {
     private static boolean binding(String k){return k.equals("ib")||k.matches("vb[0-9]+")||k.matches("ps-t[0-9]+");}
     private static boolean unbound(String name){return name==null||name.equalsIgnoreCase("null");}
     private static boolean nnFix(String name){return lower(name.trim()).equals("commandlist\\global\\orfix\\nnfix");}
+    private static boolean texFxComponent(String name){return lower(name.trim()).matches("commandlist\\\\texfx\\\\(?:component|c)(?:\\.[01])?");}
+    private static boolean texFxArgument(String key){return key.matches("\\$\\\\texfx\\\\_[123]");}
+    private static void componentDraw(Map<String,String> bindings,List<Draw> draws,String part){
+        String prefix="$\\texfx\\"; // Namespace-qualified INI arguments, not local variant names.
+        check(bindings.containsKey(prefix+"_1"),"TexFx Component 缺少绘制数量："+part);
+        int count=Integer.parseInt(bindings.get(prefix+"_1")),start=Integer.parseInt(bindings.getOrDefault(prefix+"_2","0"));
+        int base=Integer.parseInt(bindings.getOrDefault(prefix+"_3","0"));
+        check(count>=0&&start>=0&&base==0,"TexFx Component 绘制参数无效（仅支持 baseVertex=0）："+part);
+        if(count>0){Draw d=new Draw(part,bindings,count,start);d.bindings.put("compat:texfx-component","true");draws.add(d);}
+        for(int i=1;i<=3;i++)bindings.remove(prefix+"_"+i);
+    }
     /** ORFix's ReferenceNoNormal captures ps-t0 as Diffuse and ps-t1 as Lightmap, regardless of filenames.
      * Keep the resources at the call site: later bindings and other draws must not change this snapshot. */
     private static void referenceNoNormal(Map<String,String> bindings){
@@ -135,7 +164,9 @@ public final class ModelConverter {
     private static void commands(Ini ini,Section s,Map<String,Integer> vars,Map<String,Resource> rs,Map<String,String> bindings,List<Draw> draws,String part,int depth){
         check(depth<16,"CommandList 递归过深");for(String l:ini.active(s,vars)){String[] a=kv(l);if(a==null)continue;String k=a[0],v=a[1];if(binding(k))assign(rs,bindings,k,v);
             else if(k.equals("handling"))bindings.put(k,lower(v));
-            else if(k.equals("run")){Section target=ini.run(v);if(target!=null)commands(ini,target,vars,rs,bindings,draws,part,depth+1);else if(nnFix(v))referenceNoNormal(bindings);}
+            else if(texFxArgument(k)){long n=new Expr(v,vars).eval();check(n>=0&&n<=Integer.MAX_VALUE,"TexFx 绘制参数越界");bindings.put(k,Long.toString(n));}
+            else if(k.equals("run")){Section target=ini.run(v);if(target!=null)commands(ini,target,vars,rs,bindings,draws,part,depth+1);else if(nnFix(v))referenceNoNormal(bindings);
+                else if(texFxComponent(v)){componentDraw(bindings,draws,part);ini.compatibility.add("已还原 TexFx Component 的条件绘制区间；透明、发光和自定义描边使用手机原材质，未复刻 PC 着色器");}}
             else if(k.equals("drawindexed")){String[] f=v.split(",");check(f.length<=3,"drawindexed 参数");int count=f[0].trim().equalsIgnoreCase("auto")?-1:Integer.parseInt(f[0].trim());int start=f.length>1?Integer.parseInt(f[1].trim()):0;check(f.length<3||Integer.parseInt(f[2].trim())==0,"仅支持 baseVertex=0");check(count>=-1,"drawindexed 数量");check(start>=0,"drawindexed 起始");if(count!=0)draws.add(new Draw(part,bindings,count,start));}
         }
     }
@@ -155,7 +186,7 @@ public final class ModelConverter {
     private static Resource stream(Map<String,Resource> rs,Map<String,String> bindings,int kind){Resource r=localStream(rs,bindings,kind);check(r!=null,"缺少 "+streamName(kind)+" 顶点流");return r;}
     private static boolean declaresDraw(Ini ini,Section s,Set<String> visited){
         if(!visited.add(lower(s.name)))return false;
-        for(String l:s.lines){String[] a=kv(l);if(a==null)continue;if(a[0].equals("drawindexed"))return true;if(a[0].equals("run")){Section target=ini.run(a[1]);if(target!=null&&declaresDraw(ini,target,visited))return true;}}
+        for(String l:s.lines){String[] a=kv(l);if(a==null)continue;if(a[0].equals("drawindexed"))return true;if(a[0].equals("run")){Section target=ini.run(a[1]);if(target!=null&&declaresDraw(ini,target,visited))return true;if(target==null&&texFxComponent(a[1]))return true;}}
         return false;
     }
     static final class Evaluated {
@@ -220,6 +251,12 @@ public final class ModelConverter {
     static final int MAX_ASSIGNMENTS=4096;
     private static final Pattern CONDITION_VAR=Pattern.compile("\\$[a-z_][a-z0-9_]*");
     private static boolean controlSection(String name){String n=lower(name);return n.startsWith("key")||n.equals("present")||n.equals("constants");}
+    /** Only commands reached by model overrides/resources affect imported geometry. PC mouse/menu helpers do not. */
+    private static Set<Section> conversionSections(Ini ini){Set<Section> out=new LinkedHashSet<>();
+        for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")||lower(s.name).startsWith("resource"))conversionSections(ini,s,out);
+        return out;}
+    private static void conversionSections(Ini ini,Section s,Set<Section> out){if(!out.add(s))return;
+        for(String l:s.lines){String[] a=kv(l);if(a!=null&&a[0].equals("run")){Section t=ini.sections.get(lower(a[1].trim()));if(t!=null)conversionSections(ini,t,out);}}}
     private static String condition(String line){String a=lower(line);return a.startsWith("if ")?a.substring(3):a.startsWith("else if ")?a.substring(8):a.startsWith("elseif ")?a.substring(7):null;}
     /** Variables an if / else if of one section reads, with the CommandLists it runs (this INI's own). */
     private static Set<String> sectionVars(Ini ini,Section s,Set<String> visited){Set<String> out=new HashSet<>();if(!visited.add(lower(s.name)))return out;
@@ -228,7 +265,7 @@ public final class ModelConverter {
         return out;}
     /** Variables an if / else if of a drawing, CommandList or Resource section reads: the only ones that can change what is drawn. */
     static List<String> conditionVars(Ini ini){
-        Set<String> used=new HashSet<>();for(Section s:ini.sections.values())if(!controlSection(s.name))used.addAll(sectionVars(ini,s,new HashSet<>()));
+        Set<String> used=new HashSet<>();for(Section s:conversionSections(ini))if(!controlSection(s.name))used.addAll(sectionVars(ini,s,new HashSet<>()));
         List<String> out=new ArrayList<>();for(String k:ini.vars.keySet())if(used.contains(k)&&ini.choices.containsKey(k))out.add(k);return out;}
     /**
      * The variables in groups that change what is drawn independently of each other: variables read by one section
@@ -241,7 +278,7 @@ public final class ModelConverter {
         java.util.function.IntUnaryOperator root=x->{while(up[x]!=x){up[x]=up[up[x]];x=up[x];}return x;};
         java.util.function.Consumer<Collection<String>> join=vs->{int first=-1;for(String v:vs){int k=names.indexOf(v);if(k<0)continue;if(first<0)first=k;else up[root.applyAsInt(k)]=root.applyAsInt(first);}};
         Map<String,Set<String>> byHash=new HashMap<>(),resources=new HashMap<>();List<Set<String>> providers=new ArrayList<>();Map<Section,Set<String>> own=new LinkedHashMap<>();
-        for(Section s:ini.sections.values()){if(controlSection(s.name))continue;Set<String> vs=sectionVars(ini,s,new HashSet<>());own.put(s,vs);join.accept(vs);if(vs.isEmpty())continue;
+        for(Section s:conversionSections(ini)){if(controlSection(s.name))continue;Set<String> vs=sectionVars(ini,s,new HashSet<>());own.put(s,vs);join.accept(vs);if(vs.isEmpty())continue;
             String hash="";boolean draws=false,binds=false;for(String l:s.lines){String[] a=kv(l);if(a==null)continue;if(a[0].equals("hash"))hash=lower(a[1]);if(a[0].equals("drawindexed"))draws=true;if(a[0].matches("vb[0-9]+"))binds=true;}
             boolean child=false;for(String l:s.lines){String[] a=kv(l);if(a!=null&&a[0].equals("ib"))child=true;}
             if(!hash.isEmpty()&&!child)byHash.computeIfAbsent(hash,k->new HashSet<>()).addAll(vs);
@@ -378,10 +415,10 @@ public final class ModelConverter {
         float sum=0;for(int k=0;k<n;k++)sum+=tw[k];
         for(int k=0;k<4;k++){out.putFloat(4*k,k<n?tw[order[k]]/sum:0f);out.putInt(16+4*k,k<n?ti[order[k]]:0);}}
     private static byte[] uv(byte[] t,int p){ByteBuffer b=buf(t);float u=b.getFloat(p),v=b.getFloat(p+4);check(Float.isFinite(u)&&Float.isFinite(v),"非法 UV");return buf(new byte[8]).putFloat(u).putFloat(1-v).array();}
-    /** A DDS texture as RGBA8, at most 1024 on a side, rows bottom to top: {width, height, data view}. */
+    /** A DDS/PNG texture as RGBA8, at most 1024 on a side, rows bottom to top: {width, height, data view}. */
     private static Map<String,Object> texture(File f,TextureDecoder decoder,BlobWriter blob,Map<File,Map<String,Object>> done)throws Exception {
         Map<String,Object> known=done.get(f);if(known!=null)return known;
-        check(lower(f.getName()).endsWith(".dds"),"当前转换器支持 DDS 纹理："+f);byte[] raw=decoder.decode(read(f));check(raw.length>=8,"纹理解码返回值无效");ByteBuffer h=buf(raw);int w=h.getInt(0),y=h.getInt(4);check(w>0&&y>0&&w<=8192&&y<=8192&&raw.length==8+4L*w*y,"纹理解码尺寸无效");byte[] pixels=Arrays.copyOfRange(raw,8,raw.length);
+        String ext=lower(f.getName());check(ext.endsWith(".dds")||ext.endsWith(".png"),"当前转换器支持 DDS / PNG 纹理："+f);byte[] raw=decoder.decode(read(f));check(raw.length>=8,"纹理解码返回值无效");ByteBuffer h=buf(raw);int w=h.getInt(0),y=h.getInt(4);check(w>0&&y>0&&w<=8192&&y<=8192&&raw.length==8+4L*w*y,"纹理解码尺寸无效");byte[] pixels=Arrays.copyOfRange(raw,8,raw.length);
         while(w>1024||y>1024){int nw=Math.max(1,w/2),nh=Math.max(1,y/2);byte[] n=new byte[nw*nh*4];for(int j=0;j<nh;j++)for(int i=0;i<nw;i++)for(int c=0;c<4;c++){int sum=0,count=0;for(int dy=0;dy<2&&j*2+dy<y;dy++)for(int dx=0;dx<2&&i*2+dx<w;dx++){sum+=pixels[((j*2+dy)*w+i*2+dx)*4+c]&255;count++;}n[(j*nw+i)*4+c]=(byte)(sum/count);}pixels=n;w=nw;y=nh;}
         byte[] rows=new byte[pixels.length];for(int j=0;j<y;j++)System.arraycopy(pixels,(y-1-j)*w*4,rows,j*w*4,w*4);
         Map<String,Object> t=Json.of("width",w,"height",y,"data",blob.put(rows));done.put(f,t);return t;
@@ -403,6 +440,11 @@ public final class ModelConverter {
             String color=d.bindings.get("texture-role:diffuse"),mask=d.bindings.get("texture-role:lightmap");
             return new Resource[]{unbound(color)?null:resource(rs,color),unbound(mask)?null:resource(rs,mask),null};
         }
+        // GIMI's legacy Nahida IB identifies the normal/diffuse/lightmap layout even in older exports whose
+        // filenames misleadingly say Diffuse/LightMap/Shadow. Apply per draw, only with the full three-slot layout.
+        // Explicit NNFix above has priority, including on this IB. Unknown hashes keep the existing role resolver.
+        if("8b268d05".equals(d.hash)&&!unbound(d.bindings.get("ps-t0"))&&!unbound(d.bindings.get("ps-t1"))&&!unbound(d.bindings.get("ps-t2")))
+            return new Resource[]{resource(rs,d.bindings.get("ps-t1")),resource(rs,d.bindings.get("ps-t2")),resource(rs,d.bindings.get("ps-t0"))};
         for(Map.Entry<String,String> binding:d.bindings.entrySet())if(binding.getKey().startsWith("ps-t")&&!unbound(binding.getValue())){Resource r=resource(rs,binding.getValue());String file=lower(r.file.getName());
             // Resource names often keep the semantic role when the file is called Skin.dds or has a typo (Ayaka's
             // ResourceAyakaHeadDiffuse.hair_type_2.black points at HairDifuse_Type_2_black.dds). Preserve file hints first.
@@ -440,6 +482,8 @@ public final class ModelConverter {
             String rangeKey=pos.file.getPath()+"|"+blend.file+"|"+tex.file+"|"+indices.file+"|"+stride+"|"+d.start+"|"+count;int[] range=g.ranges.get(rangeKey);
             if(range==null){int start=g.indices.size();ByteBuffer ib=buf(ix);for(int j=0;j<count;j++){int old=stride==2?(ib.getShort((d.start+j)*2)&65535):ib.getInt((d.start+j)*4);String key=pos.file.getPath()+"|"+blend.file+"|"+tex.file+"|"+old;Integer compact=g.compact.get(key);if(compact==null){compact=g.vertices.size();check(compact<500000,"顶点数超限");g.compact.put(key,compact);g.vertices.add(vertex(pos,blend,tex,p,bl,t,old,target.count));}g.indices.add(compact);}range=new int[]{start,count};g.ranges.put(rangeKey,range);}
             ComboRows rows=g.combos.computeIfAbsent(combo,k->new ComboRows());Resource[] tx=textures(d,rs);String materialKey=path(tx[0])+"|"+path(tx[1])+"|"+path(tx[2]);
+            if("8b268d05".equals(d.hash)&&!"nnfix".equals(d.bindings.get("texture-role:layout"))&&tx[0]!=null&&tx[1]!=null&&tx[2]!=null)
+                ini.compatibility.add("已按纳西妲 IB 8b268d05 识别贴图：ps-t0 为法线，ps-t1 为颜色，ps-t2 为光照遮罩（优先于文件名）");
             MaterialDef m=b.materials.get(materialKey);if(m==null){m=new MaterialDef();m.name="Material"+b.materials.size();m.diffuse=tx[0];m.light=tx[1];m.normal=tx[2];b.materials.put(materialKey,m);}
             rows.rows.add(new String[]{m.name,Integer.toString(slot(ini,d))});rows.subs.add(range);
         }
@@ -513,6 +557,8 @@ public final class ModelConverter {
     /** Converts one PC mod into one GIBox model folder. Variant combinations share the vertices; each has its own draws. */
     public static File convert(File src,File boneDir,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log)throws Exception {
         Ini ini=new Ini(src);List<Bones> bones;
+        log.append("模型主 INI：").append(ini.file.getName()).append('\n');
+        for(File sibling:ModConfig.allInis(src))if(!sibling.equals(ini.file))log.append("未导入辅助 INI：").append(src.toPath().relativize(sibling.toPath())).append("（帮助、菜单或独立贴图配置；不包含在本次模型转换中）\n");
         if(o.variants)for(Map.Entry<String,TreeSet<Integer>> e:ini.excludedChoices.entrySet())
             log.append("款式 ").append(e.getKey()).append(" 按按键列出的值和初始值取 ").append(ini.choices.get(e.getKey())).append("；仅在条件中出现的值不作为可选款式：").append(e.getValue()).append('\n');
         check(o.names.size()<=16,"角色名过多");for(String n:o.names)check(n.matches("[a-z0-9]{3,40}"),"角色名格式："+n);
@@ -552,7 +598,7 @@ public final class ModelConverter {
         File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
         try{
             Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
-            check(!b.groups.isEmpty(),"全部可用款式都没有有效 drawindexed（或全部部件已跳过）；若初始开关关闭，请开启款式枚举后转换");
+            check(!b.groups.isEmpty(),"所选 INI "+ini.file.getName()+" 没有可转换的模型绘制："+(o.variants?"已开启款式枚举；请检查是否为纯贴图配置、部件全部跳过或依赖未支持的外部绘制命令":"当前只转换默认款式；可在手动转换中开启‘转换全部款式’，并检查部件映射及外部绘制命令"));
             Set<String> shown=new LinkedHashSet<>();
             Object replaceWhen=null;
             try{for(Group g:b.groups.values())g.draws=drawTable(g,var,sigOf,kept.size(),shown);
@@ -565,7 +611,8 @@ public final class ModelConverter {
                 for(Group g:b.groups.values())g.draws=g.combos.isEmpty()?null:drawTable(g,none,only,1,shown);}
             for(Group g:b.groups.values()){int trimmed=0;for(Vertex v:g.vertices)if(v.trimmedWeights>0)trimmed++;if(trimmed>0)log.append(g.bones.name).append("：已清理 ").append(trimmed).append(" 个顶点中占比不超过 ").append(WEIGHT_EPSILON).append(" 的微小权重，并重新归一化\n");int fixed=fixUnweighted(g);if(fixed>0)log.append(g.bones.name).append("：").append(fixed).append(" 个顶点没有权重（MOD 本身的问题，PC 上这些点会被拉到原点），已沿用最近顶点的权重\n");}
             for(Group g:b.groups.values())log.append(g.bones.name).append(": ").append(g.vertices.size()).append(" 顶点，").append(g.indices.size()).append(" 索引").append(g.bones.synthetic?"（骨骼取自游戏内角色）":g.bones.target==null?"（骨骼库没有网格特征，首次在场景中出现时识别）":"").append('\n');
-            for(String x:ini.external){if(nnFix(x))log.append("已按 NNFix 识别贴图：ps-t0 为颜色图，ps-t1 为材质遮罩，不使用法线图\n");else log.append("已忽略外部 CommandList：").append(x).append('\n');}ini.external.clear();
+            for(String x:ini.external){if(nnFix(x))log.append("已按 NNFix 识别贴图：ps-t0 为颜色图，ps-t1 为材质遮罩，不使用法线图\n");else if(!texFxComponent(x))log.append("已忽略外部 CommandList：").append(x).append('\n');}ini.external.clear();
+            for(String note:ini.compatibility)log.append(note).append('\n');
             Map<String,Object> data=emit(tmp,b,kept.size(),decoder);
             String generation;synchronized(ModelConverter.class){generation=System.currentTimeMillis()+"-"+(++generationCounter);}
             Map<String,Object> manifest=Json.of("format","gibox-model","version",2,"name",dest.getName(),"generation",generation,

@@ -25,13 +25,16 @@ uint64_t clockMs(){return std::chrono::duration_cast<std::chrono::milliseconds>(
 std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static_cast<unsigned long long>(v));return b;}
 
 // ---------------------------------------------------------------- files (worker side)
-struct ControlState {bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0;std::map<std::string,std::map<std::string,int>> variables;};
+struct ControlState {bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"Control JSON object");ControlState s;
  const auto& a=c.at("selected");require(a.type==Json::Array&&a.array.size()<=128,"Selected list");
  for(auto& v:a.array){require(v.type==Json::String&&!v.string.empty()&&v.string.find('/')==v.string.npos&&v.string!="."&&v.string!="..","Selected name");s.selected.push_back(v.string);}
  auto integerOf=[](const Json& j){if(j.type==Json::Null)return 0LL;require(j.type==Json::Number&&std::floor(j.number)==j.number&&std::abs(j.number)<=9007199254740991.,"Control counter");return static_cast<long long>(j.number);};
  s.enabled=c.at("enabled").type==Json::Bool&&c.at("enabled").boolean;s.exportBones=integerOf(c.at("exportBones"));
+ s.refreshBones=integerOf(c.at("refreshBones"));auto refreshId=integerOf(c.at("refreshBonesCharacter"));
+ require(s.refreshBones>=0&&(!s.refreshBones||(refreshId>=10000000&&refreshId<=10001999)),"Bone refresh character/request");
+ if(s.refreshBones){s.refreshBonesCharacter=unsigned(refreshId);}
  const auto& vars=c.at("variables");require(vars.type==Json::Object||vars.type==Json::Null,"Variables object");
  for(auto& model:vars.object){require(model.second.type==Json::Object,"Variables object");for(auto& kv:model.second.object){require(kv.first.size()>1&&kv.first[0]=='$',"Variable name");auto n=integerOf(kv.second);require(std::abs(n)<=1000000,"Variable value");s.variables[model.first][kv.first]=int(n);}}
  s.logLevel=logThreshold(c);
@@ -126,7 +129,7 @@ struct Runtime::Impl {
  std::mutex sm;std::optional<ControlState> pendingControl;std::string controlError;std::vector<ModelInfo> scanned;bool scannedFresh=false;
  struct LoadResult {std::string generation,error;std::shared_ptr<ModelFile> data;};
  std::map<std::string,LoadResult> loaded;std::set<std::string> inflight;
- struct BoneResult {unsigned id;bool library;long long request;std::string error;};std::deque<BoneResult> boneResults;
+ struct BoneResult {unsigned id;bool library;long long request;std::string error;long long refresh=0;};std::deque<BoneResult> boneResults;
  // ---- worker only
  std::string controlRaw;uint64_t controlAt=0,scanAt=0;std::map<std::string,ModelInfo> scanCache;
  // ---- game thread only
@@ -138,10 +141,10 @@ struct Runtime::Impl {
  struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;Variants variants;bool originalMaterials=false,built=false;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
  // source: for a renderer the game created from one of ours (adopted), the renderer whose material clones it shows.
  struct Attachment:Owned {Ptr renderer=0,native=0,original=0,originalMaterials=0,source=0;Set* set=nullptr;size_t part=0;bool adopted=false;std::map<std::string,Ptr> clones;
-   uint64_t refreshAt=0,materialTraceStart=0,materialTraceAt=0;unsigned refreshes=0,materialTraceSamples=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;};  // clone -> canonical game material; retained across refreshes
+   uint64_t refreshAt=0,materialTraceStart=0,materialTraceAt=0,materialCheckAt=0,materialCheckUntil=0;unsigned refreshes=0,materialTraceSamples=0,materialRepairs=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;};  // clone -> canonical game material; retained across refreshes
  struct Seen {Ptr renderer=0,mesh=0;Fingerprint fp;};
  struct Character {Ptr entity=0;unsigned runtime=0,config=0;} ch;
- ControlState ctl;std::vector<ModelInfo> models;long long exportSeen=0;
+ ControlState ctl;std::vector<ModelInfo> models;long long exportSeen=0,boneRefreshDone=0;unsigned boneRefreshDoneId=0;
  std::vector<std::unique_ptr<Set>> sets;std::map<Ptr,std::unique_ptr<Attachment>> attachments;std::vector<Seen> seen;
  Recent<std::pair<Ptr,uint32_t>,Fingerprint> fpCache{8192};std::set<std::pair<Ptr,Ptr>> skipped;
  std::map<std::string,std::pair<std::string,std::string>> failed;            // path -> generation, message
@@ -166,6 +169,13 @@ struct Runtime::Impl {
   require(pkg=="com.miHoYo.Yuanshen"||pkg=="com.miHoYo.ys.bilibili","Unsupported package");shared=media+"/"+pkg+"/GIBox";modelRoot=shared+"/models";boneRoot=shared+"/skeletons";
   for(auto& s:{priv,shared,modelRoot,boneRoot})std::filesystem::create_directories(s);
   logLevel.store(logThresholdOf(shared));
+  // A completed request is acknowledged across game restarts; an uncompleted request in control.json is replayed.
+  try{auto ack=JsonParser(text(shared+"/bone-refresh-result.json")).parse();auto n=ack.at("request"),id=ack.at("character");
+   require(n.type==Json::Number&&n.number>0&&n.number<=9007199254740991.&&std::floor(n.number)==n.number&&id.type==Json::Number&&id.number>=10000000&&id.number<=10001999&&std::floor(id.number)==id.number,"Bone refresh acknowledgement");
+   // This acknowledges a completed operation, not a particular revision of the library. Automatic captures may
+   // replace skeleton.json later; that must never revive the old request still present in control.json.
+   boneRefreshDone=static_cast<long long>(n.number);boneRefreshDoneId=unsigned(id.number);
+  }catch(const std::exception&){}
   worker.start([this]{workerTick(clockMs());});
  }
 
@@ -501,19 +511,56 @@ struct Runtime::Impl {
    log("material-state",a.set->name+"/"+a.set->parts[a.part].name+" "+phase+" age-ms="+std::to_string(now>=a.materialTraceStart?now-a.materialTraceStart:0)+" renderer="+hex(a.native)+" current="+palette(current)+" saved="+palette(saved));
   }catch(const std::exception& ex){log("material-state-error",a.set->name+": "+ex.what());}
  }
- void beginMaterialTrace(Attachment& a,uint64_t now){if(a.set->originalMaterials){return;}a.materialTraceStart=now;a.materialTraceAt=now+500;a.materialTraceSamples=0;materialState(a,"attached",now);}
- // Retake clones after 1.5 s and ~4 s as a recovery for parameters copied mid-effect. This does not prevent the
- // initial switch-in effect, nor establish which shader parameter causes the reported short blue glow.
- void refreshClones(Attachment& a,uint64_t now){a.refreshAt=++a.refreshes<2?now+2500:0;Set& s=*a.set;
-  if(s.originalMaterials||a.adopted||a.clones.empty()||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
-   materialState(a,"refresh-before",now);Ptr mats=e.get(abi::getMaterials,a.renderer);if(!mats){log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" skipped (no material array)");return;}std::set<Ptr> current;for(Ptr m:pointers(mats,64))current.insert(m);
-   bool shows=false;for(auto& c:a.clones)shows=shows||current.count(c.second)>0;if(!shows){log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" skipped (current materials are not the owned clones)");return;}
+ void beginMaterialTrace(Attachment& a,uint64_t now){if(a.set->originalMaterials){return;}if(worker.background()){now=clockMs();}a.materialTraceStart=now;a.materialTraceAt=now+500;a.materialTraceSamples=0;
+  a.materialCheckAt=now+50;a.materialCheckUntil=now+1500;a.materialRepairs=0;materialState(a,"attached",now);}
+ static std::string materialStem(const std::string& raw){auto s=normalize(raw);auto clone=s.find("(clone)"),instance=s.find("(instance)");auto end=std::min(clone,instance);return trim(s.substr(0,end));}
+ // The log confirms copies named "...(Clone) (Instance) #n" appearing after the hand-off. Only accept that layout
+ // on our exact mesh, with the expected row count and original material stem in EVERY slot. Names alone are not proof.
+ bool copiedPalette(Attachment& a,const std::vector<Ptr>& current,Ptr materials){auto& bp=a.set->parts[a.part];
+  if(e.get(abi::getMesh,a.renderer)!=bp.mesh||current.size()!=bp.rows.size()){return false;}
+  Owned roots;bool result=false;
+  try{pin(roots,materials);result=[&]{auto original=pointers(a.originalMaterials,64);bool copied=false;
+  for(size_t i=0;i<current.size();i++){
+   Ptr m=current[i];if(!alive(m)){return false;}auto slot=bp.rows[i].slot;Ptr src=slot<original.size()?original[slot]:0;
+   if(slot>=original.size()){for(size_t k=original.size();k-->0;){if(alive(original[k])){src=original[k];break;}}}
+   if(!alive(src)||materialStem(name(src))!=materialStem(name(m))){return false;}
+   bool known=false;for(auto& kv:attachments){if(kv.second->materialSources.count(m)){known=true;break;}}
+   if(!known){if(normalize(name(m)).find("(clone)")==std::string::npos){return false;}copied=true;}
+  }
+  return copied;}();}catch(...){freeOwned(roots);throw;}
+  freeOwned(roots);return result;
+ }
+ void retakeClones(Attachment& a){
   auto old=a.clones;a.clones.clear();try{applyMaterials(a);}catch(...){a.clones=old;throw;}for(auto& kv:old)a.retired[kv.second]=kv.first;
   std::map<Ptr,Ptr> swap;for(auto& kv:a.retired){auto it=a.clones.find(kv.second);if(it!=a.clones.end())swap[kv.first]=it->second;}
   for(auto& kv:attachments){auto& o=*kv.second;if(o.source!=a.renderer||!alive(o.renderer))continue;Ptr om=e.get(abi::getMaterials,o.renderer);if(!om)continue;
    auto list=pointers(om,64);bool changed=false;for(auto& p:list){auto f=swap.find(p);if(f!=swap.end()){p=f->second;changed=true;}}
     if(changed){Owned tmp;try{e.set(abi::setMaterials,o.renderer,array(tmp,om,list.data(),list.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}}
-   log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" applied");materialState(a,"refresh-after",now);}
+ }
+ // Keep the two delayed refreshes, including when the game has instantiated our material palette.
+ void refreshClones(Attachment& a,uint64_t now){a.refreshAt=++a.refreshes<2?now+2500:0;Set& s=*a.set;
+  if(s.originalMaterials||a.adopted||a.clones.empty()||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native){return;}
+  materialState(a,"refresh-before",now);Ptr mats=e.get(abi::getMaterials,a.renderer);
+  if(!mats){log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" skipped (no material array)");return;}
+  auto current=pointers(mats,64);bool shows=false;for(auto& c:a.clones){shows=shows||std::find(current.begin(),current.end(),c.second)!=current.end();}
+  if(!shows&&!copiedPalette(a,current,mats)){log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" skipped (current materials are not the owned clones)");return;}
+  retakeClones(a);log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" applied");materialState(a,"refresh-after",now);}
+ // A bounded early repair: first 1.5 s, at most 20 checks/s and two rebuild attempts. Do not perpetually fight the
+ // game's effects, alter shader parameters, replace unrelated meshes, or destroy game-owned material instances.
+ void guardMaterials(Attachment& a,uint64_t now){
+  if(!a.materialCheckAt||now<a.materialCheckAt){return;}
+  if(now>a.materialCheckUntil||a.materialRepairs>=2){a.materialCheckAt=0;return;}
+  a.materialCheckAt=now+50;
+  try{
+   if(a.set->originalMaterials||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native){return;}
+   Ptr mats=e.get(abi::getMaterials,a.renderer);if(!mats){return;}auto current=pointers(mats,64);
+   bool known=true;for(Ptr m:current){bool found=false;for(auto& kv:attachments){found=found||kv.second->materialSources.count(m)>0;}known=known&&found;}
+   if(known||!copiedPalette(a,current,mats)){return;}
+   a.materialRepairs++;materialState(a,"copy-before",now);retakeClones(a);a.adopted=false;a.source=0;
+   if(!a.refreshAt){a.refreshes=0;a.refreshAt=now+1500;}
+   log("material-reclaimed",a.set->name+"/"+a.set->parts[a.part].name+": copied palette rebuilt at "+std::to_string(now-a.materialTraceStart)+" ms (attempt "+std::to_string(a.materialRepairs)+")");materialState(a,"copy-after",now);
+  }catch(const std::exception& ex){log("material-reclaim-error",a.set->name+": "+ex.what());}
+ }
  // Attach failures stay visible in status until the next control change.
  void note(const std::string& m){log("attach-error",m);if(std::find(notes.begin(),notes.end(),m)==notes.end()&&notes.size()<8)notes.push_back(m);}
  // Does the renderer still show material clones of ours (its own, or the source's for an adopted copy)?
@@ -552,7 +599,7 @@ struct Runtime::Impl {
  // Between ticks (the Tick hook runs every frame; at most every 5 ms here): put ours back the moment the game has swapped
  // the mesh, so a swap shows for at most one frame.
  void guard(uint64_t now){if(inTick||!ctl.enabled||attachments.empty()||now<guardAt)return;guardAt=now+5;inTick=true;
-  try{for(auto& kv:attachments){auto& a=*kv.second;if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)continue;Ptr m=e.get(abi::getMesh,a.renderer);if(m&&m!=a.set->parts[a.part].mesh)reclaim(a,m);}}
+  try{for(auto& kv:attachments){auto& a=*kv.second;if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)continue;Ptr m=e.get(abi::getMesh,a.renderer);if(m&&m!=a.set->parts[a.part].mesh)reclaim(a,m);guardMaterials(a,now);}}
   catch(const std::exception& ex){log("guard-error",ex.what());}inTick=false;}
  // A single attachment going away (its renderer died, or the game replaced its mesh): renderers adopted from it still show
  // its material clones, so those move to the first of them instead of being destroyed.
@@ -727,12 +774,14 @@ struct Runtime::Impl {
   // Only the engine reads happen here; the JSON is built on the worker, and a library record that has not changed since
   // the last session is left as it is (the skeleton library is checked every session, rewritten only after a game update).
   auto dir=std::to_string(ch.config)+(libraryDir?"":"-"+std::to_string(now));auto root=boneRoot;unsigned id=ch.config;auto request=ctl.exportBones;
+  auto refresh=libraryDir&&boneRefreshPending()&&id==ctl.refreshBonesCharacter?ctl.refreshBones:0;auto ack=shared+"/bone-refresh-result.json";
   if(libraryDir)libraryPending.insert(id);else manualPending=true;
-  worker.post([this,root,dir,libraryDir,id,chain,records,request]{BoneResult result{id,libraryDir,request,{}};
+  worker.post([this,root,dir,libraryDir,id,chain,records,request,refresh,ack]{BoneResult result{id,libraryDir,request,{}};result.refresh=refresh;
    try{auto json=skeletonJson(id,chain,records);auto file=root+"/"+dir+"/skeleton.json";
     bool unchanged=libraryDir&&exists(file)&&text(file)==json;
     if(!unchanged)writeSkeleton(root,dir,libraryDir,json);
     require(text(file)==json,"Skeleton verification failed");log(unchanged?"bone-library-unchanged":libraryDir?"bone-library":"bones-exported",root+"/"+dir);
+    if(refresh){auto body="{\"request\":"+std::to_string(refresh)+",\"character\":"+std::to_string(id)+"}";writeAtomic(ack,body);require(text(ack)==body,"Bone refresh acknowledgement verification failed");}
    }catch(const std::exception& ex){result.error=ex.what();}
    std::lock_guard<std::mutex> lock(sm);boneResults.push_back(std::move(result));});return true;}
 
@@ -769,12 +818,25 @@ struct Runtime::Impl {
   if(model.empty()&&!active.empty())model=active[0];
   auto list=[](const std::vector<std::string>& v){std::string s="[";for(size_t i=0;i<v.size();i++)s+=(i?",":"")+quote(v[i]);return s+"]";};
   std::string s="{\"state\":"+quote(state)+",\"detail\":"+quote(detail)+",\"characterId\":"+std::to_string(ch.config)+",\"model\":"+quote(model)+",\"models\":"+list(active)+",\"errors\":"+list(errors)+",\"scan\":"+quote(findOff?"off":rendererTypeObject?"ok":"pending")+",\"buildId\":"+quote(abi::buildId)+"}";
+  std::string refreshState,refreshDetail;
+  if(ctl.refreshBones){
+   if(!boneRefreshPending()){refreshState="complete";refreshDetail="骨骼已重新采集";}
+   else if(!ch.entity||ch.config!=ctl.refreshBonesCharacter){refreshState="waiting-character";refreshDetail="等待在大世界切换到角色 "+std::to_string(ctl.refreshBonesCharacter);}
+   else if(libraryPending.count(ch.config)){refreshState="saving";refreshDetail="骨骼已通过校验，正在保存并回读检查";}
+   else{refreshState=libraryError.count(ch.config)?"retrying":"capturing";refreshDetail=exportWait;}
+  }
+  s.pop_back();s+=",\"boneRefreshRequest\":"+std::to_string(ctl.refreshBones)+",\"boneRefreshCharacter\":"+std::to_string(ctl.refreshBonesCharacter)+",\"boneRefreshState\":"+quote(refreshState)+",\"boneRefreshDetail\":"+quote(refreshDetail)+"}";
   if(s==lastStatus){return;}lastStatus=s;auto dir=shared;worker.post([dir,s]{write(dir+"/status.json.tmp",s);std::filesystem::rename(dir+"/status.json.tmp",dir+"/status.json");});log(state,detail);}
 
  // ---------------------------------------------------------------- tick
+ bool boneRefreshPending()const{return ctl.refreshBones&&(boneRefreshDone!=ctl.refreshBones||boneRefreshDoneId!=ctl.refreshBonesCharacter);}
  void consume(){std::optional<ControlState> c;std::string cerr;std::deque<BoneResult> bones;{std::lock_guard<std::mutex> l(sm);c.swap(pendingControl);cerr.swap(controlError);bones.swap(boneResults);if(scannedFresh){models=scanned;scannedFresh=false;}}
   for(auto& b:bones){if(b.library)libraryPending.erase(b.id);else manualPending=false;
-   if(b.error.empty()){if(b.library){library.insert(b.id);libraryError.erase(b.id);}else{exportSeen=b.request;manualWait.clear();}}
+   if(b.error.empty()){if(b.library){
+     if(b.refresh&&b.refresh==ctl.refreshBones&&b.id==ctl.refreshBonesCharacter){boneRefreshDone=b.refresh;boneRefreshDoneId=b.id;libraryRead.erase(b.id);log("bone-refresh-complete",std::to_string(b.id)+": request "+std::to_string(b.refresh));}
+     // An old in-flight capture must not satisfy a newer request for the same character.
+     if(boneRefreshPending()&&b.id==ctl.refreshBonesCharacter){library.erase(b.id);}else{library.insert(b.id);libraryError.erase(b.id);}
+    }else{exportSeen=b.request;manualWait.clear();}}
    else{if(b.library)library.erase(b.id);auto& last=b.library?libraryError[b.id]:manualWait;if(last!=b.error){last=b.error;log(b.library?"bone-library-error":"bone-export-error",std::to_string(b.id)+": "+b.error+"; retrying automatically");}}}
   // A re-imported folder (new generation, maybe another character) forgets what was learned for the old one.
   for(auto& m:models){auto g=learnedGen.find(m.path);if(g==learnedGen.end()||g->second!=m.generation){learned.erase(m.path);learnedId.erase(m.path);staleNote.erase(m.path);learnedGen[m.path]=m.generation;for(auto it=missingLogged.lower_bound(m.path+"|");it!=missingLogged.end()&&it->first.compare(0,m.path.size()+1,m.path+"|")==0;)it=missingLogged.erase(it);}
@@ -782,6 +844,11 @@ struct Runtime::Impl {
   // A bone export is a request made while the game runs: the count found at start-up is not one.
   if(c&&!controlSeen){controlSeen=true;exportSeen=c->exportBones;}
   if(c&&c->exportBones!=exportSeen&&c->exportBones!=ctl.exportBones){boneCandidate.clear();manualRetryAt=0;manualWait.clear();}
+  if(c&&c->refreshBones&&(c->refreshBones!=ctl.refreshBones||c->refreshBonesCharacter!=ctl.refreshBonesCharacter)&&
+     (c->refreshBones!=boneRefreshDone||c->refreshBonesCharacter!=boneRefreshDoneId)){
+   auto id=c->refreshBonesCharacter;library.erase(id);libraryRead.erase(id);libraryRetry[id]=0;libraryError.erase(id);
+   boneCandidate.clear();boneBadList.clear();boneBadStreak=0;exportWait.clear();log("bone-refresh-request",std::to_string(id)+": request "+std::to_string(c->refreshBones));
+  }
   if(c){ctl=*c;handoff::publishControl(ctl.enabled);failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();}
   if(!cerr.empty())log("control-error",cerr);}
  void tick(uint64_t now){if(inTick)return;if(now<next){guard(now);return;}inTick=true;next=now+100;
@@ -807,6 +874,7 @@ struct Runtime::Impl {
     try{if(!exportBones(now,true)){libraryRetry[ch.config]=now+500;log("bone-library-wait",std::to_string(ch.config)+(exportWait.empty()?"":": "+exportWait));}}
     catch(const std::exception& ex){libraryRetry[ch.config]=now+500;auto& last=libraryError[ch.config];if(last!=ex.what()){last=ex.what();log("bone-library-error",std::to_string(ch.config)+": "+ex.what()+"; retrying automatically");}}}
    if(!ctl.enabled){if(!sets.empty()||!attachments.empty())releaseAll();status("disabled","",{},{});inTick=false;return;}
+   for(auto& kv:attachments){guardMaterials(*kv.second,now);}
    auto wanted=chooseModels();wantedNow=wanted;std::set<std::string> wantedPaths;for(auto* m:wanted)wantedPaths.insert(m->path);
    // Sets no longer wanted give their renderers back and stay built for quick switching back: released after a minute
    // unused, or sooner, oldest first, while they hold more than 256 MiB together. Wanted sets stay built while unused,

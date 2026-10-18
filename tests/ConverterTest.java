@@ -197,12 +197,12 @@ public final class ConverterTest {
    Map<String,Integer> off=two.switchTo(false,new HashMap<>(two.defaults));ok(!two.hidden("$a")&&off.size()==2&&!two.replacing(Variants.merged(two.defaults,off)),"关 with a switch over two variables picks an off row: "+off);
    Map<String,Integer> stockingOn=new HashMap<>();stockingOn.put("$vision",0);stockingOn.put("$stockings",1);
    ok(!headMaterial(guardedOut,Fixtures.set("$vision",0)).equals(headMaterial(guardedOut,stockingOn)),"stocking texture still switches");
-   boolean refused=false;try{ModelConverter.convert(guarded,bones,new File(root,"guarded_default_only"),10000107,"",false,dds->rgba,new StringBuilder());}catch(IllegalArgumentException ex){refused=ex.getMessage().contains("全部可用款式都没有有效 drawindexed");}ok(refused,"default-only conversion explains why enumeration is needed");
+   boolean refused=false;try{ModelConverter.convert(guarded,bones,new File(root,"guarded_default_only"),10000107,"",false,dds->rgba,new StringBuilder());}catch(IllegalArgumentException ex){refused=ex.getMessage().contains("当前只转换默认款式");}ok(refused,"default-only conversion explains why enumeration is needed");
    put(guarded,"mod.ini",guardedIni.replace("if $vision == 0\nhandling = skip\n","handling = skip\nif $vision == 0\n"));
    File hideOut=new File(root,"guarded_hide");outputs.addAll(ModelConverter.convert(guarded,bones,hideOut,10000107,"",true,dds->rgba,new StringBuilder()));
    ok(!Fixtures.manifest(hideOut).containsKey("replaceWhen")&&Fixtures.draws(hideOut,0,new HashMap<>()).isEmpty(),"handling=skip remains an intentional hide");
    put(guarded,"mod.ini",guardedIni.replace("drawindexed = auto","drawindexed = 0"));refused=false;
-   try{ModelConverter.convert(guarded,bones,new File(root,"no_draw"),10000107,"",true,dds->rgba,new StringBuilder());}catch(IllegalArgumentException ex){refused=ex.getMessage().contains("没有有效 drawindexed");}ok(refused,"a mod with no draw in any state remains invalid");}
+   try{ModelConverter.convert(guarded,bones,new File(root,"no_draw"),10000107,"",true,dds->rgba,new StringBuilder());}catch(IllegalArgumentException ex){refused=ex.getMessage().contains("已开启款式枚举");}ok(refused,"a mod with no draw in any state remains invalid");}
   // A more specific component wins over shared character defaults.
   byte[] hairPos=pos.array().clone(),hairBlend=blend.array().clone(),hairUV=uv.array().clone();for(int i=0;i<3;i++){ByteBuffer.wrap(hairPos).order(ByteOrder.LITTLE_ENDIAN).putFloat(i*40,100+i);ByteBuffer.wrap(hairBlend).order(ByteOrder.LITTLE_ENDIAN).putFloat(i*32,.5f).putFloat(i*32+4,.5f).putInt(i*32+20,1);ByteBuffer.wrap(hairUV).order(ByteOrder.LITTLE_ENDIAN).putFloat(i*12+4,.5f).putFloat(i*12+8,.5f);}
   put(src,"HairPosition.buf",hairPos);put(src,"HairBlend.buf",hairBlend);put(src,"HairTexcoord.buf",hairUV);

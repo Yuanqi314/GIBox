@@ -69,6 +69,7 @@ public final class Control {
     /** status.json written by the game side (runtime / bootstrap). loaded=false: no file yet (game not started with the module). */
     public static final class Status {
         public boolean loaded; public String state = "", detail = "", scan = "", model = ""; public int characterId; public final List<String> models = new ArrayList<>();
+        public long boneRefreshRequest; public int boneRefreshCharacter; public String boneRefreshState = "", boneRefreshDetail = "";
     }
     public static Status status(String pkg) {
         Status st = new Status();
@@ -76,9 +77,18 @@ public final class Control {
             JSONObject j = new JSONObject(new String(Files.readAllBytes(new File(shared(pkg), "status.json").toPath()), StandardCharsets.UTF_8));
             st.loaded = true; st.state = j.optString("state", ""); st.detail = j.optString("detail", ""); st.scan = j.optString("scan", ""); st.model = j.optString("model", ""); st.characterId = j.optInt("characterId", 0);
             JSONArray a = j.optJSONArray("models"); if (a != null) for (int i = 0; i < a.length(); i++) st.models.add(a.optString(i));
+            st.boneRefreshRequest = j.optLong("boneRefreshRequest", 0); st.boneRefreshCharacter = j.optInt("boneRefreshCharacter", 0);
+            st.boneRefreshState = j.optString("boneRefreshState", ""); st.boneRefreshDetail = j.optString("boneRefreshDetail", "");
         } catch (Exception ignored) {}
         return st;
     }
     /** The game exports the current character's skeleton once more (a timestamped folder next to the bone library). */
     public static synchronized void requestBoneExport(String pkg) throws Exception { JSONObject j = load(pkg); j.put("exportBones", j.optInt("exportBones", 0) + 1); save(pkg, j); }
+    /** Re-capture one character into the live bone library; the game retains the request until verified and saved. */
+    public static synchronized void requestBoneRefresh(String pkg, int character) throws Exception {
+        if (character < 10000000 || character > 10001999) throw new IllegalArgumentException("请先选择角色");
+        JSONObject j = load(pkg); long previous = j.optLong("refreshBones", 0);
+        if (previous < 0 || previous >= 9007199254740991L) previous = 0;
+        j.put("refreshBones", Math.max(System.currentTimeMillis(), previous + 1)); j.put("refreshBonesCharacter", character); save(pkg, j);
+    }
 }

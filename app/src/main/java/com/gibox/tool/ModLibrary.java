@@ -67,26 +67,9 @@ public final class ModLibrary {
         }
         return out;
     }
-    /** The folder holding the mod's single INI: the folder itself, or the only such sub-folder (archives often add one level). */
-    static File modRoot(File dir) {
-        if (!dir.isDirectory()) throw new IllegalArgumentException("不是文件夹：" + dir);
-        if (inis(dir) == 1) return dir;
-        if (inis(dir) > 1) throw new IllegalArgumentException("这个文件夹里有 " + inis(dir) + " 个 INI，一个 MOD 只能有一个（多余的可改名为 DISABLED 开头）");
-        List<File> found = new ArrayList<>(); List<File> level = new ArrayList<>(Collections.singletonList(dir));
-        for (int depth = 0; depth < 4 && !level.isEmpty(); depth++) {
-            List<File> next = new ArrayList<>();
-            for (File d : level) { File[] subs = d.listFiles(f -> f.isDirectory() && !f.getName().startsWith(".")); if (subs != null) for (File x : subs) { if (inis(x) == 1) found.add(x); else next.add(x); } }
-            level = next;
-        }
-        if (found.size() != 1) throw new IllegalArgumentException(found.isEmpty() ? "找不到 MOD 的 INI 文件" : "包含多个 MOD（" + found.size() + " 个 INI 目录），请分开导入");
-        return found.get(0);
-    }
-    private static int inis(File d) { File[] a = d.listFiles(f -> f.isFile() && f.getName().toLowerCase(Locale.ROOT).endsWith(".ini") && !f.getName().toLowerCase(Locale.ROOT).startsWith("disabled")); return a == null ? 0 : a.length; }
-    static File ini(File mod) {
-        File[] inis = mod.listFiles(f -> f.isFile() && f.getName().toLowerCase(Locale.ROOT).endsWith(".ini") && !f.getName().toLowerCase(Locale.ROOT).startsWith("disabled"));
-        if (inis == null || inis.length != 1) throw new IllegalArgumentException("MOD 根目录必须有且只有一个 INI");
-        return inis[0];
-    }
+    /** Find the geometry INI even when a PC package includes help/menu and face-texture sidecars. */
+    static File modRoot(File dir) { return ModConfig.find(dir).getParentFile(); }
+    static File ini(File mod) { return ModConfig.mainIni(mod); }
 
     /** Content signature: relative path, size and mtime of every file. Stored in model.json "source". */
     public static String signature(File mod) throws Exception {

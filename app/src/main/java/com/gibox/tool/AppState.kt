@@ -61,6 +61,10 @@ class AppState(private val activity: Activity) {
         private set
     var status by mutableStateOf(Control.Status())
         private set
+    var boneRefreshRequest by mutableStateOf(0L)
+        private set
+    var boneRefreshCharacter by mutableStateOf(0)
+        private set
     var enabled by mutableStateOf(false)
         private set
     var storage by mutableStateOf(false)
@@ -120,9 +124,25 @@ class AppState(private val activity: Activity) {
         enabled = Control.enabled(game)
         logLevel = Control.logLevel(game)
         status = Control.status(game)
+        val control = Control.load(game)
+        boneRefreshRequest = control.optLong("refreshBones", 0)
+        boneRefreshCharacter = control.optInt("refreshBonesCharacter", 0)
         revision++
     }
     fun refreshStatus() { status = Control.status(game) }
+    fun acceptStatus(pkg: String, snapshot: Control.Status) { if (game == pkg) status = snapshot }
+    fun refreshingBones(id: Int): Boolean = boneRefreshRequest > 0 && boneRefreshCharacter == id &&
+        !(status.boneRefreshRequest == boneRefreshRequest && status.boneRefreshCharacter == id && status.boneRefreshState == "complete")
+    fun boneRefreshMessage(id: Int): String? {
+        if (boneRefreshRequest <= 0 || boneRefreshCharacter != id) return null
+        if (status.boneRefreshRequest != boneRefreshRequest || status.boneRefreshCharacter != id) return "等待游戏响应，请在大世界切换到${Characters.nameOf(id)}。"
+        return when (status.boneRefreshState) {
+            "complete" -> "骨骼已重新采集，可重新转换对应 MOD。"
+            "waiting-character" -> "请在大世界切换到${Characters.nameOf(id)}，会自动开始采集。"
+            "saving" -> "骨骼已通过校验，正在保存…"
+            else -> "正在重新采集并检查骨骼，未完整时会自动重试…"
+        }
+    }
 
     fun mod(name: String): Importer.Mod? = mods.firstOrNull { it.name == name }
     /** The name shown for a mod: the one given to it, else its Mods entry name. */
@@ -185,6 +205,23 @@ class AppState(private val activity: Activity) {
     fun exportBones() = save("保存") {
         Control.requestBoneExport(game)
         toast("已通知游戏：骨骼采集校验通过后导出，未通过会自动重试")
+    }
+    fun confirmBoneRefresh(id: Int) {
+        if (id !in 10000000..10001999 || refreshingBones(id)) return
+        if (!storage) { needStorage(); return }
+        val pkg = game
+        val other = if (boneRefreshCharacter != id && refreshingBones(boneRefreshCharacter))
+            "当前还有${Characters.nameOf(boneRefreshCharacter)}的采集请求，确定后将改为采集本页角色。\n\n" else ""
+        prompt = Prompt(
+            title = "重新采集骨骼？",
+            text = other + "将重新获取${Characters.nameOf(id)}的骨骼。请在大世界切换到该角色；未在场时会等待，骨骼未完整时会自动重试，校验通过后保存。\n\n采集完成后，请重新转换需要使用新骨骼的 MOD。",
+            confirm = "确定", dismiss = "取消",
+            onConfirm = { save("重新采集骨骼") {
+                Control.requestBoneRefresh(pkg, id)
+                AppLog.info(pkg, LOGGER, "请求重新采集 ${Characters.nameOf(id)}（$id）的骨骼")
+                toast("已提交骨骼采集请求，请在大世界切换到${Characters.nameOf(id)}")
+            } },
+        )
     }
     private fun save(what: String, change: () -> Unit) {
         try { change() } catch (e: Throwable) { fail(what, e, null) }

@@ -29,6 +29,7 @@ patterns=out/'gimi-patterns'
 if patterns.exists():shutil.rmtree(patterns)
 patterns.mkdir(parents=True)
 run([java,'-cp',classes,'com.gibox.tool.GimiPatternsTest',patterns])
+run([java,'-cp',classes,'com.gibox.tool.CompatibilityTest'])
 importer=out/'importer'
 if importer.exists():shutil.rmtree(importer)
 importer.mkdir(parents=True)
