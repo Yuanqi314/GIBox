@@ -138,7 +138,7 @@ struct Runtime::Impl {
  struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;Variants variants;bool originalMaterials=false,built=false;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
  // source: for a renderer the game created from one of ours (adopted), the renderer whose material clones it shows.
  struct Attachment:Owned {Ptr renderer=0,native=0,original=0,originalMaterials=0,source=0;Set* set=nullptr;size_t part=0;bool adopted=false;std::map<std::string,Ptr> clones;
-  uint64_t refreshAt=0;unsigned refreshes=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;};  // clone -> canonical game material; retained across refreshes
+   uint64_t refreshAt=0,materialTraceStart=0,materialTraceAt=0;unsigned refreshes=0,materialTraceSamples=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;};  // clone -> canonical game material; retained across refreshes
  struct Seen {Ptr renderer=0,mesh=0;Fingerprint fp;};
  struct Character {Ptr entity=0;unsigned runtime=0,config=0;} ch;
  ControlState ctl;std::vector<ModelInfo> models;long long exportSeen=0;
@@ -483,19 +483,37 @@ struct Runtime::Impl {
    e.set(abi::setMesh,r,bp.mesh);meshSet=true;applyMaterials(*a);if(!s.originalMaterials)a->refreshAt=now+1500;
    if(!alive(bp.originMesh)){bp.originMesh=mesh;bp.originMaterials=a->originalMaterials;pin(s,mesh);pin(s,bp.originMaterials);}}
   catch(...){if(meshSet&&alive(r))e.set(abi::setMesh,r,mesh);freeOwned(*a);throw;}
-  log("attached",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);s.used=now;return true;}
- // A character switched in plays an effect on its own material instances (the blue glow), and resets them when it ends.
- // Clones taken during it keep the glow for good, so they are taken again twice afterwards, while the renderer still
- // shows ours; renderers adopted from this one follow. The replaced clones are freed with the attachment.
+   log("attached",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);beginMaterialTrace(*attachments.at(r),now);s.used=now;return true;}
+ // Bounded observations, not an effect-parameter fix: identify palette replacements during party hand-off versus
+ // unchanged material instances. These use existing getters only; shader values/property blocks are not observable.
+ void materialState(Attachment& a,const std::string& phase,uint64_t now){
+  if(a.set->originalMaterials||logLevel.load(std::memory_order_relaxed)>int(Level::Info)){return;}
+  try{
+   if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
+   auto saved=pointers(a.originalMaterials,64);Ptr array=e.get(abi::getMaterials,a.renderer);auto current=array?pointers(array,64):std::vector<Ptr>{};
+   auto describe=[&](Ptr m){
+    if(!alive(m)){return std::string("dead@")+hex(m);}
+    std::string kind="untracked";
+    if(std::find(saved.begin(),saved.end(),m)!=saved.end()){kind="original";}
+    for(auto& kv:attachments){auto& owner=*kv.second;for(auto& c:owner.clones){if(c.second==m){kind="mod";}}if(owner.retired.count(m)){kind="retired";}}
+    return kind+":"+name(m)+"@"+hex(load<Ptr>(m+0x10));};
+   auto palette=[&](const std::vector<Ptr>& list){std::string out="[";for(size_t i=0;i<list.size();i++){out+=(i?"; ":"")+std::to_string(i)+"="+describe(list[i]);}return out+"]";};
+   log("material-state",a.set->name+"/"+a.set->parts[a.part].name+" "+phase+" age-ms="+std::to_string(now>=a.materialTraceStart?now-a.materialTraceStart:0)+" renderer="+hex(a.native)+" current="+palette(current)+" saved="+palette(saved));
+  }catch(const std::exception& ex){log("material-state-error",a.set->name+": "+ex.what());}
+ }
+ void beginMaterialTrace(Attachment& a,uint64_t now){if(a.set->originalMaterials){return;}a.materialTraceStart=now;a.materialTraceAt=now+500;a.materialTraceSamples=0;materialState(a,"attached",now);}
+ // Retake clones after 1.5 s and ~4 s as a recovery for parameters copied mid-effect. This does not prevent the
+ // initial switch-in effect, nor establish which shader parameter causes the reported short blue glow.
  void refreshClones(Attachment& a,uint64_t now){a.refreshAt=++a.refreshes<2?now+2500:0;Set& s=*a.set;
   if(s.originalMaterials||a.adopted||a.clones.empty()||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
-  Ptr mats=e.get(abi::getMaterials,a.renderer);if(!mats)return;std::set<Ptr> current;for(Ptr m:pointers(mats,64))current.insert(m);
-  bool shows=false;for(auto& c:a.clones)shows=shows||current.count(c.second)>0;if(!shows)return;
+   materialState(a,"refresh-before",now);Ptr mats=e.get(abi::getMaterials,a.renderer);if(!mats){log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" skipped (no material array)");return;}std::set<Ptr> current;for(Ptr m:pointers(mats,64))current.insert(m);
+   bool shows=false;for(auto& c:a.clones)shows=shows||current.count(c.second)>0;if(!shows){log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" skipped (current materials are not the owned clones)");return;}
   auto old=a.clones;a.clones.clear();try{applyMaterials(a);}catch(...){a.clones=old;throw;}for(auto& kv:old)a.retired[kv.second]=kv.first;
   std::map<Ptr,Ptr> swap;for(auto& kv:a.retired){auto it=a.clones.find(kv.second);if(it!=a.clones.end())swap[kv.first]=it->second;}
   for(auto& kv:attachments){auto& o=*kv.second;if(o.source!=a.renderer||!alive(o.renderer))continue;Ptr om=e.get(abi::getMaterials,o.renderer);if(!om)continue;
    auto list=pointers(om,64);bool changed=false;for(auto& p:list){auto f=swap.find(p);if(f!=swap.end()){p=f->second;changed=true;}}
-   if(changed){Owned tmp;try{e.set(abi::setMaterials,o.renderer,array(tmp,om,list.data(),list.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}}}
+    if(changed){Owned tmp;try{e.set(abi::setMaterials,o.renderer,array(tmp,om,list.data(),list.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}}
+   log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" applied");materialState(a,"refresh-after",now);}
  // Attach failures stay visible in status until the next control change.
  void note(const std::string& m){log("attach-error",m);if(std::find(notes.begin(),notes.end(),m)==notes.end()&&notes.size()<8)notes.push_back(m);}
  // Does the renderer still show material clones of ours (its own, or the source's for an adopted copy)?
@@ -577,13 +595,14 @@ struct Runtime::Impl {
    Ptr original=src?src->original:bp.originMesh,originalMats=src?src->originalMaterials:bp.originMaterials;require(alive(original)&&originalMats!=0,"Original of adopted renderer unknown");
    pin(*a,r);pin(*a,original);pin(*a,originalMats);a->original=original;a->originalMaterials=originalMats;a->source=src?src->renderer:0;}
   catch(...){freeOwned(*a);throw;}
-  log("adopted",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);s.used=now;}
+   log("adopted",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);beginMaterialTrace(*attachments.at(r),now);s.used=now;}
  void discover(const std::vector<Set*>& live,uint64_t now){materialWait.clear();
   std::map<Ptr,std::pair<Set*,size_t>> ours;for(auto& s:sets)for(size_t i=0;i<s->parts.size();i++)ours[s->parts[i].mesh]={s.get(),i};
   auto list=allRenderers(now);
   for(auto it=attachments.begin();it!=attachments.end();){auto& a=*it->second;bool keep=alive(a.renderer)&&load<Ptr>(a.renderer+0x10)==a.native;
    if(keep){Ptr m=e.get(abi::getMesh,a.renderer);if(m&&m!=a.set->parts[a.part].mesh&&!reclaim(a,m)){keep=false;log("attachment-dropped","game put another mesh on "+rendererName(a.renderer)+(alive(m)?": "+name(m):""));restoreMaterials(a);}}
    bool giveWay=keep&&outranked(a,live);if(giveWay){keep=false;log("outranked",a.set->name+"/"+a.set->parts[a.part].name+" on "+rendererName(a.renderer)+": a model switched on earlier replaces this mesh");}
+    if(keep&&a.materialTraceAt&&now>=a.materialTraceAt){materialState(a,"early-sample",now);a.materialTraceAt=++a.materialTraceSamples<2?a.materialTraceStart+1000:0;}
    if(keep&&a.refreshAt&&now>=a.refreshAt){try{refreshClones(a,now);}catch(const std::exception& ex){log("material-refresh-error",a.set->name+": "+ex.what());}}
    if(!keep){detach(a,giveWay);it=attachments.erase(it);}else{a.set->used=now;++it;}}
   seen.clear();scanSkipped=0;scanCount++;
@@ -642,7 +661,8 @@ struct Runtime::Impl {
  // After the game's own callback: is our mesh still on the renderers attached above?
  void spawnedAfter(){if(!onTickThread("hand-off")||spawnAttached.empty()||inTick)return;inTick=true;unsigned kept=0,back=0,lost=0;
   try{for(Ptr r:spawnAttached){auto it=attachments.find(r);if(it==attachments.end()||!alive(r)){lost++;continue;}auto& a=*it->second;Ptr m=e.get(abi::getMesh,r);
-    if(m==a.set->parts[a.part].mesh)kept++;else if(reclaim(a,m))back++;else lost++;}}
+     if(m==a.set->parts[a.part].mesh){kept++;}else if(reclaim(a,m)){back++;}else{lost++;}
+     materialState(a,"handoff-after",clockMs());}}
   catch(const std::exception& ex){log("spawn-error",ex.what());}
   if(back||lost)log("spawn-after","after the game's hand-off callback: kept "+std::to_string(kept)+", put back "+std::to_string(back)+", lost "+std::to_string(lost));
   spawnAttached.clear();inTick=false;}

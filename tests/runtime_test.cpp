@@ -458,6 +458,7 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   Ptr grandchild=f->instantiate(child);f->scene.push_back(grandchild);heir.tick(2001200);assert(load<Ptr>(f->obj[child].materials+0x20)==firstMat);
   heir.tick(2001800);Ptr secondMat=load<Ptr>(f->obj[child].materials+0x20);assert(secondMat!=firstMat&&f->glow[secondMat]==0&&load<Ptr>(f->obj[grandchild].materials+0x20)==secondMat);
   heir.tick(2004400);Ptr thirdMat=load<Ptr>(f->obj[child].materials+0x20);assert(thirdMat!=secondMat&&f->glow[thirdMat]==0&&load<Ptr>(f->obj[grandchild].materials+0x20)==thirdMat);heir.tick(2009000);assert(load<Ptr>(f->obj[child].materials+0x20)==thirdMat);
+  auto heirLog=text(sharedHeir+"/GIBox Log.txt");assert(heirLog.find("material-state Heir/Part0 early-sample")!=std::string::npos&&heirLog.find("material-refresh Heir: attempt 1 applied")!=std::string::npos&&heirLog.find("material-refresh Heir: attempt 2 applied")!=std::string::npos);
   heir.shutdown();assert(meshOf(child)==originalMesh&&meshOf(grandchild)==originalMesh&&f->handles.empty());}
  // 32. A present but destroyed game material is a loading/lifetime problem, not an extra PC part. Do not borrow a
  //     different slot's shader for it; wait without changing the original pair, then retry on the SAME renderer.
@@ -467,6 +468,14 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   assert(JsonParser(text(sharedDead+"/status.json")).parse().at("detail").string.find("原材质槽 1 尚未就绪")!=std::string::npos);
   Ptr ready=f->object("material","Ready");ms[1]=ready;Ptr complete=f->array(8,2,ms);f->obj[w].materials=complete;missing.tick(2101200);assert(meshOf(w)!=originalMesh);
   missing.shutdown();assert(meshOf(w)==originalMesh&&f->obj[w].materials==complete&&f->handles.empty());}
+ // 33. A party-effect material copy has a new identity. Bounded observations must report that identity and a skipped
+ //     refresh without altering it; the trace cannot claim to observe (or fix) shader parameters/property blocks.
+ {std::string mediaTrace=root+"/mediaTrace",sharedTrace=mediaTrace+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedTrace+"/models/Trace",s);
+  Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh),saved=f->obj[w].materials;f->world(w);f->scene={w};write(sharedTrace+"/control.json","{\"enabled\":true,\"selected\":[\"Trace\"]}");
+  Runtime trace(e,pkg,root+"/privateTrace",mediaTrace,false);trace.tick(2200000);Ptr copy=clone(load<Ptr>(f->obj[w].materials+0x20),0);Ptr copied=f->array(8,1,&copy);f->obj[w].materials=copied;
+  trace.tick(2200600);assert(f->obj[w].materials==copied);trace.tick(2201800);assert(f->obj[w].materials==copied);
+  auto traceLog=text(sharedTrace+"/GIBox Log.txt");assert(traceLog.find("material-state Trace/Part0 early-sample")!=std::string::npos&&traceLog.find("current=[0=untracked:")!=std::string::npos&&traceLog.find("attempt 1 skipped (current materials are not the owned clones)")!=std::string::npos);
+  trace.shutdown();assert(meshOf(w)==originalMesh&&f->obj[w].materials==saved&&f->handles.empty());}
  std::filesystem::remove_all(root);
  std::cout<<"Native runtime: PASS (structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }

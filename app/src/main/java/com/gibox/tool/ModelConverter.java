@@ -62,7 +62,7 @@ public final class ModelConverter {
         }
         Section section(String n) { Section s=sections.get(lower(n));check(s!=null,"缺少段："+n);return s; }
         final LinkedHashSet<String> external=new LinkedHashSet<>();
-        /** run = targets defined outside this INI only patch shaders/textures at draw time; they cannot bind this mod's buffers. */
+        /** External calls cannot bind this mod's buffers. Known texture-reference conventions are handled below. */
         Section run(String n) { Section s=sections.get(lower(n.trim()));if(s==null){check(lower(n.trim()).startsWith("commandlist"),"缺少段："+n);external.add(n.trim());}return s; }
         List<String> active(Section s,Map<String,Integer> v){
             class Branch {boolean parent,taken,enabled,otherwise;Branch(boolean p,boolean e){parent=p;enabled=p&&e;taken=e;} }
@@ -99,6 +99,14 @@ public final class ModelConverter {
     private static String[] kv(String l){int p=l.indexOf('=');return p<0?null:new String[]{lower(l.substring(0,p).trim()),l.substring(p+1).trim()};}
     private static boolean binding(String k){return k.equals("ib")||k.matches("vb[0-9]+")||k.matches("ps-t[0-9]+");}
     private static boolean unbound(String name){return name==null||name.equalsIgnoreCase("null");}
+    private static boolean nnFix(String name){return lower(name.trim()).equals("commandlist\\global\\orfix\\nnfix");}
+    /** ORFix's ReferenceNoNormal captures ps-t0 as Diffuse and ps-t1 as Lightmap, regardless of filenames.
+     * Keep the resources at the call site: later bindings and other draws must not change this snapshot. */
+    private static void referenceNoNormal(Map<String,String> bindings){
+        bindings.put("texture-role:layout","nnfix");
+        bindings.put("texture-role:diffuse",bindings.getOrDefault("ps-t0","null"));
+        bindings.put("texture-role:lightmap",bindings.getOrDefault("ps-t1","null"));
+    }
     private static String streamKey(int kind){return "vertex-stream:"+kind;}
     private static String streamName(int kind){return new String[]{"Position","Blend","Texcoord"}[kind];}
     private static int streamKind(Resource r){
@@ -127,7 +135,7 @@ public final class ModelConverter {
     private static void commands(Ini ini,Section s,Map<String,Integer> vars,Map<String,Resource> rs,Map<String,String> bindings,List<Draw> draws,String part,int depth){
         check(depth<16,"CommandList 递归过深");for(String l:ini.active(s,vars)){String[] a=kv(l);if(a==null)continue;String k=a[0],v=a[1];if(binding(k))assign(rs,bindings,k,v);
             else if(k.equals("handling"))bindings.put(k,lower(v));
-            else if(k.equals("run")){Section target=ini.run(v);if(target!=null)commands(ini,target,vars,rs,bindings,draws,part,depth+1);}
+            else if(k.equals("run")){Section target=ini.run(v);if(target!=null)commands(ini,target,vars,rs,bindings,draws,part,depth+1);else if(nnFix(v))referenceNoNormal(bindings);}
             else if(k.equals("drawindexed")){String[] f=v.split(",");check(f.length<=3,"drawindexed 参数");int count=f[0].trim().equalsIgnoreCase("auto")?-1:Integer.parseInt(f[0].trim());int start=f.length>1?Integer.parseInt(f[1].trim()):0;check(f.length<3||Integer.parseInt(f[2].trim())==0,"仅支持 baseVertex=0");check(count>=-1,"drawindexed 数量");check(start>=0,"drawindexed 起始");if(count!=0)draws.add(new Draw(part,bindings,count,start));}
         }
     }
@@ -391,6 +399,10 @@ public final class ModelConverter {
         LinkedHashMap<Draw,Bones> ordered=new LinkedHashMap<>();for(Draw d:draws)if(targets.containsKey(d))ordered.put(d,targets.get(d));return ordered;
     }
     private static Resource[] textures(Draw d,Map<String,Resource> rs){Resource diffuse=null,light=null,normal=null;
+        if("nnfix".equals(d.bindings.get("texture-role:layout"))){
+            String color=d.bindings.get("texture-role:diffuse"),mask=d.bindings.get("texture-role:lightmap");
+            return new Resource[]{unbound(color)?null:resource(rs,color),unbound(mask)?null:resource(rs,mask),null};
+        }
         for(Map.Entry<String,String> binding:d.bindings.entrySet())if(binding.getKey().startsWith("ps-t")&&!unbound(binding.getValue())){Resource r=resource(rs,binding.getValue());String file=lower(r.file.getName());
             // Resource names often keep the semantic role when the file is called Skin.dds or has a typo (Ayaka's
             // ResourceAyakaHeadDiffuse.hair_type_2.black points at HairDifuse_Type_2_black.dds). Preserve file hints first.
@@ -553,7 +565,7 @@ public final class ModelConverter {
                 for(Group g:b.groups.values())g.draws=g.combos.isEmpty()?null:drawTable(g,none,only,1,shown);}
             for(Group g:b.groups.values()){int trimmed=0;for(Vertex v:g.vertices)if(v.trimmedWeights>0)trimmed++;if(trimmed>0)log.append(g.bones.name).append("：已清理 ").append(trimmed).append(" 个顶点中占比不超过 ").append(WEIGHT_EPSILON).append(" 的微小权重，并重新归一化\n");int fixed=fixUnweighted(g);if(fixed>0)log.append(g.bones.name).append("：").append(fixed).append(" 个顶点没有权重（MOD 本身的问题，PC 上这些点会被拉到原点），已沿用最近顶点的权重\n");}
             for(Group g:b.groups.values())log.append(g.bones.name).append(": ").append(g.vertices.size()).append(" 顶点，").append(g.indices.size()).append(" 索引").append(g.bones.synthetic?"（骨骼取自游戏内角色）":g.bones.target==null?"（骨骼库没有网格特征，首次在场景中出现时识别）":"").append('\n');
-            for(String x:ini.external)log.append("已忽略外部 CommandList：").append(x).append('\n');ini.external.clear();
+            for(String x:ini.external){if(nnFix(x))log.append("已按 NNFix 识别贴图：ps-t0 为颜色图，ps-t1 为材质遮罩，不使用法线图\n");else log.append("已忽略外部 CommandList：").append(x).append('\n');}ini.external.clear();
             Map<String,Object> data=emit(tmp,b,kept.size(),decoder);
             String generation;synchronized(ModelConverter.class){generation=System.currentTimeMillis()+"-"+(++generationCounter);}
             Map<String,Object> manifest=Json.of("format","gibox-model","version",2,"name",dest.getName(),"generation",generation,

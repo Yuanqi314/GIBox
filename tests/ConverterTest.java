@@ -48,6 +48,35 @@ public final class ConverterTest {
    put(renamed,"HairDifuse_Type_2_black.dds",new byte[]{1});put(renamed,"mod.ini",ini.replace("filename = Diffuse.dds","filename = HairDifuse_Type_2_black.dds"));
    File renamedOut=new File(root,"renamed_texture_out");ModelConverter.convert(renamed,bones,renamedOut,10000107,"",true,dds->rgba,new StringBuilder());
    Map<String,Object> material=Fixtures.material(renamedOut,"Material0");ok(material.containsKey("main")&&!Boolean.TRUE.equals(material.get("original")),"ResourceDiffuse must not silently use the game's original texture: "+material);}
+  // NNFix defines roles by slots, even when both filenames lie (the real Shenhe package has exactly this layout).
+  // Exercise a nested call, texture variants, another draw without NNFix, and hash-level inherited auto draws.
+  {File nn=new File(root,"nnfix");nn.mkdirs();for(String f:new String[]{"Position.buf","Blend.buf","Texcoord.buf","Index.buf"})Files.copy(new File(src,f).toPath(),new File(nn,f).toPath());
+   put(nn,"BodyNormalMap.dds",new byte[]{11});put(nn,"BodyNormalMapAlt.dds",new byte[]{22});put(nn,"BodyDiffuse.dds",new byte[]{33});
+   String prefix=ini.substring(0,ini.indexOf("[TextureOverrideBodyA]"))+"[KeyVariant]\ntype = cycle\n$variant = 0,1\n";
+   String defs=ini.substring(ini.indexOf("[ResourcePosition]"),ini.indexOf("[ResourceDiffuse]"))
+    +"[ResourceColor]\nfilename = BodyNormalMap.dds\n[ResourceColorAlt]\nfilename = BodyNormalMapAlt.dds\n[ResourceMask]\nfilename = BodyDiffuse.dds\n";
+   String fixed="if $variant == 0\nps-t0 = ResourceColor\nelse\nps-t0 = ResourceColorAlt\nendif\nps-t1 = ResourceMask\nrun = CommandListNested\n";
+   String local="[CommandListNested]\nrun = CommandList\\global\\ORFix\\NNFix\n";
+   String auto="[TextureOverrideHeroIB]\nhash = aabbccdd\nhandling = skip\ndrawindexed = auto\n";
+   for(boolean inheritedAuto:new boolean[]{false,true}){
+    String draw=inheritedAuto?"":"drawindexed = 3, 0, 0\n";
+    String bodyA="[TextureOverrideBodyA]\nhash = aabbccdd\nmatch_first_index = 0\nib = ResourceIndex\n"+fixed+draw;
+    String bodyB="[TextureOverrideBodyB]\nhash = aabbccdd\nmatch_first_index = 3\nib = ResourceIndex\nps-t0 = ResourceMask\nps-t1 = ResourceColor\n"+draw;
+    put(nn,"mod.ini",prefix+(inheritedAuto?auto:"")+bodyA+bodyB+local+defs);
+    File nnOut=new File(root,"nnfix_out_"+inheritedAuto);StringBuilder nnLog=new StringBuilder();
+    ModelConverter.convert(nn,bones,nnOut,10000107,"",true,dds->b(12).putInt(1).putInt(1).putInt(dds[0]&255).array(),nnLog);
+    for(int variant:new int[]{0,1}){
+     List<Object> draws=Fixtures.draws(nnOut,0,Fixtures.set("$variant",variant));ok(draws.size()==2,"both draws retained");
+     for(Object entry:draws){Map<String,Object> d=Json.obj(entry,"draw"),m=Fixtures.material(nnOut,(String)d.get("material"));
+      int color=Fixtures.view(nnOut,Json.obj(m.get("main"),"main").get("data")).getInt(0);
+      if(Fixtures.number(d,"slot")==0){ok(color==(variant==0?11:22),"NNFix ps-t0 is albedo, including variants");
+       ok(Fixtures.view(nnOut,Json.obj(m.get("lightmap"),"lightmap").get("data")).getInt(0)==33&&!m.containsKey("normalmap"),"NNFix ps-t1 is the mask; no normalmap");}
+      else ok(color==33&&m.containsKey("normalmap")&&!m.containsKey("lightmap"),"NNFix must not leak into another draw");
+     }
+    }
+    ok(nnLog.toString().contains("已按 NNFix 识别贴图")&&!nnLog.toString().contains("已忽略外部 CommandList"),"known texture convention is reported accurately");
+   }
+  }
   // A literal key cycle defines selectable states; inactive legacy branches are not additional variants. Keep the
   // initial value, union several cycles, and keep condition inference for variables that have no literal cycle.
   {File cycle=new File(root,"cycle");cycle.mkdirs();for(String f:new String[]{"Position.buf","Blend.buf","Texcoord.buf","Index.buf","Diffuse.dds"})Files.copy(new File(src,f).toPath(),new File(cycle,f).toPath());
