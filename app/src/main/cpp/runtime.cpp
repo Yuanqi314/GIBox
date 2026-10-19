@@ -1,6 +1,7 @@
 #include "runtime.hpp"
 #include "model.hpp"
 #include "logfmt.hpp"
+#include "render_probe.hpp"
 #include <chrono>
 #include <atomic>
 #include <cctype>
@@ -26,13 +27,14 @@ uint64_t clockMs(){return std::chrono::duration_cast<std::chrono::milliseconds>(
 std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static_cast<unsigned long long>(v));return b;}
 
 // ---------------------------------------------------------------- files (worker side)
-struct ControlState {bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
+struct ControlState {bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"Control JSON object");ControlState s;
  const auto& a=c.at("selected");require(a.type==Json::Array&&a.array.size()<=128,"Selected list");
  for(auto& v:a.array){require(v.type==Json::String&&!v.string.empty()&&v.string.find('/')==v.string.npos&&v.string!="."&&v.string!="..","Selected name");s.selected.push_back(v.string);}
  auto integerOf=[](const Json& j){if(j.type==Json::Null)return 0LL;require(j.type==Json::Number&&std::floor(j.number)==j.number&&std::abs(j.number)<=9007199254740991.,"Control counter");return static_cast<long long>(j.number);};
  s.enabled=c.at("enabled").type==Json::Bool&&c.at("enabled").boolean;s.exportBones=integerOf(c.at("exportBones"));
+ s.renderMark=integerOf(c.at("renderMark"));require(s.renderMark>=0,"Render marker counter");
  s.refreshBones=integerOf(c.at("refreshBones"));auto refreshId=integerOf(c.at("refreshBonesCharacter"));
  require(s.refreshBones>=0&&(!s.refreshBones||(refreshId>=10000000&&refreshId<=10001999)),"Bone refresh character/request");
  if(s.refreshBones){s.refreshBonesCharacter=unsigned(refreshId);}
@@ -173,6 +175,10 @@ struct Runtime::Impl {
  // out because an attach failed on them; scanCount numbers the scans. Per model: scan number, reason, details logged, time.
  int scanWorld=0,scanAll=-1;unsigned scanSkipped=0;uint64_t scanCount=0;unsigned shownCharacter=~0u;uint64_t idleMs=60000,idleBudget=256ull<<20;bool controlSeen=false;std::string exportWait;
  struct WaitWhy {uint64_t scan=~0ull;std::string reason;bool plain=false;std::string logged;uint64_t loggedAt=0;};std::map<std::string,WaitWhy> waitWhy;
+ std::unique_ptr<renderprobe::UnityReader> renderReader;std::unique_ptr<renderprobe::Recorder> renderRecorder;
+ long long renderMarkSeen=0;bool renderControlSeen=false;uint64_t renderIdentityAt=0,renderFollowEndAt=0;
+ struct RenderBones {std::vector<std::pair<Ptr,uint32_t>> bones;std::string error;};
+ struct RenderBind {RenderBones before;unsigned depth=0;};std::map<Ptr,RenderBind> renderBinding;
  Worker worker;  // last member: destroyed (joined) first, while everything it touches still exists
 
  Impl(Engine x,std::string p,std::string d,std::string media,bool threaded):e(std::move(x)),pkg(std::move(p)),priv(std::move(d)),worker(threaded){
@@ -208,6 +214,61 @@ struct Runtime::Impl {
  // learned.json: what the folder had when it was scanned, plus everything learned for it this session.
  void saveLearned(const ModelInfo& m){Learned l=m.learned;auto s=learned.find(m.path);if(s!=learned.end())for(auto& kv:s->second)l.targets[kv.first]=kv.second;
   auto id=learnedId.find(m.path);if(id!=learnedId.end())l.id=id->second;auto file=m.path+"/learned.json",body=learnedJson(l);worker.post([file,body]{writeAtomic(file,body);});}
+
+ // ---------------------------------------------------------------- first-stage render readback (debug only)
+ bool renderDebug()const{return logLevel.load(std::memory_order_relaxed)==int(Level::Debug);}
+ uint64_t renderNow()const{return worker.background()?clockMs():bindingNow;}
+ void renderSetup(){
+  if(!renderDebug()){renderBinding.clear();renderRecorder.reset();renderReader.reset();renderIdentityAt=0;renderFollowEndAt=0;return;}
+  if(!renderRecorder){renderReader=std::make_unique<renderprobe::UnityReader>(e.namedExport);
+   renderRecorder=std::make_unique<renderprobe::Recorder>([this](const std::string& line){auto dir=shared;worker.post([dir,line]{appendLog(dir,line);});});}
+ }
+ std::string renderKey(const Attachment& a)const{return a.set->name+"/"+a.set->parts[a.part].name+"/renderer="+hex(a.native);}
+ void renderSnapshot(Attachment& a,const std::string& phase){if(!renderDebug())return;
+  try{renderSetup();if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
+   Ptr arr=e.get(abi::getMaterials,a.renderer);if(!arr)return;
+   // Own all returned managed arrays across the named engine calls, which can trigger GC.
+   auto started=std::chrono::steady_clock::now();Owned roots;try{pin(roots,arr);auto original=pointers(a.originalMaterials,64),current=pointers(arr,64);std::vector<unsigned> slots;
+    for(auto& row:a.set->parts[a.part].rows){unsigned slot=row.slot;if(slot>=original.size())for(size_t k=original.size();k-->0;)if(alive(original[k])){slot=unsigned(k);break;}slots.push_back(slot);}
+    auto data=renderReader->sample(a.renderer,original,current,slots);data["modelCharacter"]=std::to_string(a.set->id);data["controlledCharacter"]=std::to_string(ch.config);
+    data["skinId"]=renderprobe::missing("no verified skin identity reader");data["visualStatus"]="unconfirmed";
+    data["readbackDurationUs"]=std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count());
+    renderRecorder->schema(renderReader->descriptions());renderRecorder->capture(renderNow(),renderKey(a),phase,std::move(data),true);
+   }catch(...){freeOwned(roots);throw;}freeOwned(roots);
+  }catch(const std::exception& ex){if(renderRecorder)renderRecorder->capture(renderNow(),renderKey(a),phase,{{"status",renderprobe::missing(ex.what())}},true);}
+ }
+ void renderIdentities(uint64_t now){if(!renderDebug()||!renderRecorder||now<renderIdentityAt)return;renderIdentityAt=now+500;
+  for(auto& kv:attachments){auto& a=*kv.second;try{if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)continue;renderprobe::State data;
+    data["controlledCharacter"]=std::to_string(ch.config);data["modelCharacter"]=std::to_string(a.set->id);data["mesh"]=hex(e.get(abi::getMesh,a.renderer));
+    Ptr arr=e.get(abi::getMaterials,a.renderer);std::string mats;if(arr)for(Ptr m:pointers(arr,64))mats+=(mats.empty()?"":" ")+hex(m);data["materials"]=mats;
+    data["parameters"]="event-only readback; not polled";
+    renderRecorder->capture(now,renderKey(a)+"/identity","identity",std::move(data));
+   }catch(const std::exception& ex){renderRecorder->capture(now,renderKey(a)+"/identity","identity",{{"status",renderprobe::missing(ex.what())}});}}
+ }
+ RenderBones renderBones(Ptr r){RenderBones b;try{Ptr a=e.get(abi::getBones,r);if(a){for(Ptr bone:pointers(a,512)){Ptr native=bone?load<Ptr>(bone+0x10):0;b.bones.push_back({native,native?load<uint32_t>(native+8):0});}}else b.error="bone array unavailable";}catch(const std::exception& ex){b.error=ex.what();}return b;}
+ void renderBindBefore(Ptr native)noexcept{if(!renderDebug()||!renderRecorder)return;
+  try{for(auto& kv:attachments)if(kv.second->native==native){auto& b=renderBinding[native];if(!b.depth)b.before=renderBones(kv.first);b.depth++;return;}}catch(...){}}
+ void renderBindAfter(Ptr native){if(!renderDebug()||!renderRecorder)return;auto before=renderBinding.find(native);if(before==renderBinding.end())return;
+  if(--before->second.depth){return;}auto old=std::move(before->second.before);renderBinding.erase(before);
+  for(auto& kv:attachments)if(kv.second->native==native){auto after=renderBones(kv.first);renderprobe::State data;
+   data["arrayIdentity"]="get_bones returns snapshots; compare ordered native bone pointer + instance id, not the allocated array address";data["countBefore"]=std::to_string(old.bones.size());data["countAfter"]=std::to_string(after.bones.size());
+   data["elementsChanged"]=old.bones!=after.bones?"true":"false";
+   auto boneList=[](const auto& list){std::string s;for(auto b:list)s+=(s.empty()?"":" ")+hex(b.first)+"#"+std::to_string(b.second);return s;};
+   data["bonesBefore"]=boneList(old.bones);data["bonesAfter"]=boneList(after.bones);
+   std::string changed;for(size_t i=0;i<std::max(old.bones.size(),after.bones.size());i++){std::pair<Ptr,uint32_t> x=i<old.bones.size()?old.bones[i]:std::pair<Ptr,uint32_t>{},y=i<after.bones.size()?after.bones[i]:std::pair<Ptr,uint32_t>{};
+    if(x!=y)changed+=(changed.empty()?"":"; ")+std::to_string(i)+":"+hex(x.first)+"#"+std::to_string(x.second)+"->"+hex(y.first)+"#"+std::to_string(y.second);}
+   data["changedIndices"]=changed;if(!old.error.empty()||!after.error.empty())data["status"]=renderprobe::missing(old.error+" / "+after.error);
+   data["interpretation"]="array/element changes alone do not prove a broken skeleton";
+   renderRecorder->capture(renderNow(),renderKey(*kv.second)+"/bones","bind-before-after",std::move(data),true);return;}
+ }
+ void renderTick(uint64_t now){bool fresh=!renderRecorder;renderSetup();if(!renderRecorder)return;
+  if(fresh)for(auto& kv:attachments)renderSnapshot(*kv.second,"debug-enabled");
+  // Startup counters are historical, not new markers. Disabled-mode markers are acknowledged but never replayed.
+  if(renderControlSeen&&ctl.renderMark>renderMarkSeen){renderMarkSeen=ctl.renderMark;renderFollowEndAt=now+5000;renderRecorder->mark(now,uint64_t(renderMarkSeen),renderReader->descriptions());
+   for(auto& kv:attachments)renderSnapshot(*kv.second,"user-mark-received");}
+  if(renderFollowEndAt&&now>=renderFollowEndAt){for(auto& kv:attachments)renderSnapshot(*kv.second,"user-mark-follow-end");renderFollowEndAt=0;}
+  renderIdentities(now);renderRecorder->tick(now);
+ }
 
  // ---------------------------------------------------------------- engine helpers (game thread)
  std::string name(Ptr p){require(alive(p),"Destroyed Unity object");Ptr s=e.get(abi::getName,p);if(!s)return {};auto n=load<uint32_t>(s+0x10);require(n<=1024,"Unity name bound");std::string out;for(unsigned i=0;i<n;i++){unsigned a=load<uint16_t>(s+0x14+i*2);if(a>=0xd800&&a<=0xdbff){require(i+1<n,"UTF16 name");unsigned b=load<uint16_t>(s+0x14+(++i)*2);require(b>=0xdc00&&b<=0xdfff,"UTF16 name");a=0x10000+((a-0xd800)<<10)+(b-0xdc00);}utf8(out,a);}return out;}
@@ -560,8 +621,9 @@ struct Runtime::Impl {
   catch(...){if(meshSet&&alive(r))e.set(abi::setMesh,r,mesh);freeOwned(*a);throw;}
    log("attached",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);beginMaterialTrace(*attachments.at(r),now);s.used=now;return true;}
  // Bounded observations, not an effect-parameter fix: identify palette replacements during party hand-off versus
- // unchanged material instances. These use existing getters only; shader values/property blocks are not observable.
+ // unchanged material instances. Existing INFO palette logs stay intact; debug readback uses named managed methods.
  void materialState(Attachment& a,const std::string& phase,uint64_t now){
+  renderSnapshot(a,phase);
   if(a.set->originalMaterials||logLevel.load(std::memory_order_relaxed)>int(Level::Info)){return;}
   try{
    if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
@@ -814,8 +876,8 @@ struct Runtime::Impl {
  Ptr bindMesh(Ptr rendererNative,Ptr meshNative){
   if(!meshNative||!rendererNative||!onTickThread("mesh binding")||!ctl.enabled||inTick||attachments.empty())return meshNative;
   Attachment* a=nullptr;for(auto& kv:attachments)if(kv.second->native==rendererNative){a=kv.second.get();break;}
-  if(!a||!wantedSet(*a->set)){return meshNative;}auto& bp=a->set->parts[a->part];if(!alive(bp.mesh)){return meshNative;}Ptr ours=load<Ptr>(bp.mesh+0x10);if(meshNative==ours)return meshNative;
-  inTick=true;Ptr out=meshNative;
+  if(!a||!wantedSet(*a->set)){return meshNative;}auto& bp=a->set->parts[a->part];if(!alive(bp.mesh)){return meshNative;}Ptr ours=load<Ptr>(bp.mesh+0x10);if(meshNative==ours){inTick=true;renderBindBefore(rendererNative);inTick=false;return meshNative;}
+  inTick=true;renderBindBefore(rendererNative);Ptr out=meshNative;
   try{if(!alive(a->renderer)||load<Ptr>(a->renderer+0x10)!=rendererNative){inTick=false;return meshNative;}Fingerprint fp;Ptr managed=0;bool known=knownMesh(meshNative,fp,managed);
    if(known&&meshName(fp.mesh)==meshName(bp.target.mesh)&&bindable(*a,managed)){
     // A successful interception must still remember the new game asset. Otherwise Destroy(old asset) leaves
@@ -843,7 +905,7 @@ struct Runtime::Impl {
  // These same checked hook entries also see first-time renderers. Their pre-call phase must let the game bind the
  // original bones; immediately after the original returns, attach/build from that now-complete renderer.
  void meshBound(Ptr native){if(!native||!onTickThread("mesh-bound")||inTick||!ctl.enabled||wantedNow.empty()||!bindingReady)return;inTick=true;
-  try{Ptr r=e.call<Ptr>(abi::wrapperFor,native);if(!alive(r)||load<Ptr>(r+0x10)!=native){inTick=false;return;}
+  try{renderBindAfter(native);Ptr r=e.call<Ptr>(abi::wrapperFor,native);if(!alive(r)||load<Ptr>(r+0x10)!=native){inTick=false;return;}
    Ptr mesh=e.get(abi::getMesh,r);if(!alive(mesh)){inTick=false;return;}
    auto attached=attachments.find(r);if(attached!=attachments.end()){auto& a=*attached->second;
     if(!wantedSet(*a.set)){inTick=false;return;}
@@ -1007,13 +1069,17 @@ struct Runtime::Impl {
    auto id=c->refreshBonesCharacter;library.erase(id);libraryRead.erase(id);libraryRetry[id]=0;libraryError.erase(id);
    boneCandidate.clear();boneBadList.clear();boneBadStreak=0;exportWait.clear();log("bone-refresh-request",std::to_string(id)+": request "+std::to_string(c->refreshBones));
   }
-  if(c){ctl=*c;handoff::publishControl(ctl.enabled);failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();bindingRejected.clear();bindingStamp.clear();}
+  if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel);
+   if(!renderControlSeen){renderControlSeen=true;renderMarkSeen=c->renderMark;}
+   if(c->logLevel!=int(Level::Debug))renderMarkSeen=c->renderMark;
+   ctl=*c;handoff::publishControl(ctl.enabled);if(!diagnosticOnly){failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();bindingRejected.clear();bindingStamp.clear();}}
+
   if(!cerr.empty())log("control-error",cerr);}
  void tick(uint64_t now){if(inTick)return;bindingNow=now;if(now<next){guard(now);return;}inTick=true;next=now+100;
   try{
    if(!tickTid.load())tickTid.store(threadId());
    // consume() may replace `models`: hand-off pointers into it are dropped first and set again below.
-   wantedNow.clear();bindingTargets.clear();bindingReady=false;if(!worker.background()){workerTick(now);}consume();ch=current();bindingStats();
+   wantedNow.clear();bindingTargets.clear();bindingReady=false;if(!worker.background()){workerTick(now);}consume();ch=current();renderTick(now);bindingStats();
    if(ch.config!=shownCharacter){shownCharacter=ch.config;log("character",ch.entity?std::to_string(ch.config):std::string("none"));}
    // Reuse the verified Type discovery only here, on the existing serial Tick.
    // Diagnostic hooks never call Runtime::Impl and never scan all objects.
@@ -1087,5 +1153,5 @@ void Runtime::spawned(Ptr go)noexcept{try{p->spawned(go);}catch(...){}}
 void Runtime::spawnedAfter()noexcept{try{p->spawnedAfter();}catch(...){}}
 Ptr Runtime::bindMesh(Ptr renderer,Ptr mesh)noexcept{try{return p->bindMesh(renderer,mesh);}catch(...){return mesh;}}
 void Runtime::meshBound(Ptr renderer)noexcept{try{p->meshBound(renderer);}catch(...){}}
-void Runtime::shutdown(){handoff::disarm();if(p->releaseAll()){p->pruneRestoreBackups(true);p->freeOwned(p->handoffTypeRoots);}}
+void Runtime::shutdown(){handoff::disarm();p->renderBinding.clear();p->renderRecorder.reset();p->renderReader.reset();if(p->releaseAll()){p->pruneRestoreBackups(true);p->freeOwned(p->handoffTypeRoots);}}
 }

@@ -56,6 +56,11 @@ fun LogScreen(state: AppState) {
                     Box {
                         IconButton(onClick = { levelsOpen = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "日志等级") }
                         DropdownMenu(expanded = levelsOpen, onDismissRequest = { levelsOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text(if (state.logLevel == "debug") "标记画面异常" else "标记画面异常（需调试等级）") },
+                                enabled = state.logLevel == "debug",
+                                onClick = { levelsOpen = false; state.markRenderAnomaly() },
+                            )
                             DropdownMenuItem(text = { Text("日志等级") }, onClick = {}, enabled = false)
                             Control.LOG_LEVELS.forEachIndexed { index, level ->
                                 DropdownMenuItem(

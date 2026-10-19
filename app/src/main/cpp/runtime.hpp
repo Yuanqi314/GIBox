@@ -10,6 +10,8 @@ template<class T>T load(Ptr p){require(p!=0,"Null native pointer");T v;std::memc
 template<class T>void store(Ptr p,T v){require(p!=0,"Null native pointer");std::memcpy(reinterpret_cast<void*>(p),&v,sizeof(v));}
 struct Engine {
  Ptr base;std::function<Ptr(abi::Offset)> resolver;
+ // Optional exported IL2CPP API lookup for debug readback; never falls back to an RVA.
+ std::function<Ptr(const char*)> namedExport;
  explicit Engine(Ptr b):base(b){}
  template<class R,class... A>R call(abi::Offset o,A... a){Ptr p=resolver?resolver(o):base+o;require(p!=0,"Unresolved engine function");return reinterpret_cast<R(*)(A...)>(p)(a...);}
  Ptr get(abi::Offset o,Ptr p){return call<Ptr>(o,p,Ptr(0));}

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <jni.h>
 #include <link.h>
+#include <dlfcn.h>
 #include <thread>
 #include "dobby.h"
 #include "handoff_diagnostics.hpp"
@@ -61,7 +62,16 @@ extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv*
  auto pkg=jstringValue(env,jp),priv=jstringValue(env,jd);ms::require(pkg=="com.miHoYo.Yuanshen"||pkg=="com.miHoYo.ys.bilibili","Unsupported package");if(started.exchange(true))return;
  std::thread([pkg,priv]{try{bootStatus(pkg,"waiting","等待 libyuanshen.so");Image image;for(unsigned n=0;n<480&&!image.base;n++){dl_iterate_phdr(findImage,&image);if(!image.base)std::this_thread::sleep_for(std::chrono::milliseconds(500));}ms::require(image.base!=0,"libyuanshen.so load timeout");
  auto actual=ms::loadedBuildId(image.base,image.ph,image.count,sizeof(ElfW(Phdr)));if(actual!=ms::abi::buildId){bootStatus(pkg,"buildid-mismatch","实际 Build ID："+actual);return;}
- auto rt=std::make_unique<ms::Runtime>(ms::Engine(image.base),pkg,priv);
+ ms::Engine engine(image.base);
+ // Debug readback only: exported names from this exact image, never a new fixed RVA.
+ engine.namedExport=[base=image.base](const char* name)->ms::Ptr{
+  void* handle=dlopen("libyuanshen.so",RTLD_NOW|RTLD_NOLOAD);
+  void* symbol=dlsym(handle?handle:RTLD_DEFAULT,name);Dl_info owner{};
+  bool matches=symbol&&dladdr(symbol,&owner)&&reinterpret_cast<uintptr_t>(owner.dli_fbase)==base;
+  if(handle)dlclose(handle);
+  return matches?reinterpret_cast<ms::Ptr>(symbol):0;
+ };
+ auto rt=std::make_unique<ms::Runtime>(std::move(engine),pkg,priv);
  // Publish before Dobby makes Tick executable through its trampoline.
  runtime=std::move(rt);published.store(runtime.get(),std::memory_order_release);
  int result=DobbyInstrument(reinterpret_cast<void*>(image.base+ms::abi::tick),onTick);

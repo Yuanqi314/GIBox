@@ -53,6 +53,14 @@ public final class Control {
     public static String logLevel(String pkg) { String s = load(pkg).optString("logLevel", "info"); for (String l : LOG_LEVELS) if (l.equals(s)) return s; return "info"; }
     public static int logThreshold(String pkg) { return AppLog.threshold(logLevel(pkg)); }
     public static synchronized void setLogLevel(String pkg, String level) throws Exception { JSONObject j = load(pkg); j.put("logLevel", level); save(pkg, j); }
+    /** A monotonically increasing marker; game retains the preceding 30 seconds only while logLevel=debug. */
+    public static synchronized void requestRenderMark(String pkg) throws Exception {
+        JSONObject j = load(pkg);
+        if (!"debug".equals(j.optString("logLevel", "info"))) throw new IllegalStateException("请先把日志等级设为调试，再复现异常");
+        long previous = j.optLong("renderMark", 0);
+        if (previous < 0 || previous >= 9007199254740991L) throw new IllegalStateException("画面标记计数无效");
+        j.put("renderMark", Math.max(System.currentTimeMillis(), previous + 1)); save(pkg, j);
+    }
     /** Variant choice per model, read by the runtime from control.json "variables". */
     public static synchronized void setVariable(String pkg, String model, String var, int value) throws Exception {
         JSONObject j = load(pkg); JSONObject all = j.optJSONObject("variables"); if (all == null) all = new JSONObject();
