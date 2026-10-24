@@ -86,13 +86,14 @@ fun SettingsScreen(state: AppState) {
                 }
             }
             if (state.logLevel == "debug") item {
-                // Only while the log level is 调试. The trace and the slot textures take effect at once; the other experiments one at
+                // Only while the log level is 调试. The trace, the slot textures and the direct textures take effect at once; the other experiments one at
                 // a time, then restart the game and switch characters once.
                 val rev = state.revision
                 val games = remember(rev) { state.experiment("gameMaterials") }
                 val colors = remember(rev) { state.experiment("neutralColors") }
                 val uv2 = remember(rev) { state.experiment("noUv2") }
                 val separate = remember(rev) { state.experiment("separateDraws") }
+                val direct = remember(rev) { state.experiment("directTextures") }
                 val trace = remember(rev) { state.experiment("glowTrace") }
                 val ms = remember(rev) { state.experimentMs() }
                 val slots = remember(rev) { state.experimentInt("slotTextures") }
@@ -101,17 +102,17 @@ fun SettingsScreen(state: AppState) {
                         state = trace,
                         title = { Text("追踪游戏对材质的写入") },
                         subtitle = { Text("不改画面。切人、装上模型和「标记画面异常」时，把谁改了哪个参数、改成什么写进日志") },
-                        shapes = ListItemDefaults.segmentedShapes(0, 7),
+                        shapes = ListItemDefaults.segmentedShapes(0, 8),
                         onCheckedChange = { state.setExperiment("glowTrace", it) },
                     )
                     SettingsSwitch(
                         state = games,
                         title = { Text("只换网格，材质用游戏自己的") },
                         subtitle = { Text("贴图会不对；看还发不发光") },
-                        shapes = ListItemDefaults.segmentedShapes(1, 7),
+                        shapes = ListItemDefaults.segmentedShapes(1, 8),
                         onCheckedChange = { state.setExperiment("gameMaterials", it) },
                     )
-                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(2, 7)) {
+                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(2, 8)) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("贴图用按槽覆盖（保留游戏材质）", style = MaterialTheme.typography.titleSmall)
                             Text("不复制材质，MOD 的贴图按绘制槽盖到游戏材质上；选后马上生效，日志里看 slot-textures", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -122,7 +123,7 @@ fun SettingsScreen(state: AppState) {
                             }
                         }
                     }
-                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(3, 7)) {
+                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(3, 8)) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("挂上后第一次重新复制材质", style = MaterialTheme.typography.titleSmall)
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -136,22 +137,29 @@ fun SettingsScreen(state: AppState) {
                         state = colors,
                         title = { Text("顶点色改为原模型的常用值") },
                         subtitle = { Text("模型会重新构建") },
-                        shapes = ListItemDefaults.segmentedShapes(4, 7),
+                        shapes = ListItemDefaults.segmentedShapes(4, 8),
                         onCheckedChange = { state.setExperiment("neutralColors", it) },
                     )
                     SettingsSwitch(
                         state = uv2,
                         title = { Text("第二套 UV 清零") },
                         subtitle = { Text("模型会重新构建") },
-                        shapes = ListItemDefaults.segmentedShapes(5, 7),
+                        shapes = ListItemDefaults.segmentedShapes(5, 8),
                         onCheckedChange = { state.setExperiment("noUv2", it) },
                     )
                     SettingsSwitch(
                         state = separate,
                         title = { Text("不合并相邻绘制段") },
                         subtitle = { Text("对照用：每个绘制段单独一个子网格（0.7.22 及以前的做法）；模型会重新构建，日志里看 submeshes") },
-                        shapes = ListItemDefaults.segmentedShapes(6, 7),
+                        shapes = ListItemDefaults.segmentedShapes(6, 8),
                         onCheckedChange = { state.setExperiment("separateDraws", it) },
+                    )
+                    SettingsSwitch(
+                        state = direct,
+                        title = { Text("原材质换贴图") },
+                        subtitle = { Text("不复制材质，MOD 贴图直接写进游戏给这个角色单独创建的材质，原来的贴图记下、关闭时写回；不满足条件的槽照旧复制。选后马上生效，日志里看 direct-textures") },
+                        shapes = ListItemDefaults.segmentedShapes(7, 8),
+                        onCheckedChange = { state.setExperiment("directTextures", it) },
                     )
                 }
             }

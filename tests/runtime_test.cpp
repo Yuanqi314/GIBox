@@ -16,7 +16,7 @@ struct Fake {
  Ptr stringBase=0x7020000000ull,base=0,manager=0,owner=0,klass=0,typeObj=0;std::map<Ptr,Obj> obj;std::vector<void*> allocated;std::map<unsigned,Ptr> handles;unsigned nextHandle=1,nextId=1;
  // Each built part now clones one restoration snapshot and one mod mesh; count both engine allocations.
  unsigned clones=0,meshClones=0,textures=0,weightAllocs=0,typeLookups=0,findCalls=0,findAllCalls=0,childCalls=0,bindposeReads=0;std::map<Ptr,Ptr> goOfRenderer;std::map<Ptr,std::vector<Ptr>> goChildren;Ptr lastWeights=0;std::map<Ptr,std::string> strings;std::string lightProperty;bool failMaterials=false,failFind=false;
- std::map<Ptr,Ptr> diffuse;std::map<Ptr,float> glow;std::map<Ptr,std::map<int32_t,std::array<float,4>>> props;std::map<Ptr,std::vector<std::string>> keywords; // material properties copied by Instantiate, including copies made by the game
+ std::map<Ptr,Ptr> diffuse;std::map<Ptr,std::map<int32_t,Ptr>> named;std::map<Ptr,float> glow;std::map<Ptr,std::map<int32_t,std::array<float,4>>> props;std::map<Ptr,std::vector<std::string>> keywords; // material properties copied by Instantiate, including copies made by the game
  std::map<Ptr,unsigned> nameReads,boneReads; // actual engine getter counts, used to check binding hot-path work
  std::vector<Ptr> scene,assets;/* assets: only in the everything-loaded search (prefabs, inactive pooled instances) */std::vector<std::pair<Ptr,unsigned>> triangles;std::map<std::pair<Ptr,int>,std::vector<uint32_t>> submeshIndices;Ptr skeletonRoot=0,kavehRoot=0;std::map<std::string,Ptr> kinds;
  // Il2CppClass per object kind, laid out unlike stock il2cpp: byval_arg at +0x98 with a type enum that is not the stock
@@ -54,7 +54,7 @@ struct Fake {
 }*f=nullptr;
 Ptr getMesh(Ptr p,Ptr){return f->obj.at(p).mesh;}Ptr getMaterials(Ptr p,Ptr){return f->obj.at(p).materials;}Ptr getBones(Ptr p,Ptr){f->boneReads[p]++;return f->obj.at(p).bones;}
 Ptr getName(Ptr p,Ptr){f->nameReads[p]++;auto n=f->obj.at(p).name;Ptr s=f->alloc(0x14+2*n.size());store<uint32_t>(s+0x10,n.size());for(size_t i=0;i<n.size();i++)store<uint16_t>(s+0x14+i*2,n[i]);return s;}
-Ptr clone(Ptr p,Ptr){f->clones++;auto original=f->obj.at(p);if(original.kind!="mesh"){Ptr out=f->object(original.kind,original.name);if(original.kind=="material"){f->diffuse[out]=f->diffuse[p];f->glow[out]=f->glow[p];f->props[out]=f->props[p];f->keywords[out]=f->keywords[p];}return out;}f->meshClones++;Ptr out=f->mesh(original.name,load<uint32_t>(original.shared+0x74));auto& o=f->obj[out];o.arrays=original.arrays;store<uint64_t>(o.shared+0xe0,load<uint64_t>(original.shared+0xe0));store<uint64_t>(o.native+0x90,load<uint64_t>(original.native+0x90));return out;}
+Ptr clone(Ptr p,Ptr){f->clones++;auto original=f->obj.at(p);if(original.kind!="mesh"){Ptr out=f->object(original.kind,original.name);if(original.kind=="material"){f->diffuse[out]=f->diffuse[p];f->named[out]=f->named[p];f->glow[out]=f->glow[p];f->props[out]=f->props[p];f->keywords[out]=f->keywords[p];}return out;}f->meshClones++;Ptr out=f->mesh(original.name,load<uint32_t>(original.shared+0x74));auto& o=f->obj[out];o.arrays=original.arrays;store<uint64_t>(o.shared+0xe0,load<uint64_t>(original.shared+0xe0));store<uint64_t>(o.native+0x90,load<uint64_t>(original.native+0x90));return out;}
 void destroy(Ptr p,Ptr){store<Ptr>(p+0x10,0);}Ptr parent(Ptr p,Ptr){return f->obj.at(p).parent;}
 uint32_t pin(Ptr p,int,Ptr){auto h=f->nextHandle++;f->handles[h]=p;return h;}void unpin(uint32_t h){assert(f->handles.erase(h)==1);}
 void setMesh(Ptr p,Ptr m,Ptr){f->obj.at(p).mesh=m;}void setMaterials(Ptr p,Ptr m,Ptr){if(f->failMaterials){f->failMaterials=false;throw std::runtime_error("fake-material-failure");}f->obj.at(p).materials=m;}
@@ -71,8 +71,10 @@ void texPixels(Ptr o,Ptr data,int n,Ptr){assert(load<Ptr>(o+0x10)&&data&&n==4);}
 Ptr newString(Ptr self,const char* s){assert(self==0&&s);Ptr p=(f->stringBase+=0x40);f->strings[p]=s;return p;}
 uint32_t hasProp(Ptr mat,Ptr name,Ptr){assert(mat&&f->strings.count(name));return f->strings[name]=="_LightMapTex"?0xffffff01u:0xffffff00u;}
 Ptr nativeAlloc(Ptr allocator,Ptr old,uint64_t size,int align,int label,int options,const char* name,int line){assert(allocator==load<Ptr>(f->base+abi::nativeAllocator)&&old==0&&size==32*3&&align==16&&label==15&&options==0&&name&&line==1);f->weightAllocs++;return f->lastWeights=f->alloc(size);}
-void setTex(Ptr mat,Ptr name,Ptr tex,Ptr){assert(mat&&tex&&load<Ptr>(tex+0x10)&&f->strings.count(name));f->lightProperty=f->strings[name];}
-void setMainTexture(Ptr mat,Ptr tex,Ptr){assert(mat&&tex);f->diffuse[mat]=tex;}
+int32_t glowPropertyId(Ptr name,Ptr);
+// A texture by property name; null puts a property back to empty (directTextures restores what a material held).
+void setTex(Ptr mat,Ptr name,Ptr tex,Ptr){assert(mat&&(!tex||load<Ptr>(tex+0x10))&&f->strings.count(name));f->lightProperty=f->strings[name];f->named[mat][glowPropertyId(name,0)]=tex;}
+void setMainTexture(Ptr mat,Ptr tex,Ptr){assert(mat);f->diffuse[mat]=tex;}
 unsigned channelSets=0;std::vector<Bytes> channelData;void setChannel(Ptr,Ptr a,Ptr){assert(load<uint64_t>(a+0x18)==3);channelSets++;
  unsigned stride=load<uint16_t>(load<Ptr>(a)+0xba);channelData.emplace_back(reinterpret_cast<const uint8_t*>(a+0x20),reinterpret_cast<const uint8_t*>(a+0x20)+3*stride);}void setPos(Ptr p,Ptr a,Ptr){store<uint32_t>(f->obj.at(p).shared+0x74,load<uint64_t>(a+0x18));}void setAny(Ptr,Ptr,Ptr){}
 Ptr classFromType(Ptr t,int init){assert(init==1&&load<uint8_t>(t+0xa)!=0);f->typeLookups++;for(auto& kv:f->kinds)if(t==kv.second+0x98)return kv.second;return f->alloc(0x10);}
@@ -89,7 +91,7 @@ Ptr glowShader(Ptr,Ptr){return 0x5ade;}int32_t glowQueue(Ptr,Ptr){return 2000;}
 Ptr glowKeywords(Ptr m,Ptr){auto& k=f->keywords[m];std::vector<Ptr> list;for(auto& w:k){Ptr s=f->alloc(0x14+2*w.size());store<int32_t>(s+0x10,int32_t(w.size()));for(size_t i=0;i<w.size();i++)store<uint16_t>(s+0x14+2*i,uint16_t(w[i]));list.push_back(s);}return f->array(8,unsigned(list.size()),list.data());}
 uint32_t glowHas(Ptr,int32_t id,Ptr){return id==7?1u:0u;}float glowFloat(Ptr m,int32_t id,Ptr){return f->props[m][id][0];}int32_t glowInt(Ptr,int32_t,Ptr){return 0;}
 void glowColor(Ptr m,int32_t id,float* out,Ptr){std::memcpy(out,f->props[m][id].data(),16);}void glowZero(Ptr,int32_t,float* out,Ptr){std::memset(out,0,16);}
-Ptr glowTexture(Ptr m,int32_t id,Ptr){return id==5?f->diffuse[m]:0;}
+Ptr glowTexture(Ptr m,int32_t id,Ptr){if(id==5)return f->diffuse[m];auto it=f->named.find(m);return it!=f->named.end()&&it->second.count(id)?it->second.at(id):0;}
 // Shader.PropertyToID for names made by newString (the Runtime's own lookups): _MainTex 5, _ElementRimColor 7, others above 100.
 int32_t glowPropertyId(Ptr name,Ptr){auto it=f->strings.find(name);std::string n=it!=f->strings.end()?it->second:"";if(n=="_MainTex")return 5;if(n=="_ElementRimColor")return 7;return 100+int32_t(std::hash<std::string>()(n)%1000);}Ptr glowTextureIds(Ptr,Ptr){int32_t id=5;return f->array(4,1,&id);}float glowCustom(Ptr,int32_t,Ptr){return 0;}
 // Per-slot overrides (slotTextures experiment): MaterialPropertyBlock contents, the renderer's block per material index
@@ -821,7 +823,7 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   assert(shown()==gameMat&&!slotFake.slots.count({w,0})&&slotFake.custom.at({w,0}).at(5)==main&&slotFake.custom.at({w,0}).at(lightId)==light&&slotFake.allow[w]==1);
   assert(has(": per-material custom texture, 1 of 1 draw slots, 2 textures, no getter of its own; the slots' property blocks show 0 of 2; per-material properties were off, switched on"));
   control(0);sr.tick(4006000);Ptr clone=shown();                                                  // custom texture -> copies
-  assert(clone!=gameMat&&f->obj[clone].kind=="material"&&slotFake.custom.at({w,0}).at(5)==f->diffuse[clone]&&slotFake.custom.at({w,0}).at(lightId)==0&&slotFake.allow[w]==0);
+  assert(clone!=gameMat&&f->obj[clone].kind=="material"&&slotFake.custom.at({w,0}).at(5)==f->diffuse[clone]&&slotFake.custom.at({w,0}).at(lightId)==f->named[clone][lightId]&&alive(f->named[clone][lightId])&&slotFake.allow[w]==0);
   assert(has("slot-textures Slot/Part0: per-material custom textures cannot be removed; the textures of the materials now shown were written into them"));
   control(1);sr.tick(4006600);assert(shown()==gameMat&&slotFake.slots.at({w,0}).at(5)==main&&slotFake.allow[w]==1);
   sr.shutdown();                                                                                    // restore: no block left, flag back off
@@ -859,6 +861,51 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   Runtime orr(e,pkg,root+"/privateOrig",mediaMerge,false);orr.tick(4200000);orr.tick(4200600);
   assert(meshOf(ow)!=original&&load<uint32_t>(f->obj[meshOf(ow)].shared+0xc0)==2&&has("submeshes Orig/Part0: 2 draws in effect, 2 submeshes (not merged: original materials by position)"));
   orr.shutdown();assert(meshOf(ow)==original&&f->handles.empty());}
+ // 51. Direct textures (debug experiment): the mod's textures go into the game's own material of a slot when it was made
+ //     at runtime and no other renderer shows it; what it held goes back when the experiment or the model is switched
+ //     off, the renderer dies or attaching fails. A main texture the game puts back is replaced again; a game copy of the
+ //     written material is tracked and gets its own textures back too. A loaded asset, or a runtime material another
+ //     renderer shows, is copied as before.
+ {std::string mediaDirect=root+"/mediaDirect",sharedDirect=mediaDirect+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedDirect+"/models/Direct",s);
+  auto control=[&](bool enabled,bool direct){write(sharedDirect+"/control.json.tmp",std::string("{\"enabled\":")+(enabled?"true":"false")+",\"logLevel\":\"debug\",\"selected\":[\"Direct\"],\"experiments\":{\"directTextures\":"+(direct?"true":"false")+"}}");
+   std::filesystem::rename(sharedDirect+"/control.json.tmp",sharedDirect+"/control.json");};
+  auto has=[&](const std::string& x){return text(sharedDirect+"/GIBox Log.txt").find(x)!=std::string::npos;};int32_t lightId=100+int32_t(std::hash<std::string>()("_LightMapTex")%1000);
+  auto runtimeMade=[&](Ptr m){store<uint32_t>(load<Ptr>(m+0x10)+8,uint32_t(-7));};
+  Ptr original=f->mesh(),w=f->renderer(original),gameArray=f->obj[w].materials,gameMat=load<Ptr>(gameArray+0x20),gameTex=f->object("texture","Original diffuse");
+  f->diffuse[gameMat]=gameTex;runtimeMade(gameMat);f->world(w);f->scene={w};auto shown=[&]{return load<Ptr>(f->obj[w].materials+0x20);};
+  control(true,true);Runtime dr(e,pkg,root+"/privateDirect",mediaDirect,false);dr.tick(4300000);dr.tick(4300600);
+  Ptr ours=f->diffuse[gameMat],light=f->named[gameMat][lightId];
+  assert(meshOf(w)!=original&&shown()==gameMat&&alive(ours)&&ours!=gameTex&&alive(light));                   // no copy: the game's material, our textures
+  assert(has("experiments gameMaterials=off")&&has("directTextures=on")&&has("direct-textures Direct/Part0 on Body: slot 0 Material: written (instance id -7; "));
+  f->diffuse[gameMat]=gameTex;dr.tick(4301200);dr.tick(4301800);                                              // the game puts its own back
+  assert(f->diffuse[gameMat]==ours&&has("direct-textures-lost Direct/Part0: the game put its own main texture on Material, ours written again (1 times so far)"));
+  Ptr copy=clone(gameMat,0);f->obj[copy].name="Material (Instance)";f->obj[w].materials=f->typed("material",copy);dr.tick(4302400);dr.tick(4303000);   // the game's own instance
+  assert(shown()==copy&&f->diffuse[copy]==ours&&has("direct-textures Direct/Part0: the game's copy Material (Instance) of Material carries our textures"));
+  control(true,false);dr.tick(4303600);Ptr cloned=shown();                                                    // experiment off: copies, own textures back
+  assert(cloned!=gameMat&&cloned!=copy&&f->diffuse[cloned]==ours&&f->diffuse[gameMat]==gameTex&&f->named[gameMat][lightId]==0&&f->diffuse[copy]==gameTex&&f->named[copy][lightId]==0);
+  control(true,true);dr.tick(4304200);assert(shown()==gameMat&&f->diffuse[gameMat]==ours);                   // and on again
+  control(false,true);dr.tick(4304800);dr.tick(4305400);                                                       // the model off
+  assert(meshOf(w)==original&&f->obj[w].materials==gameArray&&f->diffuse[gameMat]==gameTex&&f->named[gameMat][lightId]==0);
+  assert(has("direct-textures Direct/Part0 (restore): own textures written back into 1 game materials"));dr.shutdown();assert(f->handles.empty());
+  // A loaded asset (positive instance id) and a runtime material on another renderer as well: copied, the game's untouched.
+  Ptr w2=f->renderer(original),asset=load<Ptr>(f->obj[w2].materials+0x20);f->diffuse[asset]=gameTex;f->world(w2);f->scene={w2};control(true,true);
+  {Runtime d2(e,pkg,root+"/privateDirect2",mediaDirect,false);d2.tick(4400000);d2.tick(4400600);Ptr on=load<Ptr>(f->obj[w2].materials+0x20);
+   assert(meshOf(w2)!=original&&on!=asset&&f->diffuse[on]!=gameTex&&f->diffuse[asset]==gameTex&&has("slot 0 Material: a loaded asset (instance id "));d2.shutdown();assert(f->handles.empty());}
+  Ptr w3=f->renderer(original),sharedMat=load<Ptr>(f->obj[w3].materials+0x20),npc=f->renderer(f->mesh("Other"));runtimeMade(sharedMat);f->diffuse[sharedMat]=gameTex;
+  f->obj[npc].materials=f->typed("material",sharedMat);f->world(w3);f->scene={w3,npc};
+  {Runtime d3(e,pkg,root+"/privateDirect3",mediaDirect,false);d3.tick(4500000);d3.tick(4500600);Ptr on=load<Ptr>(f->obj[w3].materials+0x20);
+   assert(meshOf(w3)!=original&&on!=sharedMat&&f->diffuse[sharedMat]==gameTex&&has("slot 0 Material: also on "));d3.shutdown();assert(f->handles.empty());}
+  // The renderer destroyed by the game, nothing adopted from it: the material it showed (still alive) gets its own back.
+  Ptr w4=f->renderer(original),mat4=load<Ptr>(f->obj[w4].materials+0x20);runtimeMade(mat4);f->diffuse[mat4]=gameTex;f->world(w4);f->scene={w4};
+  {Runtime d4(e,pkg,root+"/privateDirect4",mediaDirect,false);d4.tick(4600000);d4.tick(4600600);assert(meshOf(w4)!=original&&load<Ptr>(f->obj[w4].materials+0x20)==mat4&&f->diffuse[mat4]!=gameTex);
+   destroy(w4,0);f->world(0);f->scene={};d4.tick(4601200);d4.tick(4601800);
+   assert(f->diffuse[mat4]==gameTex&&f->named[mat4][lightId]==0&&has("direct-textures Direct/Part0 (detach): own textures written back into 1 game materials"));d4.shutdown();assert(f->handles.empty());}
+  // The renderer refusing the material array while attaching: what was written into its material goes back first.
+  Ptr w5=f->renderer(original),mat5=load<Ptr>(f->obj[w5].materials+0x20);runtimeMade(mat5);f->diffuse[mat5]=gameTex;f->world(w5);f->scene={w5};
+  {Runtime d5(e,pkg,root+"/privateDirect5",mediaDirect,false);f->failMaterials=true;d5.tick(4700000);d5.tick(4700600);
+   assert(!f->failMaterials&&has("direct-textures Direct/Part0 (attach failed): own textures written back into 1 game materials"));
+   assert(meshOf(w5)==original&&load<Ptr>(f->obj[w5].materials+0x20)==mat5&&f->diffuse[mat5]==gameTex&&f->named[mat5][lightId]==0);   // left as the game had it
+   d5.shutdown();assert(f->handles.empty());}}
  std::filesystem::remove_all(root);
- std::cout<<"Native runtime: PASS (merged draws: hidden and non-contiguous ranges, variant switches, separateDraws rebuild; slot textures by property block and custom texture, effect mirror, glow trace windows and read-back, structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, glow experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
+ std::cout<<"Native runtime: PASS (direct textures: written, put back, game copies tracked, assets and shared materials copied; merged draws: hidden and non-contiguous ranges, variant switches, separateDraws rebuild; slot textures by property block and custom texture, effect mirror, glow trace windows and read-back, structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, glow experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }

@@ -37,11 +37,13 @@ std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static
 //                  property block (1) or per-material custom texture (2); no copies, refreshes or mirroring
 //   separateDraws  every draw in effect its own submesh, as before 0.7.23 (mergeDraws, model.hpp): for comparing the
 //                  picture and the draw count (rebuilds the model)
-struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false,separateDraws=false;int firstRefreshMs=0,slotTextures=0;
+//   directTextures the mod's textures go into the game's own material of a slot when that material is evidently this
+//                  renderer's alone, instead of into a copy (Runtime::directPlan); other slots are copied as before
+struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false,separateDraws=false,directTextures=false;int firstRefreshMs=0,slotTextures=0;
  std::string meshKey()const{return std::string(neutralColors?"c":"-")+(noUv2?"u":"-")+(separateDraws?"s":"-");}
- bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&separateDraws==o.separateDraws&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures;}
- bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||separateDraws||firstRefreshMs||slotTextures;}
- std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off");}};
+ bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&separateDraws==o.separateDraws&&directTextures==o.directTextures&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures;}
+ bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||separateDraws||directTextures||firstRefreshMs||slotTextures;}
+ std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off")+" directTextures="+(directTextures?"on":"off");}};
 // effectMirror (control.json, default true): the game's material effects are repeated on GIBox's copies (glow_trace.hpp).
 struct ControlState {Experiments exp;bool enabled=false,effectMirror=true;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
 ControlState parseControl(const std::string& raw){
@@ -58,7 +60,7 @@ ControlState parseControl(const std::string& raw){
  for(auto& model:vars.object){require(model.second.type==Json::Object,"Variables object");for(auto& kv:model.second.object){require(kv.first.size()>1&&kv.first[0]=='$',"Variable name");auto n=integerOf(kv.second);require(std::abs(n)<=1000000,"Variable value");s.variables[model.first][kv.first]=int(n);}}
  s.logLevel=logThreshold(c);s.effectMirror=c.at("effectMirror").type!=Json::Bool||c.at("effectMirror").boolean;
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
-  s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");
+  s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");s.exp.directTextures=flag("directTextures");
   auto ms=integerOf(x.at("firstRefreshMs"));require(ms>=0&&ms<=10000,"experiments.firstRefreshMs");s.exp.firstRefreshMs=int(ms);
   auto slots=integerOf(x.at("slotTextures"));require(slots>=0&&slots<=2,"experiments.slotTextures");s.exp.slotTextures=int(slots);}
  return s;
@@ -176,7 +178,10 @@ struct Runtime::Impl {
  struct Attachment:Owned {Ptr renderer=0,native=0,original=0,originalMaterials=0,source=0;Set* set=nullptr;RestoreBackup* backup=nullptr;size_t part=0;bool adopted=false;std::map<std::string,Ptr> clones;std::string restoreError;
    uint64_t refreshAt=0,materialTraceStart=0,materialTraceAt=0,materialCheckAt=0,materialCheckUntil=0;unsigned refreshes=0,materialTraceSamples=0,materialRepairs=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;  // clone -> canonical game material; retained across refreshes
    // slotTextures experiment: the mode written, (property ID, texture) per draw slot, AllowPerMaterialProp before (-1: untouched)
-   int slotMode=0,slotAllowBefore=-1;unsigned slotLost=0,slotSwaps=0;std::vector<std::vector<std::pair<int32_t,Ptr>>> slotTex;std::vector<Ptr> slotMats;};
+   int slotMode=0,slotAllowBefore=-1;unsigned slotLost=0,slotSwaps=0;std::vector<std::vector<std::pair<int32_t,Ptr>>> slotTex;std::vector<Ptr> slotMats;
+   // directTextures experiment: game material -> its native object, what each written property held before (put back on
+   // every re-apply, restore and detach) and what we wrote (main texture first); copy: a game copy of such a material.
+   struct Direct {Ptr native=0;std::vector<std::pair<const char*,Ptr>> before,after;bool copy=false;Ptr main()const{return after.empty()?0:after[0].second;}};std::map<Ptr,Direct> direct;std::set<Ptr> directPinned;std::string directReport;unsigned directLost=0;};
  struct Seen {Ptr renderer=0,mesh=0;Fingerprint fp;};
  struct Character {Ptr entity=0;unsigned runtime=0,config=0;} ch;
  ControlState ctl;std::vector<ModelInfo> models;long long exportSeen=0,boneRefreshDone=0;unsigned boneRefreshDoneId=0;
@@ -510,6 +515,64 @@ struct Runtime::Impl {
     if(a.slotLost<=10||a.slotLost%30==0)log("slot-textures-lost",where+": "+std::to_string(total-found)+" of "+std::to_string(total)+" textures were gone from the blocks, written again ("+std::to_string(a.slotLost)+" times so far)");}
    catch(const std::exception& ex){log("slot-textures","check "+where+": "+ex.what());}}}
 
+ // ---------------------------------------------------------------- direct textures (debug experiment, experiments.directTextures)
+ // The mod's textures go into the game's own material of a slot, not into a copy of it, when that material is evidently
+ // this renderer's alone: made at runtime (negative instance id; a loaded asset is shared by everything made from it),
+ // not carrying a GIBox texture (a game copy of one of our materials), in no other attachment's original palette, and on
+ // no other renderer found (FindObjectsOfType sees active renderers only: evidence, not proof); and every draw of ours on
+ // that slot uses the same textures. Any other slot is copied as before. What each written property held goes back on
+ // every re-apply, restore and detach; a game copy of such a material (same stem, our main texture) is tracked alike.
+ static int32_t instanceId(Ptr o){Ptr n=load<Ptr>(o+0x10);return n?int32_t(load<uint32_t>(n+8)):0;}
+ bool gibTexture(Ptr t){if(!t)return false;for(auto& s:sets)for(auto& kv:s->textures)if(t==kv.second.main||t==kv.second.light||t==kv.second.normal)return true;return false;}
+ const char* firstProperty(Ptr mat,std::initializer_list<const char*> properties){for(auto prop:properties)if(e.call<uint32_t>(abi::hasProperty,mat,managedName(prop),Ptr(0))&1u)return prop;return nullptr;}
+ Ptr textureOf(Ptr mat,const char* property){return e.call<Ptr>(glow::rvaGetTexture,mat,slotId(property),Ptr(0));}
+ void putTexture(Ptr mat,const char* property,Ptr tx){if(!std::strcmp(property,"_MainTex"))e.set(abi::mainTexture,mat,tx);else e.call<void>(abi::setTexture,mat,managedName(property),tx,Ptr(0));}
+ void directPin(Attachment& a,Ptr p){if(alive(p)&&a.directPinned.insert(p).second)pin(a,p);}
+ // Slot -> the game material that takes the mod's textures; the decision for every slot of ours goes to `report`.
+ std::map<unsigned,Ptr> directPlan(Attachment& a,const std::vector<Ptr>& originals,std::string& report){Set& s=*a.set;auto& bp=s.parts[a.part];
+  std::map<unsigned,std::set<std::string>> names;for(auto& row:bp.rows)names[row.slot].insert(row.name);
+  std::map<unsigned,std::string> why;std::map<unsigned,Ptr> want;
+  for(auto& n:names){unsigned slot=n.first;Ptr m=slot<originals.size()?originals[slot]:0;
+   if(!alive(m)){why[slot]="no game material of its own";continue;}
+   if(n.second.size()>1){why[slot]="draws with different textures";continue;}
+   if(s.textures.at(*n.second.begin()).original){why[slot]="the model keeps the original material";continue;}
+   int32_t id=instanceId(m);if(id>=0){why[slot]="a loaded asset (instance id "+std::to_string(id)+")";continue;}
+   if(gibTexture(textureOf(m,"_MainTex"))){why[slot]="already carries a GIBox texture";continue;}
+   bool other=false;for(auto& kv:attachments){auto& o=*kv.second;if(&o==&a||o.source==a.renderer)continue;if(o.originalMaterials)for(Ptr x:pointers(o.originalMaterials,64))other=other||x==m;for(auto& c:o.materialSources)other=other||c.second==m;}
+   if(other){why[slot]="in another attachment's original palette";continue;}
+   want[slot]=m;}
+  // Renderers the game made from ours (adopted, source == ours) show our mesh with our materials: they share them.
+  if(!want.empty()){std::set<Ptr> mine{a.renderer};for(auto& kv:attachments)if(kv.second->source==a.renderer)mine.insert(kv.first);
+   std::vector<Ptr> list=allRenderers(bindingNow);for(auto& kv:attachments)list.push_back(kv.first);std::set<Ptr> checked;
+   for(Ptr r:list){if(mine.count(r)||!checked.insert(r).second||!alive(r))continue;Ptr mats=e.get(abi::getMaterials,r);if(!mats)continue;
+    for(Ptr x:pointers(mats,64))for(auto it=want.begin();it!=want.end();)if(it->second==x){why[it->first]="also on "+rendererName(r);it=want.erase(it);}else ++it;}
+   for(auto& w:want)why[w.first]="written (instance id "+std::to_string(instanceId(w.second))+"; "+std::to_string(checked.size())+" other renderers checked)";}
+  for(auto& w:why){Ptr m=w.first<originals.size()?originals[w.first]:0;report+=(report.empty()?"":"; ")+std::string("slot ")+std::to_string(w.first)+(alive(m)?" "+name(m):"")+": "+w.second;}
+  return want;}
+ // Before anything is written its old value is kept (and pinned), so a failed write is put back as well.
+ void directWrite(Attachment& a,Ptr m,const MatTex& t){Attachment::Direct d;d.native=load<Ptr>(m+0x10);d.after.push_back({"_MainTex",t.main});
+  if(t.light)if(auto* n=firstProperty(m,{"_LightMap","_LightMapTex","_Lightmap","_LightmapTex"}))d.after.push_back({n,t.light});
+  if(t.normal)if(auto* n=firstProperty(m,{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"}))d.after.push_back({n,t.normal});
+  for(auto& x:d.after){Ptr was=textureOf(m,x.first);directPin(a,was);d.before.push_back({x.first,was});}
+  directPin(a,m);a.direct[m]=d;for(auto& x:d.after)putTexture(m,x.first,x.second);}
+ // Every material written gets its own textures back (a dead one is skipped); the ledger is emptied.
+ void directRestore(Attachment& a,const char* why){if(a.direct.empty())return;unsigned n=0,copies=0;
+  for(auto& kv:a.direct){Ptr m=kv.first;auto& d=kv.second;if(!alive(m)||load<Ptr>(m+0x10)!=d.native)continue;for(auto& b:d.before)putTexture(m,b.first,b.second);n++;if(d.copy)copies++;}
+  a.direct.clear();if(why)log("direct-textures",a.set->name+"/"+a.set->parts[a.part].name+" ("+why+"): own textures written back into "+std::to_string(n)+" game materials"+(copies?" ("+std::to_string(copies)+" of them game copies)":""));}
+ // A material on the renderer that the game copied from one we wrote into (same stem, our main texture) joins that
+ // material's ledger. rewrite (each scan): a written one whose main texture the game replaced gets ours again (logged).
+ void directTrack(Attachment& a,bool rewrite){bool any=false;for(auto& kv:attachments)any=any||!kv.second->direct.empty();if(!any||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
+  std::string where=a.set->name+"/"+a.set->parts[a.part].name;
+  for(auto& kv:a.direct){Ptr m=kv.first;auto& d=kv.second;if(!rewrite||d.copy||!alive(m)||load<Ptr>(m+0x10)!=d.native||textureOf(m,"_MainTex")==d.main())continue;
+   for(auto& x:d.after)putTexture(m,x.first,x.second);
+   if(++a.directLost<=10||a.directLost%30==0)log("direct-textures-lost",where+": the game put its own main texture on "+name(m)+", ours written again ("+std::to_string(a.directLost)+" times so far)");}
+  Ptr mats=e.get(abi::getMaterials,a.renderer);if(!mats)return;
+  for(Ptr m:pointers(mats,64)){if(!alive(m))continue;bool known=false;for(auto& kv:attachments)known=known||kv.second->direct.count(m)>0||kv.second->materialSources.count(m)>0;if(known)continue;
+   Ptr main=textureOf(m,"_MainTex");if(!main)continue;
+   for(auto& kv:attachments){auto& o=*kv.second;Ptr from=0;for(auto& w:o.direct)if(!w.second.copy&&w.second.main()==main&&materialStem(name(w.first))==materialStem(name(m))){from=w.first;break;}
+    if(!from){continue;}
+    auto d=o.direct.at(from);d.native=load<Ptr>(m+0x10);d.copy=true;directPin(o,m);for(auto& b:d.before)directPin(o,b.second);o.direct[m]=d;
+    log("direct-textures",where+": the game's copy "+name(m)+" of "+name(from)+" carries our textures; it gets its own back with "+name(from));break;}}}
  // ---------------------------------------------------------------- effect mirror (control.json "effectMirror", default on)
  // The game plays its material effects (switch-in dissolve and others) on the materials it holds, never on our copies.
  // The hooks in glow_trace.hpp make each such write again on the copies of that original; here the original -> copies
@@ -560,7 +623,7 @@ struct Runtime::Impl {
   // objectNew only allocates the managed shell; its native texture (+0x10) exists once the constructor (textureInit) has run.
   Ptr x=e.call<Ptr>(abi::objectNew,load<Ptr>(descriptor));require(x!=0,"Texture allocation failed");o.objects.push_back(x);pin(o,x);
   e.call<void>(abi::textureInit,x,int(t.w),int(t.h),4,0,linear?1:0,Ptr(0));require(alive(x),"Texture init failed");e.call<void>(abi::texturePixels,x,reinterpret_cast<Ptr>(t.pixels.data()),int(t.pixels.size()),Ptr(0));e.action(abi::textureApply,x);return x;}
- void extraTexture(Ptr mat,Ptr tx,std::initializer_list<const char*> properties){for(auto prop:properties){Ptr property=e.call<Ptr>(abi::newString,Ptr(0),prop);require(property!=0,"Managed string allocation failed");if(e.call<uint32_t>(abi::hasProperty,mat,property,Ptr(0))&1u){e.call<void>(abi::setTexture,mat,property,tx,Ptr(0));return;}}}
+ void extraTexture(Ptr mat,Ptr tx,std::initializer_list<const char*> properties){if(auto* prop=firstProperty(mat,properties))e.call<void>(abi::setTexture,mat,managedName(prop),tx,Ptr(0));}
  Character current(){Ptr root=load<Ptr>(e.base+abi::manager);if(!root)return {};Ptr m=load<Ptr>(root+0x8c00);if(!m)return {};unsigned id=load<uint32_t>(m+0x288);Ptr list=load<Ptr>(m+0x10);if(!id||!list)return {};Ptr a=load<Ptr>(list+0x10);unsigned n=load<uint32_t>(list+0x18);if(!a||n>1024||length(a,1024)<n)return {};for(unsigned i=0;i<n;i++){Ptr ent=load<Ptr>(a+0x20+i*8);if(ent&&load<uint32_t>(ent+0x430)==id){unsigned config=load<uint32_t>(ent+0x3a4);if(config>=10000000&&config<=10001999)return {ent,id,config};}}return {};}
  // The renderer owner is null while the character is still loading: no renderers yet, not an error.
  std::vector<Ptr> worldRenderers(){if(!ch.entity)return {};Ptr o=load<Ptr>(ch.entity+0xf8);if(!o)return {};Ptr list=load<Ptr>(o+0x68);if(!list)return {};return pointers(list,64);}
@@ -911,7 +974,7 @@ struct Runtime::Impl {
   SlotState old=slotTake(a);if(want){a.slotAllowBefore=old.allow;old.allow=-1;}
   if(old.mode==1){slotRelease(a,old);applyMaterialsAs(a,want);return;}
   try{applyMaterialsAs(a,want);}catch(...){slotRelease(a,old);throw;}slotRelease(a,old);}
- void applyMaterialsAs(Attachment& a,int slotMode){Set& s=*a.set;auto& bp=s.parts[a.part];
+ void applyMaterialsAs(Attachment& a,int slotMode){Set& s=*a.set;auto& bp=s.parts[a.part];directRestore(a,nullptr);
   if(slotMode){auto originals=pointers(a.originalMaterials,64);std::vector<Ptr> mats;
    for(auto& row:bp.rows){Ptr src=row.slot<originals.size()?originals[row.slot]:0;if(!alive(src))for(size_t k=originals.size();k-->0;)if(alive(originals[k])){src=originals[k];break;}require(alive(src),"Original material missing");mats.push_back(src);}
    std::set<std::string> names;for(auto& r:bp.rows)names.insert(r.name);ensureTextures(s,names,true);
@@ -920,8 +983,15 @@ struct Runtime::Impl {
   if(ctl.exp.gameMaterials&&!s.originalMaterials){auto originals=pointers(a.originalMaterials,64);std::vector<Ptr> mats;
    for(auto& row:bp.rows){Ptr src=row.slot<originals.size()?originals[row.slot]:0;if(!alive(src))for(size_t k=originals.size();k-->0;)if(alive(originals[k])){src=originals[k];break;}require(alive(src),"Original material missing");mats.push_back(src);}
    Owned tmp;try{e.set(abi::setMaterials,a.renderer,array(tmp,a.originalMaterials,mats.data(),mats.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);return;}if(!s.originalMaterials){std::set<std::string> names;for(auto& r:bp.rows)names.insert(r.name);ensureTextures(s,names,true);}if(s.originalMaterials){e.set(abi::setMaterials,a.renderer,a.originalMaterials);return;}
-  auto originals=pointers(a.originalMaterials,64);std::vector<Ptr> mats;
-  for(auto& row:bp.rows){auto key=row.name+"#"+std::to_string(row.slot);auto it=a.clones.find(key);Ptr m=0;if(it!=a.clones.end()&&alive(it->second))m=it->second;
+  auto originals=pointers(a.originalMaterials,64);std::vector<Ptr> mats;std::map<unsigned,Ptr> direct;
+  if(ctl.exp.directTextures){std::string report;direct=directPlan(a,originals,report);if(report!=a.directReport){a.directReport=report;log("direct-textures",s.name+"/"+bp.name+" on "+rendererName(a.renderer)+": "+report);}}
+  else a.directReport.clear();
+  for(auto& row:bp.rows){auto key=row.name+"#"+std::to_string(row.slot);auto it=a.clones.find(key);
+   // A slot that takes the mod's textures in the game's material: its old copy is retired (an adopted renderer may show it).
+   auto own=direct.find(row.slot);if(own!=direct.end()){if(it!=a.clones.end()){a.retired[it->second]=it->first;a.clones.erase(it);}
+    if(!a.direct.count(own->second)){directWrite(a,own->second,s.textures.at(row.name));}
+    mats.push_back(own->second);continue;}
+   Ptr m=0;if(it!=a.clones.end()&&alive(it->second))m=it->second;
    else{Ptr src=row.slot<originals.size()?originals[row.slot]:0;
     // The PC mod can have more parts than the phone's mesh has materials (Shenhe: 4 parts, 3 submeshes): such a slot
     // takes the shader of the renderer's last material, with the mod's own textures.
@@ -960,7 +1030,7 @@ struct Runtime::Impl {
    missingLogged.erase(waitKey);require(a->backup&&alive(a->backup->mesh),"Restoration mesh snapshot unavailable");snapshotMaterials(*a->backup,a->originalMaterials);
    e.set(abi::setMesh,r,bp.mesh);meshSet=true;applyMaterials(*a);if(!s.originalMaterials)a->refreshAt=now+(ctl.exp.firstRefreshMs?uint64_t(ctl.exp.firstRefreshMs):1500);
    if(!alive(bp.originMesh)){bp.originMesh=mesh;bp.originMaterials=a->originalMaterials;pin(s,mesh);pin(s,bp.originMaterials);}}
-  catch(...){if(meshSet&&alive(r))e.set(abi::setMesh,r,mesh);freeOwned(*a);throw;}
+  catch(...){try{directRestore(*a,"attach failed");}catch(const std::exception&){}if(meshSet&&alive(r))e.set(abi::setMesh,r,mesh);freeOwned(*a);throw;}
    log("attached",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);mirrorSync();beginMaterialTrace(*attachments.at(r),now);s.used=now;return true;}
  // Bounded observations, not an effect-parameter fix: identify palette replacements during party hand-off versus
  // unchanged material instances. Existing INFO palette logs stay intact; debug readback uses named managed methods.
@@ -1026,7 +1096,7 @@ struct Runtime::Impl {
   try{
    if(a.set->originalMaterials||a.slotMode||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native){return;}
    Ptr mats=e.get(abi::getMaterials,a.renderer);if(!mats){return;}auto current=pointers(mats,64);
-   bool known=true;for(Ptr m:current){bool found=false;for(auto& kv:attachments){found=found||kv.second->materialSources.count(m)>0;}known=known&&found;}
+   bool known=true;for(Ptr m:current){bool found=false;for(auto& kv:attachments){found=found||kv.second->materialSources.count(m)>0||kv.second->direct.count(m)>0;}known=known&&found;}
    if(known||!copiedPalette(a,current,mats)){return;}
    a.materialRepairs++;materialState(a,"copy-before",now);retakeClones(a);a.adopted=false;a.source=0;
    if(!a.refreshAt){a.refreshes=0;a.refreshAt=now+(ctl.exp.firstRefreshMs?uint64_t(ctl.exp.firstRefreshMs):1500);}
@@ -1035,17 +1105,24 @@ struct Runtime::Impl {
  }
  // Attach failures stay visible in status until the next control change.
  void note(const std::string& m){log("attach-error",m);if(std::find(notes.begin(),notes.end(),m)==notes.end()&&notes.size()<8)notes.push_back(m);}
- // Does the renderer still show material clones of ours (its own, or the source's for an adopted copy)?
+ // Does the renderer still show material clones of ours (its own, or the source's for an adopted copy), or a game
+ // material holding our textures (directTextures)?
  bool showsClones(Ptr r){Ptr mats=e.get(abi::getMaterials,r);if(!mats)return false;std::set<Ptr> current;for(Ptr m:pointers(mats,64))current.insert(m);
-  for(auto& kv:attachments){for(auto& c:kv.second->clones)if(current.count(c.second))return true;for(auto& c:kv.second->retired)if(current.count(c.first))return true;}return false;}
+  for(auto& kv:attachments){for(auto& c:kv.second->clones)if(current.count(c.second))return true;for(auto& c:kv.second->retired)if(current.count(c.first))return true;
+   for(auto& d:kv.second->direct)if(current.count(d.first))return true;}return false;}
  // Original materials go back only while the renderer still shows our clones: once they are destroyed, a renderer still
  // pointing at them draws magenta (0.3.5: the game swaps the mesh, we dropped the attachment and destroyed its clones).
  // A renderer in the slotTextures experiment shows the game's materials, one per draw slot of ours.
  // The game may put its own instances into those slots (the overrides stay with the slot), so the slot count decides.
  bool showsOurs(Attachment& a){if(showsClones(a.renderer))return true;if(!a.slotMode)return false;Ptr mats=e.get(abi::getMaterials,a.renderer);if(!mats)return false;
   auto current=pointers(mats,64);if(current.size()!=a.set->parts[a.part].rows.size())return false;for(Ptr m:current)if(!alive(m))return false;return true;}
+ // Game materials holding our textures get theirs back before the palette goes back (so original UVs never meet our
+ // textures). One in the palette of another attachment's ledger cannot be: it is still on show there (logged).
  void restoreMaterials(Attachment& a,bool knownPair=false){if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
-  if(!knownPair&&!showsOurs(a)){slotClear(a);return;}SlotState slots=slotTake(a);try{restorePalette(a);}catch(...){slotRelease(a,slots);throw;}slotRelease(a,slots);}
+  directTrack(a,false);bool ours=knownPair||showsOurs(a);directRestore(a,"restore");
+  if(a.originalMaterials)for(Ptr m:pointers(a.originalMaterials,64))for(auto& kv:attachments)if(kv.second.get()!=&a&&kv.second->direct.count(m))
+   log("direct-textures-shared",a.set->name+"/"+a.set->parts[a.part].name+": "+name(m)+" goes back to "+rendererName(a.renderer)+" still holding our textures (in use by "+rendererName(kv.first)+")");
+  if(!ours){slotClear(a);return;}SlotState slots=slotTake(a);try{restorePalette(a);}catch(...){slotRelease(a,slots);throw;}slotRelease(a,slots);}
  void restorePalette(Attachment& a){
   unsigned dead=0;for(Ptr m:pointers(a.originalMaterials,64))if(!alive(m))dead++;Ptr palette=a.originalMaterials;
   if(dead){require(a.backup&&a.backup->materials,"Restoration material snapshot unavailable");palette=a.backup->materials;
@@ -1099,6 +1176,9 @@ struct Runtime::Impl {
    // The owner may disappear during the switch-in effect. Its heir now owns these clones and must finish the same
    // refresh schedule; adopted followers otherwise have no timer and are deliberately skipped by refreshClones().
    heir->adopted=false;heir->refreshAt=a.refreshAt;heir->refreshes=a.refreshes;}
+  // Game materials holding our textures: the heir shows them now; without one they get their own textures back.
+  if(heir){for(auto& d:a.direct){directPin(*heir,d.first);for(auto& b:d.second.before)directPin(*heir,b.second);heir->direct[d.first]=d.second;}a.direct.clear();}
+  else{try{directRestore(a,"detach");}catch(const std::exception& ex){log("direct-textures-error",a.set->name+": "+ex.what());}}
   freeOwned(a);return true;}
  // Whole groups go away together: every renderer gets its original back before any clone is destroyed.
  template<class F>bool detachWhere(F pick){std::vector<Ptr> keys,done;for(auto& kv:attachments)if(pick(*kv.second))keys.push_back(kv.first);
@@ -1152,6 +1232,7 @@ struct Runtime::Impl {
    bool giveWay=keep&&(newer||outranked(a,live));if(giveWay){keep=false;log("outranked",a.set->name+"/"+a.set->parts[a.part].name+" on "+rendererName(a.renderer)+": a newer or earlier-priority model replaces this mesh");}
     if(keep&&a.materialTraceAt&&now>=a.materialTraceAt){materialState(a,"early-sample",now);a.materialTraceAt=++a.materialTraceSamples<2?a.materialTraceStart+1000:0;}
    if(keep&&a.refreshAt&&now>=a.refreshAt){try{refreshClones(a,now);}catch(const std::exception& ex){log("material-refresh-error",a.set->name+": "+ex.what());}}
+   if(keep){try{directTrack(a,true);}catch(const std::exception& ex){log("direct-textures-error",a.set->name+": "+ex.what());}}
    if(!keep){if(detach(a,giveWay))it=attachments.erase(it);else ++it;}else{a.set->used=now;++it;}}
   seen.clear();scanSkipped=0;scanCount++;
   for(Ptr r:list){try{if(!alive(r)||attachments.count(r))continue;Ptr native=load<Ptr>(r+0x10);if(skipped.count({r,native})){scanSkipped++;continue;}Ptr m=e.get(abi::getMesh,r);if(!alive(m))continue;
@@ -1473,9 +1554,9 @@ struct Runtime::Impl {
   if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel);
    if(!renderControlSeen){renderControlSeen=true;renderMarkSeen=c->renderMark;}
    if(c->logLevel!=int(Level::Debug))renderMarkSeen=c->renderMark;
-   bool expMaterials=c->exp.gameMaterials!=ctl.exp.gameMaterials||c->exp.slotTextures!=ctl.exp.slotTextures;if(!(c->exp==ctl.exp))log("experiments",c->exp.text());
+   bool expMaterials=c->exp.gameMaterials!=ctl.exp.gameMaterials||c->exp.slotTextures!=ctl.exp.slotTextures||c->exp.directTextures!=ctl.exp.directTextures;if(!(c->exp==ctl.exp))log("experiments",c->exp.text());
    ctl=*c;handoff::publishControl(ctl.enabled);
-   // gameMaterials or slotTextures switched: every attached renderer gets the other kind of materials now (adopted copies
+   // gameMaterials, slotTextures or directTextures switched: every attached renderer gets the other kind of materials now (adopted copies
    // only for slotTextures, whose overrides are their own).
    if(expMaterials)for(auto& kv:attachments){auto& a=*kv.second;try{if(!a.adopted||a.slotMode||(ctl.exp.slotTextures&&!a.set->originalMaterials))applyMaterials(a);}catch(const std::exception& ex){log("experiment-error",a.set->name+": "+ex.what());}}
    if(!diagnosticOnly){failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();bindingRejected.clear();bindingStamp.clear();}}
