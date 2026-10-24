@@ -2,6 +2,7 @@
 #include "model.hpp"
 #include "logfmt.hpp"
 #include "render_probe.hpp"
+#include "glow_trace.hpp"
 #include <chrono>
 #include <atomic>
 #include <cctype>
@@ -27,7 +28,20 @@ uint64_t clockMs(){return std::chrono::duration_cast<std::chrono::milliseconds>(
 std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static_cast<unsigned long long>(v));return b;}
 
 // ---------------------------------------------------------------- files (worker side)
-struct ControlState {bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
+// Debug experiments for the switch-in glow (control.json "experiments"), each off by default:
+//   gameMaterials  the game's own materials on our mesh (no clones): is the glow in our copied materials?
+//   firstRefreshMs first material re-copy after attaching (default 1500): does the glow end with it?
+//   neutralColors / noUv2  mesh data: vertex colours set to the original's usual value, UV2 zeroed (rebuilds the model)
+//   glowTrace      record every write to the tracked materials and renderers (glow_trace.hpp); changes nothing itself
+//   slotTextures   1/2: the game's own materials stay on, the mod's textures go into each draw slot's per-material
+//                  property block (1) or per-material custom texture (2); no copies, refreshes or mirroring
+struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false;int firstRefreshMs=0,slotTextures=0;
+ std::string meshKey()const{return std::string(neutralColors?"c":"-")+(noUv2?"u":"-");}
+ bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures;}
+ bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||firstRefreshMs||slotTextures;}
+ std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off");}};
+// effectMirror (control.json, default true): the game's material effects are repeated on GIBox's copies (glow_trace.hpp).
+struct ControlState {Experiments exp;bool enabled=false,effectMirror=true;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"Control JSON object");ControlState s;
  const auto& a=c.at("selected");require(a.type==Json::Array&&a.array.size()<=128,"Selected list");
@@ -40,7 +54,11 @@ ControlState parseControl(const std::string& raw){
  if(s.refreshBones){s.refreshBonesCharacter=unsigned(refreshId);}
  const auto& vars=c.at("variables");require(vars.type==Json::Object||vars.type==Json::Null,"Variables object");
  for(auto& model:vars.object){require(model.second.type==Json::Object,"Variables object");for(auto& kv:model.second.object){require(kv.first.size()>1&&kv.first[0]=='$',"Variable name");auto n=integerOf(kv.second);require(std::abs(n)<=1000000,"Variable value");s.variables[model.first][kv.first]=int(n);}}
- s.logLevel=logThreshold(c);
+ s.logLevel=logThreshold(c);s.effectMirror=c.at("effectMirror").type!=Json::Bool||c.at("effectMirror").boolean;
+ const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
+  s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");
+  auto ms=integerOf(x.at("firstRefreshMs"));require(ms>=0&&ms<=10000,"experiments.firstRefreshMs");s.exp.firstRefreshMs=int(ms);
+  auto slots=integerOf(x.at("slotTextures"));require(slots>=0&&slots<=2,"experiments.slotTextures");s.exp.slotTextures=int(slots);}
  return s;
 }
 // lodMesh: the converter's target is a lower level of detail (a skeleton library recorded while the character was still
@@ -78,10 +96,15 @@ std::vector<ModelInfo> scanModels(const std::string& root,std::map<std::string,M
  cache.swap(next);std::sort(out.begin(),out.end(),[](auto& a,auto& b){return a.name<b.name;});return out;
 }
 // Everything a build needs, read and checked off the game thread (model.hpp).
-std::shared_ptr<ModelFile> loadModel(const ModelInfo& info){
- auto m=loadModelFile(info.path);require("g:"+m->generation==info.generation,"model.json changed while loading");
- m->name=info.name;m->id=info.id;require(m->parts.size()==info.parts.size(),"model.json changed while loading");return m;
+// Textures: only those the chosen variant values draw; the others stay in model.bin until a variant switch needs them.
+std::shared_ptr<ModelFile> loadModel(const ModelInfo& info,const std::map<std::string,int>& chosen,bool verify=true){
+ auto m=loadModelFile(info.path,false,verify);require("g:"+m->generation==info.generation,"model.json changed while loading");
+ m->name=info.name;m->id=info.id;require(m->parts.size()==info.parts.size(),"model.json changed while loading");
+ readTextures(info.path,m->generation,m->blobSize,m->materials,materialsDrawn(m->parts,pick(m->variants,chosen)));return m;
 }
+// Memory a loaded, not yet built model holds: geometry and the textures read for it.
+uint64_t loadedBytes(const ModelFile& m){uint64_t n=0;for(auto& p:m.parts){n+=uint64_t(p.geo.n)*(12+12+8+32)+uint64_t(p.geo.ni)*4;for(auto& c:p.channels)n+=c.second.size();}
+ for(auto& kv:m.materials){for(auto* t:{kv.second.main.get(),kv.second.light.get(),kv.second.normal.get()})if(t)n+=t->pixels.size();}return n;}
 // skeletons/<name>/skeleton.json, verified before an atomic file replacement; keep the last good record on failure.
 void writeSkeleton(const std::string& root,const std::string& name,bool replace,const std::string& json){
  auto dest=root+"/"+name;if(!replace)require(!exists(dest),"Skeleton export directory exists");std::filesystem::create_directories(dest);
@@ -105,6 +128,8 @@ class Worker {
  bool background()const{return threaded;}
  void start(std::function<void()> p){periodic=std::move(p);if(threaded)thread=std::thread([this]{loop();});}
  void post(std::function<void()> f){if(!threaded){run(f);return;}{std::lock_guard<std::mutex> l(m);if(stopping)return;jobs.push_back(std::move(f));}cv.notify_one();}
+ // Ahead of everything queued (the files of a character that is appearing now).
+ void postFront(std::function<void()> f){if(!threaded){run(f);return;}{std::lock_guard<std::mutex> l(m);if(stopping)return;jobs.push_front(std::move(f));}cv.notify_one();}
  void stop(){if(!threaded)return;{std::lock_guard<std::mutex> l(m);stopping=true;}cv.notify_all();if(thread.joinable())thread.join();}
  ~Worker(){stop();}
 };
@@ -130,7 +155,9 @@ struct Runtime::Impl {
  Engine e;std::string pkg,priv,shared,modelRoot,boneRoot;
  // ---- shared with the worker (guarded by sm)
  std::mutex sm;std::optional<ControlState> pendingControl;std::string controlError;std::vector<ModelInfo> scanned;bool scannedFresh=false;
- struct LoadResult {std::string generation,error;std::shared_ptr<ModelFile> data;};
+ struct LoadResult {std::string generation,error;std::shared_ptr<ModelFile> data;uint64_t bytes=0;};
+ // Textures read later for a built set (variant switch): path|generation, and the materials now holding pixels.
+ struct TextureResult {std::string path,generation,error;std::map<std::string,MaterialFile> materials;};std::deque<TextureResult> textureResults;std::set<std::string> textureInflight;
  std::map<std::string,LoadResult> loaded;std::set<std::string> inflight;
  struct BoneResult {unsigned id;bool library;long long request;std::string error;long long refresh=0;};std::deque<BoneResult> boneResults;
  // ---- worker only
@@ -142,10 +169,12 @@ struct Runtime::Impl {
  struct BuiltPart {std::string name,avatar;Ptr mesh=0;Fingerprint target;std::vector<std::string> bones;Bytes indices;std::vector<DrawSpec> draws;std::vector<Submesh> subs;std::vector<Material> rows;  // all draws; those in effect
   Ptr originMesh=0,originMaterials=0;RestoreBackup* backup=nullptr;
   int bindable=-1;};  // last incoming bone-name hash count compatibility, for log suppression; origin pair pinned by the set
- struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;Variants variants;bool originalMaterials=false,built=false;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
+ struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
  // source: for a renderer the game created from one of ours (adopted), the renderer whose material clones it shows.
  struct Attachment:Owned {Ptr renderer=0,native=0,original=0,originalMaterials=0,source=0;Set* set=nullptr;RestoreBackup* backup=nullptr;size_t part=0;bool adopted=false;std::map<std::string,Ptr> clones;std::string restoreError;
-   uint64_t refreshAt=0,materialTraceStart=0,materialTraceAt=0,materialCheckAt=0,materialCheckUntil=0;unsigned refreshes=0,materialTraceSamples=0,materialRepairs=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;};  // clone -> canonical game material; retained across refreshes
+   uint64_t refreshAt=0,materialTraceStart=0,materialTraceAt=0,materialCheckAt=0,materialCheckUntil=0;unsigned refreshes=0,materialTraceSamples=0,materialRepairs=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;  // clone -> canonical game material; retained across refreshes
+   // slotTextures experiment: the mode written, (property ID, texture) per draw slot, AllowPerMaterialProp before (-1: untouched)
+   int slotMode=0,slotAllowBefore=-1;unsigned slotLost=0,slotSwaps=0;std::vector<std::vector<std::pair<int32_t,Ptr>>> slotTex;std::vector<Ptr> slotMats;};
  struct Seen {Ptr renderer=0,mesh=0;Fingerprint fp;};
  struct Character {Ptr entity=0;unsigned runtime=0,config=0;} ch;
  ControlState ctl;std::vector<ModelInfo> models;long long exportSeen=0,boneRefreshDone=0;unsigned boneRefreshDoneId=0;
@@ -192,7 +221,7 @@ struct Runtime::Impl {
    // replace skeleton.json later; that must never revive the old request still present in control.json.
    boneRefreshDone=static_cast<long long>(n.number);boneRefreshDoneId=unsigned(id.number);
   }catch(const std::exception&){}
-  worker.start([this]{workerTick(clockMs());});
+  loadVerified();worker.start([this]{workerTick(clockMs());});
  }
 
  // ---------------------------------------------------------------- worker side
@@ -201,10 +230,43 @@ struct Runtime::Impl {
      try{auto c=parseControl(raw);logLevel.store(c.logLevel);std::lock_guard<std::mutex> l(sm);pendingControl=c;controlError.clear();}catch(const std::exception& ex){std::lock_guard<std::mutex> l(sm);controlError=ex.what();}}}}catch(const std::exception&){}}
   if(now>=scanAt){scanAt=now+1000;try{auto list=scanModels(modelRoot,scanCache);std::lock_guard<std::mutex> l(sm);scanned=std::move(list);scannedFresh=true;}catch(const std::exception&){}}
  }
- void requestLoad(const ModelInfo& m){
-  auto key=m.path+"|"+m.generation;{std::lock_guard<std::mutex> l(sm);if(inflight.count(key))return;auto it=loaded.find(m.path);if(it!=loaded.end()&&it->second.generation==m.generation)return;inflight.insert(key);}
-  worker.post([this,m,key]{LoadResult r;r.generation=m.generation;try{r.data=loadModel(m);}catch(const std::exception& ex){r.error=ex.what();}std::lock_guard<std::mutex> l(sm);loaded[m.path]=std::move(r);inflight.erase(key);});
+ // urgent: the character is appearing now: its job goes ahead of the queue (once; a queued copy then finds it loaded).
+ void requestLoad(const ModelInfo& m,bool urgent=false){
+  auto key=m.path+"|"+m.generation;{std::lock_guard<std::mutex> l(sm);auto it=loaded.find(m.path);if(it!=loaded.end()&&it->second.generation==m.generation)return;
+   if(inflight.count(key)&&(!urgent||urgentLoads.count(key))){return;}inflight.insert(key);if(urgent)urgentLoads.insert(key);}
+  auto v=ctl.variables.find(m.name);std::map<std::string,int> chosen=v==ctl.variables.end()?std::map<std::string,int>{}:v->second;
+  auto job=[this,m,key,chosen]{{std::lock_guard<std::mutex> l(sm);auto it=loaded.find(m.path);if(it!=loaded.end()&&it->second.generation==m.generation)return;}
+   LoadResult r;r.generation=m.generation;
+   try{auto bin=m.path+"/model.bin";auto stamp=stampOf(bin);bool known=false;{std::lock_guard<std::mutex> l(sm);auto c=verifiedBins.find(bin);known=c!=verifiedBins.end()&&c->second==stamp;}
+    r.data=loadModel(m,chosen,!known);r.bytes=loadedBytes(*r.data);
+    if(!known){std::lock_guard<std::mutex> l(sm);verifiedBins[bin]=stamp;verifiedDirty=true;}}
+   catch(const std::exception& ex){r.error=ex.what();}
+   std::lock_guard<std::mutex> l(sm);loaded[m.path]=std::move(r);inflight.erase(key);urgentLoads.erase(key);};
+  if(urgent)worker.postFront(job);else worker.post(job);
  }
+ // model.bin files already checked whole (CRC-32) in an earlier load or session: path -> inode:time:size. A changed file
+ // has another stamp and is checked again. Kept in the private folder.
+ std::map<std::string,std::string> verifiedBins;bool verifiedDirty=false;std::set<std::string> urgentLoads;
+ void loadVerified(){try{auto f=priv+"/verified-models.txt";if(!exists(f))return;std::string t=text(f);size_t p=0;
+   while(p<t.size()){auto e=t.find('\n',p);auto line=t.substr(p,e==std::string::npos?std::string::npos:e-p);p=e==std::string::npos?t.size():e+1;auto tab=line.find('\t');if(tab!=std::string::npos)verifiedBins[line.substr(0,tab)]=line.substr(tab+1);}}catch(const std::exception&){}}
+ void saveVerified(){std::string body;{std::lock_guard<std::mutex> l(sm);if(!verifiedDirty)return;verifiedDirty=false;for(auto& kv:verifiedBins)body+=kv.first+"\t"+kv.second+"\n";}
+  auto file=priv+"/verified-models.txt";worker.post([file,body]{try{writeAtomic(file,body);}catch(...){}});}
+ // Every switched-on model that is not built yet has its files read in the background right away, one at a time and up
+ // to preloadBudget held: the first appearance can then build in the binding/hand-off hook, before the game shows the
+ // character and starts its switch-in effect. Loads for models switched off are dropped.
+ static constexpr uint64_t preloadBudget=512ull<<20;bool preloadFull=false;
+ void preload(const std::vector<const ModelInfo*>& wanted,const std::set<std::string>& paths){uint64_t held=0;bool busy=false;
+  {std::lock_guard<std::mutex> l(sm);for(auto it=loaded.begin();it!=loaded.end();){if(!paths.count(it->first)){it=loaded.erase(it);}else{held+=it->second.bytes;++it;}}busy=!inflight.empty();}
+  // The controlled character's models go first and ahead of anything queued; the others one at a time.
+  std::vector<const ModelInfo*> order(wanted);auto current=[&](const ModelInfo* m){return m->id&&m->id==ch.config;};
+  std::stable_sort(order.begin(),order.end(),[&](const ModelInfo* a,const ModelInfo* b){return current(a)>current(b);});
+  for(auto* m:order){if(findSet(m->path,m->generation)||liveSet(*m)||!lodTarget(*m).empty())continue;auto f=failed.find(m->path);if(f!=failed.end()&&f->second.first==m->generation)continue;
+   {std::lock_guard<std::mutex> l(sm);auto it=loaded.find(m->path);if(it!=loaded.end()&&it->second.generation==m->generation)continue;}
+   bool now=current(m);if(!now&&busy)return;
+   if(!now&&held>=preloadBudget){if(!preloadFull){preloadFull=true;log("preload-budget",m->name+": "+std::to_string(held>>20)+" MiB already preloaded; the rest loads when its character appears");}return;}
+   preloadFull=false;if(preloadLogged.insert(m->path+"|"+m->generation).second)log("preload",m->name+" "+m->generation+(now?" (controlled character, first)":""));
+   requestLoad(*m,now);if(!now)return;busy=true;}}
+ std::set<std::string> preloadLogged;
  bool takeLoaded(const ModelInfo& m,LoadResult& out){std::lock_guard<std::mutex> l(sm);auto it=loaded.find(m.path);if(it==loaded.end()||it->second.generation!=m.generation)return false;out=std::move(it->second);loaded.erase(it);return true;}
  // "GIBox Log.txt" next to status.json (readable without root), XXMI Launcher line format (logfmt.hpp). The message
  // starts with the state key; the level comes from the key, lines below control.json "logLevel" are dropped here.
@@ -265,10 +327,216 @@ struct Runtime::Impl {
   if(fresh)for(auto& kv:attachments)renderSnapshot(*kv.second,"debug-enabled");
   // Startup counters are historical, not new markers. Disabled-mode markers are acknowledged but never replayed.
   if(renderControlSeen&&ctl.renderMark>renderMarkSeen){renderMarkSeen=ctl.renderMark;renderFollowEndAt=now+5000;renderRecorder->mark(now,uint64_t(renderMarkSeen),renderReader->descriptions());
+   if(glowOn()&&glow::trace().armed.load())glowOpen("user mark",{},true,30000,3000,{0});
    for(auto& kv:attachments)renderSnapshot(*kv.second,"user-mark-received");}
   if(renderFollowEndAt&&now>=renderFollowEndAt){for(auto& kv:attachments)renderSnapshot(*kv.second,"user-mark-follow-end");renderFollowEndAt=0;}
   renderIdentities(now);renderRecorder->tick(now);
  }
+
+ // ---------------------------------------------------------------- switch-in glow trace (debug + experiments.glowTrace)
+ // The hooks (glow_trace.hpp) keep every write to the objects registered here: each attachment's renderer, its
+ // GameObject and avatar root, the game's original materials, our clones (and retired ones) and whatever else the
+ // renderer currently shows. Windows: a switch to a character with a model on (1.5 s before to 4 s after), a new
+ // attachment, and a user mark (30 s before). At the window's read-back points and around each material refresh the
+ // parameters the game was seen writing are read on both the current material and its original, and differences logged.
+ struct GlowWindow {unsigned number=0;std::string what;uint64_t t0=0,from=0,to=0;std::set<uint16_t> owners;bool all=false;std::vector<uint64_t> reads;size_t nextRead=0;uint32_t frame=0;};
+ std::vector<GlowWindow> glowWindows;unsigned glowNumber=0,glowAuto=0,glowCharacter=0;bool glowWasOn=false,glowNoHook=false;uint64_t glowRegistryAt=0;
+ Recent<std::pair<Ptr,Ptr>,std::string> glowNames{4096};Recent<std::pair<Ptr,Ptr>,Ptr> glowAvatars{256};
+ bool glowOn()const{return renderDebug()&&ctl.exp.glowTrace;}
+ uint64_t glowNow()const{return worker.background()?clockMs():bindingNow;}
+ std::string glowName(Ptr p){auto key=std::make_pair(p,load<Ptr>(p+0x10));if(auto* hit=glowNames.find(key))return *hit;return glowNames.put(key,name(p));}
+ // The GameObject of the nearest "Avatar_" transform above the renderer's first bone (what the game activates on a switch).
+ Ptr glowAvatarOf(Ptr r){auto key=std::make_pair(r,load<Ptr>(r+0x10));if(auto* hit=glowAvatars.find(key))return *hit;Ptr found=0;Owned tmp;
+  try{Ptr ba=e.get(abi::getBones,r);if(ba){pin(tmp,ba);auto bones=pointers(ba,512);Ptr t=bones.empty()?0:bones[0];
+    for(unsigned i=0;i<24&&alive(t);i++){if(normalize(name(t)).compare(0,7,"avatar_")==0){found=e.get(abi::gameObject,t);break;}t=e.get(abi::getParent,t);}}}
+  catch(...){freeOwned(tmp);throw;}freeOwned(tmp);return glowAvatars.put(key,found);}
+ uint16_t glowOwner(const Attachment& a){return glow::trace().owner(a.set->name,a.set->parts[a.part].name,a.set->id);}
+ void glowRegister(){auto& t=glow::trace();t.beginRefresh();
+  for(auto& kv:attachments){auto& a=*kv.second;
+   try{if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)continue;auto& bp=a.set->parts[a.part];uint16_t owner=glowOwner(a);std::string who=a.set->name+"/"+bp.name+" ";
+    t.put(a.renderer,glow::Role::Renderer,owner,-1,who+"renderer "+rendererName(a.renderer));
+    Ptr go=e.get(abi::gameObject,a.renderer);if(alive(go))t.put(go,glow::Role::GameObject,owner,-1,who+"gameobject "+glowName(go));
+    Ptr avatar=glowAvatarOf(a.renderer);if(alive(avatar))t.put(avatar,glow::Role::Avatar,owner,-1,who+"avatar "+glowName(avatar));
+    auto originals=pointers(a.originalMaterials,64);
+    for(size_t i=0;i<originals.size();i++){if(alive(originals[i]))t.put(originals[i],glow::Role::Original,owner,int16_t(i),who+"original slot "+std::to_string(i)+" "+glowName(originals[i]));}
+    for(size_t j=0;j<bp.rows.size();j++){auto it=a.clones.find(bp.rows[j].name+"#"+std::to_string(bp.rows[j].slot));
+     if(it!=a.clones.end()&&alive(it->second))t.put(it->second,glow::Role::Clone,owner,int16_t(j),who+"clone row "+std::to_string(j)+" "+glowName(it->second));}
+    for(auto& r:a.retired){if(alive(r.first))t.put(r.first,glow::Role::Retired,owner,-1,who+"retired clone "+r.second+" "+glowName(r.first));}
+    Ptr arr=e.get(abi::getMaterials,a.renderer);
+    if(arr){Owned tmp;try{pin(tmp,arr);auto current=pointers(arr,64);
+      for(size_t i=0;i<current.size();i++){Ptr m=current[i];if(!alive(m)||t.keep(m))continue;t.put(m,glow::Role::Current,owner,int16_t(i),who+"current slot "+std::to_string(i)+" "+glowName(m));}}
+     catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}
+   }catch(const std::exception& ex){log("glow-note","registry: "+std::string(ex.what()));}}
+  t.endRefresh();}
+ std::set<uint16_t> glowOwnersOf(unsigned character){std::set<uint16_t> out;std::set<Ptr> world;try{for(Ptr r:worldRenderers())world.insert(r);}catch(const std::exception&){}
+  for(auto& kv:attachments){auto& a=*kv.second;if((character&&a.set->id==character)||world.count(a.renderer))out.insert(glowOwner(a));}return out;}
+ std::string glowOwnerNames(const std::set<uint16_t>& owners){std::string out;for(auto o:owners){glow::Trace::Owner x;if(glow::trace().ownerOfTag(glow::makeTag(glow::Role::None,o,0,0),x))out+=(out.empty()?"":", ")+x.model+"/"+x.part;}return out;}
+ void glowOpen(const std::string& what,const std::set<uint16_t>& owners,bool all,uint64_t before,uint64_t after,const std::vector<uint64_t>& reads,bool merge=false){
+  uint64_t now=glowNow();
+  // Attaching the same objects again within a second (several parts at once): the open attach window is extended.
+  for(auto& w:glowWindows)if(merge&&w.what==what&&w.owners==owners&&now<w.t0+1000){w.to=std::max(w.to,now+after);return;}
+  if(!all&&++glowAuto>40){if(glowAuto==41)log("glow-note","40 automatic windows this session; from now on only marks open one");return;}
+  GlowWindow w;w.number=++glowNumber;w.what=what;w.t0=now;w.from=now>before?now-before:0;w.to=now+after;w.owners=owners;w.all=all;for(auto r:reads)w.reads.push_back(now+r);
+  auto ff=glow::trace().frameFn.load();w.frame=ff?uint32_t(ff()):0;
+  log("glow-window","#"+std::to_string(w.number)+" "+what+" at frame "+std::to_string(w.frame)+" ("+(all?std::string("all tracked objects"):glowOwnerNames(owners))+"): writes from "+std::to_string(before)+" ms before to "+std::to_string(after)+" ms after");
+  glowWindows.push_back(std::move(w));glowProcess(now);}
+ void glowProcess(uint64_t now){
+  for(size_t i=0;i<glowWindows.size();){auto& w=glowWindows[i];
+   while(w.nextRead<w.reads.size()&&now>=w.reads[w.nextRead]){glowReadback(w,"+"+std::to_string(w.reads[w.nextRead]-w.t0)+"ms");w.nextRead++;}
+   if(now>=w.to&&w.nextRead>=w.reads.size()){glowSummary(w);glowWindows.erase(glowWindows.begin()+long(i));}else i++;}}
+ void glowSummary(const GlowWindow& w){auto& t=glow::trace();bool truncated=false;auto events=t.collect(w.from*1000000ull,w.to*1000000ull,truncated);
+  auto keep=[&](uint64_t tag){return w.all?tag!=0:w.owners.count(glow::ownerOf(tag))>0;};std::string counts;
+  auto rows=glow::summarize(t,events,keep,w.t0*1000000ull,w.number,80,counts);
+  log("glow-window","#"+std::to_string(w.number)+" end: "+counts+(truncated?"; the oldest part was overwritten (ring full)":"")+(rows.empty()?"; nothing was written to these objects":"")
+   +(t.dropped.load()?"; "+std::to_string(t.dropped.load())+" records dropped this session":""));
+  for(auto& r:rows)log("glow-write",r);}
+ void glowReadback(const GlowWindow& w,const std::string& phase){
+  for(auto& kv:attachments){auto& a=*kv.second;if(!w.all&&!w.owners.count(glowOwner(a)))continue;glowDiff(a,"#"+std::to_string(w.number)+" "+phase);}}
+ struct GlowState {Ptr shader=0;int queue=0;std::set<std::string> keywords;std::map<int32_t,std::string> values;std::map<int32_t,Ptr> textures;std::string error;};
+ GlowState glowRead(Ptr m,const std::map<int32_t,uint8_t>& ids,const std::vector<int32_t>& textureIds){GlowState s;Owned tmp;
+  try{require(alive(m),"material destroyed");s.shader=e.get(glow::rvaGetShader,m);s.queue=e.call<int32_t>(glow::rvaGetRenderQueue,m,Ptr(0));
+   Ptr kw=e.get(glow::rvaGetKeywords,m);if(kw){pin(tmp,kw);for(Ptr x:pointers(kw,256)){if(x)s.keywords.insert(glow::Trace::managedString(x,128));}}
+   for(auto& kv:ids){int32_t id=kv.first;uint8_t k=kv.second;if(!(e.call<uint32_t>(glow::rvaHasProperty,m,id,Ptr(0))&1u))continue;std::string v;
+    if(k&glow::KindFloat)v+=glow::number(e.call<float>(glow::rvaGetFloat,m,id,Ptr(0)));
+    if(k&glow::KindInt)v+=(v.empty()?"":" ")+std::to_string(e.call<int32_t>(glow::rvaGetInt,m,id,Ptr(0)));
+    if(k&(glow::KindColor|glow::KindVector)){float x[4]={0,0,0,0};e.call<void>((k&glow::KindColor)?glow::rvaGetColor:glow::rvaGetVector,m,id,x,Ptr(0));v+=(v.empty()?"":" ")+glow::vec(x,4);}
+    if(k&glow::KindScaleOffset){float x[4]={0,0,0,0};e.call<void>(glow::rvaGetScaleOffset,m,id,x,Ptr(0));v+=std::string(v.empty()?"":" ")+"st"+glow::vec(x,4);}
+    if(!v.empty()){s.values[id]=v;}if(k&glow::KindTexture)s.textures[id]=e.call<Ptr>(glow::rvaGetTexture,m,id,Ptr(0));}
+   for(int32_t id:textureIds){if(!s.textures.count(id))s.textures[id]=e.call<Ptr>(glow::rvaGetTexture,m,id,Ptr(0));}}
+  catch(const std::exception& ex){s.error=ex.what();}freeOwned(tmp);return s;}
+ std::string glowProperty(int32_t id){auto n=glow::trace().property(id);return (n.empty()?std::string("#"):n+"#")+std::to_string(id);}
+ std::string glowTexture(Ptr t){if(!t)return "none";try{if(alive(t))return glowName(t)+"@"+hex(t);}catch(const std::exception&){}return hex(t);}
+ // The current material of each draw against the game material it was copied from: what differs besides our textures.
+ void glowDiff(Attachment& a,const std::string& when){if(a.set->originalMaterials||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
+  auto& t=glow::trace();auto& bp=a.set->parts[a.part];std::set<Ptr> ours;
+  // Parameters the game set by name (SetFloat("_DissolveValue", ...)): their IDs come from the engine, read back by ID.
+  for(auto& n:t.unresolvedNames()){try{Ptr str=e.call<Ptr>(abi::newString,Ptr(0),n.c_str());if(str)t.learnProperty(e.call<int32_t>(glow::rvaPropertyToId,str,Ptr(0)),n);}catch(const std::exception&){}}
+  auto ids=t.materialIds();
+  for(auto& kv:a.set->textures)for(Ptr x:{kv.second.main,kv.second.light,kv.second.normal})if(x)ours.insert(x);
+  Owned tmp;
+  try{Ptr arr=e.get(abi::getMaterials,a.renderer);if(!arr){freeOwned(tmp);return;}pin(tmp,arr);auto current=pointers(arr,64),originals=pointers(a.originalMaterials,64);
+   for(size_t j=0;j<bp.rows.size()&&j<current.size();j++){Ptr cur=current[j];unsigned slot=bp.rows[j].slot;Ptr src=slot<originals.size()?originals[slot]:0;
+    if(!alive(src))for(size_t k=originals.size();k-->0;)if(alive(originals[k])){src=originals[k];slot=unsigned(k);break;}
+    if(!alive(cur)||!alive(src)){continue;}
+    std::vector<int32_t> textureIds;Ptr idArr=e.get(glow::rvaGetTextureIds,src);
+    if(idArr){pin(tmp,idArr);auto n=length(idArr,256);for(uint64_t i=0;i<n;i++)textureIds.push_back(load<int32_t>(idArr+0x20+4*i));}
+    auto x=glowRead(cur,ids,textureIds),y=glowRead(src,ids,textureIds);std::string d;unsigned equal=0,replaced=0;auto add=[&](const std::string& v){d+=(d.empty()?"":"; ")+v;};
+    if(!x.error.empty()||!y.error.empty())add("read error: "+x.error+" / "+y.error);
+    if(x.shader!=y.shader)add("shader "+hex(x.shader)+" vs "+hex(y.shader));else equal++;
+    if(x.queue!=y.queue)add("renderQueue "+std::to_string(x.queue)+" vs "+std::to_string(y.queue));else equal++;
+    std::string only,missing;for(auto& k:x.keywords)if(!y.keywords.count(k))only+=(only.empty()?"":" ")+k;for(auto& k:y.keywords)if(!x.keywords.count(k))missing+=(missing.empty()?"":" ")+k;
+    if(!only.empty()||!missing.empty())add("keywords only here ["+only+"], only on the original ["+missing+"]");else equal++;
+    for(auto& kv:x.values){auto o=y.values.find(kv.first);auto other=o==y.values.end()?std::string("absent"):o->second;if(other!=kv.second)add(glowProperty(kv.first)+" "+kv.second+" vs "+other);else equal++;}
+    for(auto& kv:y.values)if(!x.values.count(kv.first))add(glowProperty(kv.first)+" absent vs "+kv.second);
+    for(auto& kv:x.textures){auto o=y.textures.find(kv.first);Ptr other=o==y.textures.end()?0:o->second;if(other==kv.second){equal++;continue;}if(ours.count(kv.second)){replaced++;continue;}
+     add(glowProperty(kv.first)+" texture "+glowTexture(kv.second)+" vs "+glowTexture(other));}
+    auto label=t.labelOfObject(cur);
+    log("glow-diff",when+" "+a.set->name+"/"+bp.name+" row "+std::to_string(j)+" "+(label.empty()?glowName(cur)+"@"+hex(cur):label)+" vs original slot "+std::to_string(slot)+": "
+     +(d.empty()?"no difference":d)+" ("+std::to_string(equal)+" equal, "+std::to_string(replaced)+" GIBox textures, "+std::to_string(ids.size())+" parameters the game wrote, "+std::to_string(x.keywords.size())+" keywords)");}
+   std::string custom;for(auto& kv:t.customIds()){if(!(kv.second&glow::KindFloat))continue;custom+=(custom.empty()?"":", ")+glowProperty(kv.first)+"="+glow::number(e.call<float>(glow::rvaGetCustomFloat,a.renderer,kv.first,Ptr(0)));}
+   if(!custom.empty())log("glow-diff",when+" "+a.set->name+"/"+bp.name+" renderer custom floats: "+custom);}
+  catch(const std::exception& ex){log("glow-note","read-back "+a.set->name+": "+ex.what());}freeOwned(tmp);}
+ void glowTick(){auto& t=glow::trace();if(!worker.background())t.testClockMs.store(bindingNow);
+  if(!glowOn()){if(glowWasOn){glowWasOn=false;t.armed.store(false);glowWindows.clear();log("glow-note","trace off");}return;}
+  if(!t.everything&&!glowNoHook){if(!e.hook){glowNoHook=true;log("glow-note","no inline hook installer: nothing is recorded");}else log("glow-hooks",glow::install(e,true));}
+  if(!glowWasOn){glowWasOn=true;glowRegistryAt=0;glowCharacter=ch.config;t.armed.store(true);
+   log("glow-note","trace on: "+std::to_string(t.hooked)+" engine entries hooked; windows open on a switch to a character with a model, on attaching, and on 标记画面异常");}
+  uint64_t now=glowNow();if(now>=glowRegistryAt){glowRegistryAt=now+250;glowRegister();}
+  if(ch.config!=glowCharacter){glowCharacter=ch.config;if(ch.entity){auto owners=glowOwnersOf(ch.config);if(!owners.empty())glowOpen("switch-in "+std::to_string(ch.config),owners,false,1500,4000,{0,1500,4000});}}
+  glowProcess(now);}
+
+ // ---------------------------------------------------------------- slot textures (debug experiment, experiments.slotTextures)
+ // The game's own materials stay on the renderer (as with gameMaterials), so its effects play on what is shown; the mod's
+ // textures reach each draw slot i of ours as an override: mode 1 through the renderer's per-material property block i
+ // (read back right away and every 2 s: slot-textures-lost when the game dropped it), mode 2 through its per-material
+ // custom texture with matID i (no getter exists: not read back, and not removable: switching off writes the material's
+ // own texture into it). AllowPerMaterialProp is switched on for the renderer if it was off, and back off afterwards.
+ Owned slotRoots;Ptr slotBlock=0;bool slotBlockTried=false;std::map<std::string,int32_t> slotIds;uint64_t slotCheckAt=0;
+ Ptr managedName(const char* n){Ptr str=e.call<Ptr>(abi::newString,Ptr(0),n);require(str!=0,"Managed string allocation failed");return str;}
+ int32_t slotId(const char* n){auto it=slotIds.find(n);if(it!=slotIds.end())return it->second;int32_t id=e.call<int32_t>(glow::rvaPropertyToId,managedName(n),Ptr(0));slotIds[n]=id;return id;}
+ // Our own MaterialPropertyBlock, made with the class of the game's shared one (constructor = native block).
+ Ptr slotScratch(){if(slotBlock||slotBlockTried)return slotBlock;slotBlockTried=true;
+  try{Ptr shared=e.call<Ptr>(abi::blockShared,Ptr(0));require(shared!=0&&load<Ptr>(shared)!=0,"the game's shared MaterialPropertyBlock is missing");
+   Ptr b=e.call<Ptr>(abi::objectNew,load<Ptr>(shared));require(b!=0,"allocation failed");pin(slotRoots,b);e.action(abi::blockCtor,b);require(load<Ptr>(b+0x10)!=0,"native block missing");slotBlock=b;}
+  catch(const std::exception& ex){log("slot-textures","no MaterialPropertyBlock of our own: "+std::string(ex.what()));}
+  return slotBlock;}
+ // Per draw slot: main texture always, light map and normal map under the first property name the game material has.
+ std::vector<std::vector<std::pair<int32_t,Ptr>>> slotPlan(Attachment& a,const std::vector<Ptr>& mats){Set& s=*a.set;auto& bp=s.parts[a.part];std::vector<std::vector<std::pair<int32_t,Ptr>>> plan(bp.rows.size());
+  for(size_t i=0;i<bp.rows.size()&&i<mats.size();i++){auto& t=s.textures.at(bp.rows[i].name);if(t.original)continue;plan[i].push_back({slotId("_MainTex"),t.main});
+   if(t.light){for(auto* n:{"_LightMap","_LightMapTex","_Lightmap","_LightmapTex"})if(e.call<uint32_t>(abi::hasProperty,mats[i],managedName(n),Ptr(0))&1u){plan[i].push_back({slotId(n),t.light});break;}}
+   if(t.normal){for(auto* n:{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"})if(e.call<uint32_t>(abi::hasProperty,mats[i],managedName(n),Ptr(0))&1u){plan[i].push_back({slotId(n),t.normal});break;}}}
+  return plan;}
+ void slotWrite(Attachment& a){Ptr r=a.renderer;
+  if(a.slotAllowBefore<0){a.slotAllowBefore=int(e.call<uint32_t>(abi::allowSlotProps,r,Ptr(0))&1u);if(!a.slotAllowBefore)e.op(abi::setAllowSlotProps,r,1);}
+  for(size_t i=0;i<a.slotTex.size();i++){if(a.slotTex[i].empty())continue;
+   if(a.slotMode==1){Ptr b=slotScratch();require(b!=0,"no MaterialPropertyBlock");e.action(abi::blockClear,b);e.call<void>(abi::getSlotBlock,r,b,int32_t(i),Ptr(0));
+    for(auto& x:a.slotTex[i]){e.call<void>(abi::blockSetTexture,b,x.first,x.second,Ptr(0));}e.call<void>(abi::setSlotBlock,r,b,int32_t(i),Ptr(0));}
+   else{for(auto& x:a.slotTex[i])e.call<void>(abi::setSlotCustomTexture,r,int32_t(i),x.first,x.second,int32_t(1),Ptr(0));}}}
+ // Mode 1: how many of the textures written are in the renderer's blocks now.
+ unsigned slotPresent(Attachment& a,unsigned& total){unsigned found=0;total=0;Ptr b=slotScratch();if(!b)return 0;
+  for(size_t i=0;i<a.slotTex.size();i++){if(a.slotTex[i].empty())continue;e.action(abi::blockClear,b);e.call<void>(abi::getSlotBlock,a.renderer,b,int32_t(i),Ptr(0));
+   for(auto& x:a.slotTex[i]){total++;Ptr got=e.call<Ptr>(abi::blockGetTexture,b,x.first,Ptr(0));if(alive(got)&&load<Ptr>(got+0x10)==load<Ptr>(x.second+0x10))found++;}}
+  return found;}
+ void slotReport(Attachment& a){unsigned slots=0,textures=0;for(auto& l:a.slotTex){if(!l.empty())slots++;textures+=unsigned(l.size());}std::string check;
+  unsigned total=0,found=slotPresent(a,total);
+  if(a.slotMode==1)check=", read back "+std::to_string(found)+" of "+std::to_string(total);
+  else check=", no getter of its own; the slots' property blocks show "+std::to_string(found)+" of "+std::to_string(total);
+  log("slot-textures",a.set->name+"/"+a.set->parts[a.part].name+" on "+rendererName(a.renderer)+": "+(a.slotMode==1?"per-material property block":"per-material custom texture")+", "+std::to_string(slots)+" of "
+   +std::to_string(a.slotTex.size())+" draw slots, "+std::to_string(textures)+" textures"+check+"; per-material properties were "+(a.slotAllowBefore==1?"on":"off, switched on"));}
+ struct SlotState {int mode=0,allow=-1;std::vector<std::vector<std::pair<int32_t,Ptr>>> tex;};
+ SlotState slotTake(Attachment& a){SlotState o{a.slotMode,a.slotAllowBefore,std::move(a.slotTex)};a.slotMode=0;a.slotAllowBefore=-1;a.slotTex.clear();a.slotMats.clear();return o;}
+ // Removes overrides written earlier from the renderer as it is now: mode 1 empties the blocks, mode 2 (no remover
+ // exists) writes the texture of the material now in each slot into the override.
+ void slotRelease(Attachment& a,const SlotState& o){if(!o.mode||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;Ptr r=a.renderer;
+  try{if(o.mode==1){Ptr b=slotScratch();if(b){e.action(abi::blockClear,b);for(size_t i=0;i<o.tex.size();i++){if(!o.tex[i].empty())e.call<void>(abi::setSlotBlock,r,b,int32_t(i),Ptr(0));}}}
+   else{Ptr mats=e.get(abi::getMaterials,r);auto current=mats?pointers(mats,64):std::vector<Ptr>{};
+    for(size_t i=0;i<o.tex.size();i++)for(auto& x:o.tex[i]){Ptr own=i<current.size()&&alive(current[i])?e.call<Ptr>(glow::rvaGetTexture,current[i],x.first,Ptr(0)):0;e.call<void>(abi::setSlotCustomTexture,r,int32_t(i),x.first,own,int32_t(1),Ptr(0));}
+    log("slot-textures",a.set->name+"/"+a.set->parts[a.part].name+": per-material custom textures cannot be removed; the textures of the materials now shown were written into them");}
+   if(o.allow==0)e.op(abi::setAllowSlotProps,r,0);}
+  catch(const std::exception& ex){log("slot-textures","clearing "+a.set->name+": "+ex.what());}}
+ void slotClear(Attachment& a){slotRelease(a,slotTake(a));}
+ // Every 2 s: mode 1 reads its blocks back and writes them again when the game dropped them; both modes report when the
+ // game put other materials into the slots (kept: the overrides belong to the slot, not to the material).
+ void slotCheck(uint64_t now){if(!ctl.exp.slotTextures||now<slotCheckAt)return;slotCheckAt=now+2000;
+  for(auto& kv:attachments){auto& a=*kv.second;if(!a.slotMode||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)continue;std::string where=a.set->name+"/"+a.set->parts[a.part].name;
+   try{Ptr mats=e.get(abi::getMaterials,a.renderer);auto current=mats?pointers(mats,64):std::vector<Ptr>{};
+    if(current!=a.slotMats){unsigned changed=0;std::string first;
+     for(size_t i=0;i<current.size();i++){if(i<a.slotMats.size()&&current[i]==a.slotMats[i])continue;changed++;if(first.empty()&&alive(current[i]))first=" slot "+std::to_string(i)+": "+name(current[i]);}
+     a.slotSwaps++;a.slotMats=current;
+     if(a.slotSwaps<=10){log("slot-textures",where+": the game put other materials on the renderer, "+std::to_string(changed)+" of "+std::to_string(current.size())+" slots ("+std::to_string(a.slotTex.size())+" ours)"+(first.empty()?"":","+first));}}
+    if(a.slotMode!=1){continue;}unsigned total=0,found=slotPresent(a,total);if(found==total){continue;}a.slotLost++;slotWrite(a);
+    if(a.slotLost<=10||a.slotLost%30==0)log("slot-textures-lost",where+": "+std::to_string(total-found)+" of "+std::to_string(total)+" textures were gone from the blocks, written again ("+std::to_string(a.slotLost)+" times so far)");}
+   catch(const std::exception& ex){log("slot-textures","check "+where+": "+ex.what());}}}
+
+ // ---------------------------------------------------------------- effect mirror (control.json "effectMirror", default on)
+ // The game plays its material effects (switch-in dissolve and others) on the materials it holds, never on our copies.
+ // The hooks in glow_trace.hpp make each such write again on the copies of that original; here the original -> copies
+ // table is kept current. It is republished right after copies change (attach, adopt, re-copy), on the same thread that
+ // makes the game's writes, so an effect already running when a copy is taken still reaches it with its restore.
+ bool mirrorTried=false,mirrorInstalled=false;uint64_t mirrorStatsAt=0,mirrorStatsSeen=0;std::map<Ptr,std::vector<std::pair<Ptr,Ptr>>> mirrorPublished;
+ void mirrorProtect(){auto& t=glow::trace();size_t i=0;
+  try{for(auto* n:glow::kProtectedTextures){Ptr str=e.call<Ptr>(abi::newString,Ptr(0),n);require(str!=0,"managed string allocation failed");t.protectedIds[i++].store(e.call<int32_t>(glow::rvaPropertyToId,str,Ptr(0)));}
+   t.protectReady.store(true);}
+  catch(const std::exception& ex){log("effect-mirror","texture property IDs unknown ("+std::string(ex.what())+"): texture writes are not repeated on the copies");}}
+ void mirrorSync(){auto& t=glow::trace();if(!t.mirrorOn.load(std::memory_order_relaxed))return;
+  std::map<Ptr,std::vector<std::pair<Ptr,Ptr>>> want;std::map<Ptr,Ptr> natives;
+  auto add=[&](Ptr src,Ptr copy){if(!alive(src)||!alive(copy)||src==copy)return;auto& list=want[src];natives[src]=load<Ptr>(src+0x10);
+   for(auto& x:list){if(x.first==copy)return;}list.push_back({copy,load<Ptr>(copy+0x10)});};
+  // The copies on show first, then retired ones (an adopted renderer can still show them).
+  for(auto& kv:attachments){auto& a=*kv.second;for(auto& c:a.clones){auto src=a.materialSources.find(c.second);if(src!=a.materialSources.end())add(src->second,c.second);}}
+  for(auto& kv:attachments){for(auto& m:kv.second->materialSources)add(m.second,m.first);}
+  for(auto it=mirrorPublished.begin();it!=mirrorPublished.end();){if(!want.count(it->first)){t.mirrors.erase(it->first);it=mirrorPublished.erase(it);}else ++it;}
+  for(auto& kv:want){auto old=mirrorPublished.find(kv.first);if(old!=mirrorPublished.end()&&old->second==kv.second)continue;
+   if(t.mirrors.set(kv.first,natives[kv.first],kv.second))mirrorPublished[kv.first]=kv.second;}}
+ void mirrorTick(uint64_t now){auto& t=glow::trace();
+  if(!ctl.enabled||!ctl.effectMirror){if(t.mirrorOn.load()){t.mirrorOn.store(false);for(auto& kv:mirrorPublished)t.mirrors.erase(kv.first);mirrorPublished.clear();log("effect-mirror","off");}return;}
+  if(!mirrorTried){mirrorTried=true;
+   if(!e.hook){log("effect-mirror","unavailable: no inline hook installer");return;}
+   auto report=glow::install(e,false);mirrorProtect();mirrorInstalled=true;log("effect-mirror-hooks",report);}
+  if(!mirrorInstalled)return;
+  if(!t.mirrorOn.load()){t.mirrorOn.store(true);log("effect-mirror","on: the game's material effects are repeated on GIBox's copies ("+std::to_string(t.hooked)+" engine entries hooked)");}
+  mirrorSync();
+  if(now>=mirrorStatsAt){mirrorStatsAt=now+30000;auto n=t.mirrored.load();if(n!=mirrorStatsSeen){log("effect-mirror-stats",std::to_string(n-mirrorStatsSeen)+" writes repeated on copies in the last 30 s ("+std::to_string(n)+" this session, "+std::to_string(t.mirrorFailures.load())+" failed)");mirrorStatsSeen=n;}}}
 
  // ---------------------------------------------------------------- engine helpers (game thread)
  std::string name(Ptr p){require(alive(p),"Destroyed Unity object");Ptr s=e.get(abi::getName,p);if(!s)return {};auto n=load<uint32_t>(s+0x10);require(n<=1024,"Unity name bound");std::string out;for(unsigned i=0;i<n;i++){unsigned a=load<uint16_t>(s+0x14+i*2);if(a>=0xd800&&a<=0xdbff){require(i+1<n,"UTF16 name");unsigned b=load<uint16_t>(s+0x14+(++i)*2);require(b>=0xdc00&&b<=0xdfff,"UTF16 name");a=0x10000+((a-0xd800)<<10)+(b-0xdc00);}utf8(out,a);}return out;}
@@ -446,8 +714,18 @@ struct Runtime::Impl {
  // The bone library's record of a character (skeletons/<id>/skeleton.json), re-read when the file changes.
  const std::vector<SkeletonRenderer>* libraryRecord(unsigned id){auto file=boneRoot+"/"+std::to_string(id)+"/skeleton.json";std::error_code ec;
   if(!std::filesystem::exists(file,ec)){libraryRead.erase(id);return nullptr;}auto stamp=stampOf(file);auto it=libraryRead.find(id);
-  if(it==libraryRead.end()||it->second.first!=stamp){std::vector<SkeletonRenderer> r;try{r=readSkeleton(file);}catch(const std::exception& ex){log("bone-library-read-error",std::to_string(id)+": "+ex.what());}it=libraryRead.insert_or_assign(id,std::make_pair(stamp,std::move(r))).first;}
+  if(it==libraryRead.end()||it->second.first!=stamp){std::vector<SkeletonRenderer> r;std::string root;try{r=readSkeleton(file,&root);}catch(const std::exception& ex){log("bone-library-read-error",std::to_string(id)+": "+ex.what());}
+   libraryRoots[id]=root;it=libraryRead.insert_or_assign(id,std::make_pair(stamp,std::move(r))).first;}
   return it->second.second.empty()?nullptr:&it->second.second;}
+ // The avatar a character's bone library was recorded from, in avatarIdentity() form ("avatar_girl_catalyst_varesa"):
+ // proves a hidden party member's renderer belongs to the model's character before any set of it is built. "root" is
+ // the transform chain from the scene down to the first bone, so like avatarIdentity() the nearest "Avatar_" node above
+ // the bone is the one that counts.
+ std::map<unsigned,std::string> libraryRoots;
+ std::string libraryAvatar(unsigned id){if(!libraryRecord(id))return "";const auto& root=libraryRoots[id];size_t end=root.size();
+  while(end>0){auto slash=root.rfind('/',end-1);size_t start=slash==std::string::npos?0:slash+1;auto n=meshName(root.substr(start,end-start));
+   if(n.compare(0,7,"avatar_")==0){return n.substr(0,n.find("_manekin"));}if(slash==std::string::npos){break;}end=slash;}
+  return "";}
  // No full mesh in sight, but the controlled character shows a lower LOD of it whose bones (names, order) and bindposes
  // are exactly those the bone library recorded from the full mesh: the skinning is the same, so it can be the template.
  std::optional<Seen> lodTemplate(const ModelInfo& m,const Fingerprint& t,unsigned minBones){
@@ -472,9 +750,38 @@ struct Runtime::Impl {
   return out;}
 
  // ---------------------------------------------------------------- build (one part per tick)
- void createTextures(Set& s){for(auto& kv:s.data->materials){MatTex t;t.original=kv.second.original;if(!t.original){t.main=makeTexture(s,*kv.second.main,false);if(kv.second.light)t.light=makeTexture(s,*kv.second.light,true);if(kv.second.normal)t.normal=makeTexture(s,*kv.second.normal,true);}s.textures[kv.first]=t;}}
+ // Textures are made only for the materials the current variant values draw, when first needed. Pixels already read
+ // (preload, or a background read for a variant switch) are used and then dropped; sync=true reads missing ones here.
+ // false: the missing ones are requested from the worker and the caller waits for a later tick.
+ bool ensureTextures(Set& s,const std::set<std::string>& names,bool sync){std::set<std::string> missing;
+  for(auto& n:names){if(s.textures.count(n))continue;auto it=s.mats.find(n);if(it==s.mats.end()){continue;}if(!it->second.loaded())missing.insert(n);}
+  if(!missing.empty()){
+   if(!sync){requestTextures(s,missing);return false;}
+   readTextures(s.path,s.fileGeneration,s.blobSize,s.mats,missing);log("texture-read",s.name+": "+std::to_string(missing.size())+" material(s) read on demand");}
+  for(auto& n:names){if(s.textures.count(n))continue;auto it=s.mats.find(n);if(it==s.mats.end())continue;auto& mf=it->second;MatTex t;t.original=mf.original;
+   if(!t.original){require(mf.main!=nullptr,"Texture data missing: "+n);t.main=makeTexture(s,*mf.main,false);if(mf.light)t.light=makeTexture(s,*mf.light,true);if(mf.normal)t.normal=makeTexture(s,*mf.normal,true);
+    for(auto* x:{mf.main.get(),mf.light.get(),mf.normal.get()}){if(x)s.bytes+=uint64_t(x->w)*x->h*4;}mf.main.reset();mf.light.reset();mf.normal.reset();}
+   s.textures[n]=t;}
+  return true;}
+ void requestTextures(Set& s,const std::set<std::string>& names){auto key=s.path+"|"+s.generation;{std::lock_guard<std::mutex> l(sm);if(textureInflight.count(key))return;textureInflight.insert(key);}
+  std::map<std::string,MaterialFile> want;for(auto& n:names)want[n]=s.mats.at(n);
+  auto path=s.path,generation=s.generation,file=s.fileGeneration;auto size=s.blobSize;
+  worker.post([this,path,generation,file,size,want,key]()mutable{TextureResult r;r.path=path;r.generation=generation;std::set<std::string> names;for(auto& kv:want)names.insert(kv.first);
+   try{readTextures(path,file,size,want,names);r.materials=std::move(want);}catch(const std::exception& ex){r.error=ex.what();}
+   std::lock_guard<std::mutex> l(sm);textureResults.push_back(std::move(r));textureInflight.erase(key);});}
+ // A set's draws for an assignment, as material names.
+ std::set<std::string> drawnBy(const Set& s,const Assignment& a){if(s.data)return materialsDrawn(s.data->parts,a);std::set<std::string> out;std::vector<Submesh> subs;std::vector<Material> rows;
+  for(auto& bp:s.parts){activeDraws(bp.draws,a,subs,rows);for(auto& r:rows)out.insert(r.name);}return out;}
  void setSubmeshes(Set& s,BuiltPart& bp){activeDraws(bp.draws,s.assignment,bp.subs,bp.rows);Owned tmp;try{auto& subs=bp.subs;e.op(abi::setSubmeshCount,bp.mesh,int(subs.size()));
    for(size_t i=0;i<subs.size();i++){Ptr a=arrayOf(tmp,arrayClasses.i32,bp.indices.data()+subs[i].start*4ull,subs[i].count,4);e.call<void>(abi::setSubmeshTriangles,bp.mesh,a,int(i),Ptr(0));}}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}
+ // The most common vertex colour of the game's mesh (per channel); the mobile default seen on readable meshes when the
+ // game's mesh cannot be read.
+ std::array<uint8_t,4> usualColor(Ptr mesh,const std::string& model){std::array<uint8_t,4> out{255,128,128,51};Owned tmp;
+  try{Ptr arr=e.get(abi::getColors,mesh);size_t n=arr?length(arr,1u<<24):0;
+   if(n){pin(tmp,arr);std::array<std::array<unsigned,256>,4> hist{};const uint8_t* p=reinterpret_cast<const uint8_t*>(arr+0x20);for(size_t v=0;v<n;v++)for(int c=0;c<4;c++)hist[c][p[4*v+c]]++;
+    for(int c=0;c<4;c++)out[c]=uint8_t(std::max_element(hist[c].begin(),hist[c].end())-hist[c].begin());}
+   else log("experiment-mesh",model+": the game's vertex colours cannot be read, using (255,128,128,51)");}
+  catch(const std::exception&){}freeOwned(tmp);return out;}
  void buildStep(Set& s,const Seen& tpl){
   auto& pf=s.data->parts[s.parts.size()];Ptr owner=tpl.renderer,ownerMesh=tpl.mesh;require(alive(owner)&&alive(ownerMesh),"Template renderer expired");
   Owned tmp;
@@ -487,7 +794,7 @@ struct Runtime::Impl {
     for(auto& mv:bm.moved){unsigned n=0;for(size_t v=0;v+32<=weights.data.size();v+=32)for(int j=0;j<4;j++)if(f32(weights.data.data()+v+4*j)>0&&u32(weights.data.data()+v+16+4*j)==mv.first){n++;break;}
      log("bone-fallback",s.name+"/"+pf.spec.name+": "+pf.sourceBones[mv.first]+" -> "+target[size_t(mv.second)]+" ("+std::to_string(n)+" vertices; the game's skeleton has no such bone)");}}
    remap(weights,mapping);
-   if(s.parts.empty())createTextures(s);
+   if(s.parts.empty())ensureTextures(s,drawnBy(s,s.assignment),true);
    std::string report="source_index\ttarget_index\tsource_name\ttarget_name\n";for(size_t i=0;i<mapping.size();i++)report+=std::to_string(i)+'\t'+std::to_string(mapping[i])+'\t'+(pf.sourceBones.empty()?"#"+std::to_string(i):pf.sourceBones[i])+'\t'+(mapping[i]>=0?target[mapping[i]]:"")+"\n";writeLater(s.path+"/bonemap-"+pf.spec.name+".tsv",report);
    BuiltPart bp;bp.name=pf.spec.name;bp.avatar=avatarIdentity(owner);bp.target=s.targets[s.parts.size()];bp.bones=target;bp.draws=pf.draws;bp.indices.assign(pf.geo.idx(),pf.geo.idx()+4ull*pf.geo.ni);
    // A GC pin protects the managed wrapper, not the native Mesh against Unity Destroy. Keep an independent,
@@ -501,9 +808,17 @@ struct Runtime::Impl {
    learnArrayClasses(ownerMesh);const auto& k=arrayClasses;
    e.op(abi::clear,bp.mesh,1);e.op(abi::setIndexFormat,bp.mesh,geo.n>65535?1:0);e.set(abi::setTriangles,bp.mesh,arrayOf(tmp,k.i32,nullptr,0,4));
    e.set(abi::setPositions,bp.mesh,arrayOf(tmp,k.v3,geo.pos(),geo.n,12));e.set(abi::setNormals,bp.mesh,arrayOf(tmp,k.v3,geo.norm(),geo.n,12));e.set(abi::setUV,bp.mesh,arrayOf(tmp,k.v2,geo.uv(),geo.n,8));
-   for(auto& c:pf.channels){abi::Offset setter;Ptr cls;unsigned stride;
-    if(c.first==".uv2"){setter=abi::setUV2;cls=k.v2;stride=8;}else if(c.first==".uv3"){setter=abi::setUV3;cls=k.v2;stride=8;}else if(c.first==".uv4"){setter=abi::setUV4;cls=k.v2;stride=8;}else if(c.first==".colors"){setter=abi::setColors;cls=k.c32;stride=4;}else{setter=abi::setTangents;cls=k.v4;stride=16;}
-    e.set(setter,bp.mesh,arrayOf(tmp,cls,c.second.data(),geo.n,stride));}
+   std::array<uint8_t,4> neutral{255,128,128,51};if(ctl.exp.neutralColors)neutral=usualColor(ownerMesh,s.name);
+   bool colorsSet=false,uv2Set=false;
+   for(auto& c:pf.channels){abi::Offset setter;Ptr cls;unsigned stride;const uint8_t* src=c.second.data();Bytes replaced;
+    if(c.first==".uv2"){setter=abi::setUV2;cls=k.v2;stride=8;uv2Set=true;if(ctl.exp.noUv2){replaced.assign(size_t(geo.n)*8,0);src=replaced.data();}}
+    else if(c.first==".uv3"){setter=abi::setUV3;cls=k.v2;stride=8;}else if(c.first==".uv4"){setter=abi::setUV4;cls=k.v2;stride=8;}
+    else if(c.first==".colors"){setter=abi::setColors;cls=k.c32;stride=4;colorsSet=true;if(ctl.exp.neutralColors){replaced.resize(size_t(geo.n)*4);for(size_t v=0;v<geo.n;v++)std::memcpy(replaced.data()+4*v,neutral.data(),4);src=replaced.data();}}
+    else{setter=abi::setTangents;cls=k.v4;stride=16;}
+    e.set(setter,bp.mesh,arrayOf(tmp,cls,src,geo.n,stride));}
+   if(ctl.exp.neutralColors&&!colorsSet){Bytes c(size_t(geo.n)*4);for(size_t v=0;v<geo.n;v++)std::memcpy(c.data()+4*v,neutral.data(),4);e.set(abi::setColors,bp.mesh,arrayOf(tmp,k.c32,c.data(),geo.n,4));}
+   if(ctl.exp.noUv2&&!uv2Set){Bytes z(size_t(geo.n)*8,0);e.set(abi::setUV2,bp.mesh,arrayOf(tmp,k.v2,z.data(),geo.n,8));}
+   if(ctl.exp.neutralColors||ctl.exp.noUv2)log("experiment-mesh",s.name+"/"+pf.spec.name+(ctl.exp.neutralColors?" colours=("+std::to_string(neutral[0])+","+std::to_string(neutral[1])+","+std::to_string(neutral[2])+","+std::to_string(neutral[3])+")":"")+(ctl.exp.noUv2?" uv2=0":""));
    e.set(abi::setTriangles,bp.mesh,arrayOf(tmp,k.i32,geo.idx(),geo.ni,4));setSubmeshes(s,bp);
    data=load<Ptr>(load<Ptr>(bp.mesh+0x10)+0x48);require(data&&load<uint32_t>(data+0x74)==geo.n&&load<uint64_t>(data+0xe0)==bones.size()&&load<uint32_t>(data+0xf8)==15,"Mesh layout changed");
    require(data!=load<Ptr>(load<Ptr>(ownerMesh+0x10)+0x48),"Cloned Mesh still shares native data with original");
@@ -524,7 +839,7 @@ struct Runtime::Impl {
   auto s=std::make_unique<Set>();s->name=m.name;s->path=m.path;s->generation=m.generation;s->id=m.id;s->data=res.data;s->targets=targets;s->variants=res.data->variants;s->originalMaterials=res.data->originalMaterials;
   // Estimated memory once built: vertex arrays and the clone's skin, indices (ours and the engine's), RGBA textures.
   for(auto& p:res.data->parts){s->bytes+=uint64_t(p.geo.n)*(12+12+8+32+32);for(auto& c:p.channels)s->bytes+=c.second.size();s->bytes+=uint64_t(p.geo.ni)*8;}
-  for(auto& kv:res.data->materials)for(auto* t:{kv.second.main.get(),kv.second.light.get(),kv.second.normal.get()})if(t)s->bytes+=uint64_t(t->w)*t->h*4;
+  s->meshKey=ctl.exp.meshKey();s->mats=std::move(res.data->materials);res.data->materials.clear();s->blobSize=res.data->blobSize;s->fileGeneration=res.data->generation;
   auto v=ctl.variables.find(s->name);s->assignment=pick(s->variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second);s->used=now;Set* cur=s.get();sets.push_back(std::move(s));log("loading",m.name+" "+m.generation);return cur;}
 
  // ---------------------------------------------------------------- attachments
@@ -577,7 +892,24 @@ struct Runtime::Impl {
   require(!known||source,"Inherited GIBox materials belong to a different mesh");
   a.originalMaterials=source?source->originalMaterials:mats;pin(a,a.originalMaterials);
   if(source)log("material-backup-cleaned",a.set->name+"/"+a.set->parts[a.part].name+": inherited "+std::to_string(incoming.size())+" mod material slots replaced with the original "+std::to_string(length(a.originalMaterials,64))+"-slot palette");}
- void applyMaterials(Attachment& a){Set& s=*a.set;auto& bp=s.parts[a.part];if(s.originalMaterials){e.set(abi::setMaterials,a.renderer,a.originalMaterials);return;}
+ // Leaving a slot mode: property blocks (mode 1) are emptied before anything new is written, because writing a slot's
+ // block may drop what else that slot carries (0.7.21 on device: block -> custom texture showed the game's textures
+ // until the character was loaded again); custom textures (mode 2) once the new materials are on, since the shown
+ // material's own textures are written into them. AllowPerMaterialProp passes on to the next slot mode.
+ void applyMaterials(Attachment& a){int want=a.set->originalMaterials?0:ctl.exp.slotTextures;
+  if(!a.slotMode||a.slotMode==want){applyMaterialsAs(a,want);return;}
+  SlotState old=slotTake(a);if(want){a.slotAllowBefore=old.allow;old.allow=-1;}
+  if(old.mode==1){slotRelease(a,old);applyMaterialsAs(a,want);return;}
+  try{applyMaterialsAs(a,want);}catch(...){slotRelease(a,old);throw;}slotRelease(a,old);}
+ void applyMaterialsAs(Attachment& a,int slotMode){Set& s=*a.set;auto& bp=s.parts[a.part];
+  if(slotMode){auto originals=pointers(a.originalMaterials,64);std::vector<Ptr> mats;
+   for(auto& row:bp.rows){Ptr src=row.slot<originals.size()?originals[row.slot]:0;if(!alive(src))for(size_t k=originals.size();k-->0;)if(alive(originals[k])){src=originals[k];break;}require(alive(src),"Original material missing");mats.push_back(src);}
+   std::set<std::string> names;for(auto& r:bp.rows)names.insert(r.name);ensureTextures(s,names,true);
+   Owned tmp;try{e.set(abi::setMaterials,a.renderer,array(tmp,a.originalMaterials,mats.data(),mats.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);
+   bool first=a.slotMode!=slotMode;a.slotTex=slotPlan(a,mats);a.slotMats=mats;a.slotMode=slotMode;slotWrite(a);if(first)slotReport(a);return;}
+  if(ctl.exp.gameMaterials&&!s.originalMaterials){auto originals=pointers(a.originalMaterials,64);std::vector<Ptr> mats;
+   for(auto& row:bp.rows){Ptr src=row.slot<originals.size()?originals[row.slot]:0;if(!alive(src))for(size_t k=originals.size();k-->0;)if(alive(originals[k])){src=originals[k];break;}require(alive(src),"Original material missing");mats.push_back(src);}
+   Owned tmp;try{e.set(abi::setMaterials,a.renderer,array(tmp,a.originalMaterials,mats.data(),mats.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);return;}if(!s.originalMaterials){std::set<std::string> names;for(auto& r:bp.rows)names.insert(r.name);ensureTextures(s,names,true);}if(s.originalMaterials){e.set(abi::setMaterials,a.renderer,a.originalMaterials);return;}
   auto originals=pointers(a.originalMaterials,64);std::vector<Ptr> mats;
   for(auto& row:bp.rows){auto key=row.name+"#"+std::to_string(row.slot);auto it=a.clones.find(key);Ptr m=0;if(it!=a.clones.end()&&alive(it->second))m=it->second;
    else{Ptr src=row.slot<originals.size()?originals[row.slot]:0;
@@ -598,7 +930,7 @@ struct Runtime::Impl {
     require(alive(src),"Original material missing (slot "+std::to_string(row.slot)+")");m=clone(a,src);a.materialSources[m]=src;pin(a,src);auto& t=s.textures.at(row.name);
     if(!t.original){e.set(abi::mainTexture,m,t.main);if(t.light)extraTexture(m,t.light,{"_LightMap","_LightMapTex","_Lightmap","_LightmapTex"});if(t.normal)extraTexture(m,t.normal,{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"});}a.clones[key]=m;}
    mats.push_back(m);}
-  Owned tmp;try{e.set(abi::setMaterials,a.renderer,array(tmp,a.originalMaterials,mats.data(),mats.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}
+  Owned tmp;try{e.set(abi::setMaterials,a.renderer,array(tmp,a.originalMaterials,mats.data(),mats.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);mirrorSync();}
  bool attach(Ptr r,Ptr mesh,Set& s,size_t part,uint64_t now){
   auto& bp=s.parts[part];auto a=std::make_unique<Attachment>();a->renderer=r;a->native=load<Ptr>(r+0x10);a->original=mesh;a->set=&s;a->part=part;a->backup=bp.backup;bool meshSet=false;
   auto readyKey=s.path+"|attach|"+std::to_string(a->native);auto waiting=[&](const std::string& reason){if(missingLogged[readyKey]!=reason){missingLogged[readyKey]=reason;log("attach-wait",s.name+"/"+bp.name+": "+reason);}freeOwned(*a);return false;};
@@ -616,10 +948,10 @@ struct Runtime::Impl {
    if(missing>=0){auto reason=bp.name+" 的原材质槽 "+std::to_string(missing)+" 尚未就绪，等待后重试";materialWait[s.path]=reason;
     if(missingLogged[waitKey]!=reason){missingLogged[waitKey]=reason;log("material-wait",s.name+": "+reason);}freeOwned(*a);return false;}
    missingLogged.erase(waitKey);require(a->backup&&alive(a->backup->mesh),"Restoration mesh snapshot unavailable");snapshotMaterials(*a->backup,a->originalMaterials);
-   e.set(abi::setMesh,r,bp.mesh);meshSet=true;applyMaterials(*a);if(!s.originalMaterials)a->refreshAt=now+1500;
+   e.set(abi::setMesh,r,bp.mesh);meshSet=true;applyMaterials(*a);if(!s.originalMaterials)a->refreshAt=now+(ctl.exp.firstRefreshMs?uint64_t(ctl.exp.firstRefreshMs):1500);
    if(!alive(bp.originMesh)){bp.originMesh=mesh;bp.originMaterials=a->originalMaterials;pin(s,mesh);pin(s,bp.originMaterials);}}
   catch(...){if(meshSet&&alive(r))e.set(abi::setMesh,r,mesh);freeOwned(*a);throw;}
-   log("attached",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);beginMaterialTrace(*attachments.at(r),now);s.used=now;return true;}
+   log("attached",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);mirrorSync();beginMaterialTrace(*attachments.at(r),now);s.used=now;return true;}
  // Bounded observations, not an effect-parameter fix: identify palette replacements during party hand-off versus
  // unchanged material instances. Existing INFO palette logs stay intact; debug readback uses named managed methods.
  void materialState(Attachment& a,const std::string& phase,uint64_t now){
@@ -638,7 +970,8 @@ struct Runtime::Impl {
    log("material-state",a.set->name+"/"+a.set->parts[a.part].name+" "+phase+" age-ms="+std::to_string(now>=a.materialTraceStart?now-a.materialTraceStart:0)+" renderer="+hex(a.native)+" current="+palette(current)+" saved="+palette(saved));
   }catch(const std::exception& ex){log("material-state-error",a.set->name+": "+ex.what());}
  }
- void beginMaterialTrace(Attachment& a,uint64_t now){if(a.set->originalMaterials){return;}if(worker.background()){now=clockMs();}a.materialTraceStart=now;a.materialTraceAt=now+500;a.materialTraceSamples=0;
+ void beginMaterialTrace(Attachment& a,uint64_t now){if(a.set->originalMaterials){return;}
+  if(glowOn()&&glow::trace().armed.load()){glowRegister();glow::trace().marker(a.renderer,a.adopted?"adopted":"attached");if(!a.adopted)glowOpen("attach "+a.set->name+"/"+a.set->parts[a.part].name,{glowOwner(a)},false,500,3000,{0,3000},true);}if(worker.background()){now=clockMs();}a.materialTraceStart=now;a.materialTraceAt=now+500;a.materialTraceSamples=0;
   a.materialCheckAt=now+50;a.materialCheckUntil=now+1500;a.materialRepairs=0;materialState(a,"attached",now);}
  static std::string materialStem(const std::string& raw){auto s=normalize(raw);auto clone=s.find("(clone)"),instance=s.find("(instance)");auto end=std::min(clone,instance);return trim(s.substr(0,end));}
  // The log confirms copies named "...(Clone) (Instance) #n" appearing after the hand-off. Only accept that layout
@@ -658,7 +991,7 @@ struct Runtime::Impl {
   freeOwned(roots);return result;
  }
  void retakeClones(Attachment& a){
-  auto old=a.clones;a.clones.clear();try{applyMaterials(a);}catch(...){a.clones=old;throw;}for(auto& kv:old)a.retired[kv.second]=kv.first;
+  auto old=a.clones;a.clones.clear();try{applyMaterials(a);}catch(...){a.clones=old;throw;}for(auto& kv:old){a.retired[kv.second]=kv.first;}mirrorSync();
   std::map<Ptr,Ptr> swap;for(auto& kv:a.retired){auto it=a.clones.find(kv.second);if(it!=a.clones.end())swap[kv.first]=it->second;}
   for(auto& kv:attachments){auto& o=*kv.second;if(o.source!=a.renderer||!alive(o.renderer))continue;Ptr om=e.get(abi::getMaterials,o.renderer);if(!om)continue;
    auto list=pointers(om,64);bool changed=false;for(auto& p:list){auto f=swap.find(p);if(f!=swap.end()){p=f->second;changed=true;}}
@@ -666,12 +999,14 @@ struct Runtime::Impl {
  }
  // Keep the two delayed refreshes, including when the game has instantiated our material palette.
  void refreshClones(Attachment& a,uint64_t now){a.refreshAt=++a.refreshes<2?now+2500:0;Set& s=*a.set;
-  if(s.originalMaterials||a.adopted||a.clones.empty()||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native){return;}
+  if(s.originalMaterials||a.adopted||a.slotMode||a.clones.empty()||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native){return;}
   materialState(a,"refresh-before",now);Ptr mats=e.get(abi::getMaterials,a.renderer);
   if(!mats){log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" skipped (no material array)");return;}
   auto current=pointers(mats,64);bool shows=false;for(auto& c:a.clones){shows=shows||std::find(current.begin(),current.end(),c.second)!=current.end();}
   if(!shows&&!copiedPalette(a,current,mats)){log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" skipped (current materials are not the owned clones)");return;}
-  retakeClones(a);log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" applied");materialState(a,"refresh-after",now);}
+  bool glow=glowOn()&&glow::trace().armed.load();if(glow){glow::trace().marker(a.renderer,"refresh "+std::to_string(a.refreshes));glowDiff(a,"refresh-before "+std::to_string(a.refreshes));}
+  retakeClones(a);log("material-refresh",s.name+": attempt "+std::to_string(a.refreshes)+" applied");materialState(a,"refresh-after",now);
+  if(glow){glowRegister();glowDiff(a,"refresh-after "+std::to_string(a.refreshes));}}
  // A bounded early repair: first 1.5 s, at most 20 checks/s and two rebuild attempts. Do not perpetually fight the
  // game's effects, alter shader parameters, replace unrelated meshes, or destroy game-owned material instances.
  void guardMaterials(Attachment& a,uint64_t now){
@@ -679,12 +1014,12 @@ struct Runtime::Impl {
   if(now>a.materialCheckUntil||a.materialRepairs>=2){a.materialCheckAt=0;return;}
   a.materialCheckAt=now+50;
   try{
-   if(a.set->originalMaterials||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native){return;}
+   if(a.set->originalMaterials||a.slotMode||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native){return;}
    Ptr mats=e.get(abi::getMaterials,a.renderer);if(!mats){return;}auto current=pointers(mats,64);
    bool known=true;for(Ptr m:current){bool found=false;for(auto& kv:attachments){found=found||kv.second->materialSources.count(m)>0;}known=known&&found;}
    if(known||!copiedPalette(a,current,mats)){return;}
    a.materialRepairs++;materialState(a,"copy-before",now);retakeClones(a);a.adopted=false;a.source=0;
-   if(!a.refreshAt){a.refreshes=0;a.refreshAt=now+1500;}
+   if(!a.refreshAt){a.refreshes=0;a.refreshAt=now+(ctl.exp.firstRefreshMs?uint64_t(ctl.exp.firstRefreshMs):1500);}
    log("material-reclaimed",a.set->name+"/"+a.set->parts[a.part].name+": copied palette rebuilt at "+std::to_string(now-a.materialTraceStart)+" ms (attempt "+std::to_string(a.materialRepairs)+")");materialState(a,"copy-after",now);
   }catch(const std::exception& ex){log("material-reclaim-error",a.set->name+": "+ex.what());}
  }
@@ -695,7 +1030,13 @@ struct Runtime::Impl {
   for(auto& kv:attachments){for(auto& c:kv.second->clones)if(current.count(c.second))return true;for(auto& c:kv.second->retired)if(current.count(c.first))return true;}return false;}
  // Original materials go back only while the renderer still shows our clones: once they are destroyed, a renderer still
  // pointing at them draws magenta (0.3.5: the game swaps the mesh, we dropped the attachment and destroyed its clones).
- void restoreMaterials(Attachment& a,bool knownPair=false){if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native||(!knownPair&&!showsClones(a.renderer)))return;
+ // A renderer in the slotTextures experiment shows the game's materials, one per draw slot of ours.
+ // The game may put its own instances into those slots (the overrides stay with the slot), so the slot count decides.
+ bool showsOurs(Attachment& a){if(showsClones(a.renderer))return true;if(!a.slotMode)return false;Ptr mats=e.get(abi::getMaterials,a.renderer);if(!mats)return false;
+  auto current=pointers(mats,64);if(current.size()!=a.set->parts[a.part].rows.size())return false;for(Ptr m:current)if(!alive(m))return false;return true;}
+ void restoreMaterials(Attachment& a,bool knownPair=false){if(!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
+  if(!knownPair&&!showsOurs(a)){slotClear(a);return;}SlotState slots=slotTake(a);try{restorePalette(a);}catch(...){slotRelease(a,slots);throw;}slotRelease(a,slots);}
+ void restorePalette(Attachment& a){
   unsigned dead=0;for(Ptr m:pointers(a.originalMaterials,64))if(!alive(m))dead++;Ptr palette=a.originalMaterials;
   if(dead){require(a.backup&&a.backup->materials,"Restoration material snapshot unavailable");palette=a.backup->materials;
    for(Ptr m:pointers(palette,64))require(alive(m),"Restoration material snapshot expired");
@@ -729,7 +1070,7 @@ struct Runtime::Impl {
     if(matches(bp.target,fp)||!alive(a.original)){pin(a,mesh);a.original=mesh;}
     // The backup belongs to the first clean attachment. A later material array may be the game's own copy of our
     // textured clones, so it is not a trustworthy replacement for the backup even when its pointers are unfamiliar.
-    if(!showsClones(a.renderer)){e.set(abi::setMesh,a.renderer,bp.mesh);applyMaterials(a);}
+    if(!showsOurs(a)){e.set(abi::setMesh,a.renderer,bp.mesh);applyMaterials(a);}
     else e.set(abi::setMesh,a.renderer,bp.mesh);
     ok=true;if(++reclaims<=20)log("reclaimed",a.set->name+"/"+bp.name+" <- "+fp.mesh+(reclaims==20?" (further reclaims not logged)":""));}}
   catch(...){freeOwned(tmp);throw;}freeOwned(tmp);return ok;}
@@ -789,7 +1130,9 @@ struct Runtime::Impl {
    require(alive(original)&&originalMats!=0,"Original of adopted renderer unknown");
    pin(*a,r);pin(*a,original);pin(*a,originalMats);a->original=original;a->originalMaterials=originalMats;a->source=src?src->renderer:0;}
   catch(...){freeOwned(*a);throw;}
-   log("adopted",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);beginMaterialTrace(*attachments.at(r),now);s.used=now;}
+   log("adopted",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);mirrorSync();beginMaterialTrace(*attachments.at(r),now);s.used=now;
+  // A copy keeps the material references but not necessarily the per-slot overrides of its source.
+  if(ctl.exp.slotTextures&&!s.originalMaterials){try{applyMaterials(*attachments.at(r));}catch(const std::exception& ex){log("slot-textures","adopted copy "+s.name+": "+ex.what());}}}
  void discover(const std::vector<Set*>& live,uint64_t now){materialWait.clear();
   std::map<Ptr,std::pair<Set*,size_t>> ours;for(auto& s:sets)for(size_t i=0;i<s->parts.size();i++)ours[s->parts[i].mesh]={s.get(),i};
   auto list=allRenderers(now);
@@ -814,7 +1157,12 @@ struct Runtime::Impl {
   for(auto& m:moved){if(attachments.count(m.first)||!alive(m.first)||!alive(m.second))continue;auto fp=fingerprint(m.second);for(size_t i=0;i<s.parts.size();i++)if(matches(s.parts[i].target,fp)){try{attach(m.first,m.second,s,i,now);}catch(const std::exception& ex){note(s.name+": "+ex.what());}break;}}
   attachSeen({&s},now);}
  // All or nothing: if a part or a renderer cannot take the new values, every part and renderer goes back to the old ones.
- void applyVariant(Set& s,const Assignment& a){if(a==s.assignment)return;Assignment old=s.assignment;
+ void applyVariant(Set& s,const Assignment& a){if(a==s.assignment)return;
+  // New variant values that draw materials whose textures are not read yet: read them in the background and switch
+  // on a later tick, so the game thread does not stall on file reads.
+  if(!s.originalMaterials&&!ensureTextures(s,drawnBy(s,a),false)){std::string text;for(auto& kv:a)text+=(text.empty()?"":" ")+kv.first+"="+std::to_string(kv.second);
+   if(s.textureWait!=text){s.textureWait=text;log("variant-textures-loading",s.name+" "+text);}return;}
+  s.textureWait.clear();Assignment old=s.assignment;
   auto apply=[&]{for(auto& bp:s.parts){setSubmeshes(s,bp);e.op(abi::meshUpload,bp.mesh,0);}for(auto& kv:attachments){if(kv.second->set==&s)applyMaterials(*kv.second);}};
   s.assignment=a;try{apply();}catch(...){s.assignment=old;try{apply();}catch(const std::exception& ex){log("variant-error",s.name+": going back failed too: "+ex.what());}throw;}std::string text;for(auto& kv:a)text+=(text.empty()?"":" ")+kv.first+"="+std::to_string(kv.second);log("variant",s.name+" "+text);}
 
@@ -827,7 +1175,23 @@ struct Runtime::Impl {
  void seedGameObjectClass(){for(Ptr r:worldRenderers())if(alive(r)){Ptr go=e.get(abi::gameObject,r);if(alive(go)&&load<Ptr>(go)){goClass=load<Ptr>(go);log("spawn-ready","GameObject class known, hand-off replacement on");}return;}}
  // Called from hooks: nothing in Impl is touched off the Tick thread.
  bool onTickThread(const char* what){int t=tickTid.load();if(t&&threadId()==t)return true;if(t&&offThread.fetch_add(1)==0)log("hook-skip",std::string(what)+" called on another thread than Tick; left to the game");return false;}
+ // ---- appearance timeline (debug log level only, at most 300 lines a session): when the game hands over models and
+ // binds meshes, also before GIBox is ready to replace anything (loading screen), to find where party members are made.
+ unsigned timelineLines=0,timelineOthers=0;std::set<std::string> timelineMeshes;  // base mesh names of every model's parts ("body")
+ static std::string baseMesh(const std::string& n){auto m=meshName(n);auto p=m.rfind("_lod");if(p!=std::string::npos&&p+4<m.size()&&std::all_of(m.begin()+long(p)+4,m.end(),[](char c){return c>='0'&&c<='9';}))m.erase(p);return m;}
+ bool timelineOn(){return logLevel.load(std::memory_order_relaxed)<=int(Level::Debug)&&timelineLines<300;}
+ void timeline(const std::string& what,const std::string& detail){if(!timelineOn())return;timelineLines++;log("appearance",what+" "+detail+" | character "+(ch.entity?std::to_string(ch.config):std::string("none"))+", replacement "+(ctl.enabled&&!wantedNow.empty()&&bindingReady?"ready":"not ready"));}
+ // A bound renderer whose mesh is one a model replaces (any LOD): which avatar, which mesh, on the controlled character?
+ void timelineBind(const char* phase,Ptr native){if(!timelineOn()||timelineMeshes.empty())return;
+  try{Ptr r=e.call<Ptr>(abi::wrapperFor,native);if(!alive(r)||load<Ptr>(r+0x10)!=native)return;Ptr mesh=e.get(abi::getMesh,r);if(!alive(mesh))return;auto fp=fingerprint(mesh);
+   if(!timelineMeshes.count(baseMesh(fp.mesh))){return;}bool world=false;for(Ptr w:worldRenderers()){world=world||w==r;}
+   timeline(std::string("bind-")+phase,"renderer "+hex(native)+" avatar "+avatarIdentity(r)+" mesh "+fp.mesh+" ("+std::to_string(fp.vertices)+" vertices)"+(world?" controlled":" not controlled")+(attachments.count(r)?" attached":""));}
+  catch(const std::exception&){}}
  void spawned(Ptr go){if(!onTickThread("hand-off"))return;spawnAttached.clear();
+  // Only character models: scene objects, monsters and effects filled the 300 lines before (0.7.18).
+  if(timelineOn()&&!inTick){try{if(alive(go)){auto n=name(go);if(n.compare(0,7,"Avatar_")!=0){timelineOthers++;}
+     else{timeline("handoff","gameobject "+n+(goClass&&load<Ptr>(go)==goClass?"":" (GameObject class not learned yet)")+(timelineOthers?" ("+std::to_string(timelineOthers)+" other objects handed over since the last line)":""));timelineOthers=0;}}}
+   catch(const std::exception&){}}
   if(inTick||!ctl.enabled||!rendererTypeObject||!goClass||wantedNow.empty())return;
   if(!alive(go)||load<Ptr>(go)!=goClass)return;
   inTick=true;Owned tmp;uint64_t now=clockMs();unsigned adopted=0,built=0;
@@ -883,7 +1247,7 @@ struct Runtime::Impl {
     // A successful interception must still remember the new game asset. Otherwise Destroy(old asset) leaves
     // restoration pointing at the expired predecessor even though a live original just passed this hook.
     if((matches(bp.target,fp)||!alive(a->original))&&a->original!=managed){pin(*a,managed);a->original=managed;}
-    out=ours;if(++binds<=20)log("bind-substituted",a->set->name+"/"+bp.name+": game asked for "+fp.mesh+" ("+std::to_string(fp.vertices)+" vertices)"+(binds==20?" (further binds not logged)":""));}
+    out=ours;if(glowOn())glow::trace().marker(a->renderer,"bind-substituted "+fp.mesh);if(++binds<=20)log("bind-substituted",a->set->name+"/"+bp.name+": game asked for "+fp.mesh+" ("+std::to_string(fp.vertices)+" vertices)"+(binds==20?" (further binds not logged)":""));}
    else if(++passes<=20)log("bind-passed",rendererName(a->renderer)+" <- "+(known?fp.mesh:std::string("unknown mesh")));}
   catch(const std::exception& ex){log("bind-error",ex.what());out=meshNative;}
   inTick=false;return out;}
@@ -904,12 +1268,45 @@ struct Runtime::Impl {
  void bindingDeferred(const std::string& model,const std::string& reason){if(bindDeferred++<20)log("bind-deferred",model+": "+reason+"; waiting for a later binding/hand-off or the discovery fallback");}
  // These same checked hook entries also see first-time renderers. Their pre-call phase must let the game bind the
  // original bones; immediately after the original returns, attach/build from that now-complete renderer.
- void meshBound(Ptr native){if(!native||!onTickThread("mesh-bound")||inTick||!ctl.enabled||wantedNow.empty()||!bindingReady)return;inTick=true;
+ // Build (if needed) and attach one bound renderer for model m. false: not this model's (try the next one); true: the
+ // renderer is settled, attached or deferred. Files not read yet: an urgent load, and the renderer is kept in
+ // pendingBinds so it is taken over as soon as they are, also while it is still hidden (a party member not switched in).
+ struct PendingBind {Ptr native;std::string path;uint64_t since;};std::map<Ptr,PendingBind> pendingBinds;
+ bool bindBuild(Ptr r,Ptr mesh,const Fingerprint& fp,const ModelInfo* m,const std::vector<Fingerprint>& targets){
+    seen.erase(std::remove_if(seen.begin(),seen.end(),[&](const Seen& sn){return sn.renderer==r;}),seen.end());seen.push_back({r,mesh,fp});
+    Set* s=liveSet(*m);if(!s){auto failure=failed.find(m->path);if(failure!=failed.end()&&failure->second.first==m->generation)return false;
+     auto tpl=templatesFor(*m,targets);if(!tpl){bindingDeferred(m->name,"template/bones are not complete");return true;}
+     LoadResult res;if(!takeLoaded(*m,res)){requestLoad(*m,true);pendingBinds[r]={load<Ptr>(r+0x10),m->path,clockMs()};bindingDeferred(m->name,"model data is not preloaded; taken over once it is read");return true;}
+     if(!res.error.empty()){failed[m->path]={m->generation,res.error};log("model-error",m->name+": "+res.error);return true;}
+     Set* cur=findSet(m->path,m->generation);if(cur&&!cur->built)releaseSet(cur);cur=startSet(*m,res,targets,clockMs());
+     Ptr buildingRenderer=0;try{while(!cur->built){const auto& used=(*tpl)[cur->parts.size()];buildingRenderer=used.renderer;buildStep(*cur,used);}}
+     catch(const std::exception& ex){releaseSet(cur);if(buildingRenderer)skipped.insert({buildingRenderer,alive(buildingRenderer)?load<Ptr>(buildingRenderer+0x10):0});
+      if(++attempts[m->path+"|"+m->generation]>=3){failed[m->path]={m->generation,ex.what()};log("model-error",m->name+": "+ex.what());}
+      else{log("build-retry",m->name+": "+ex.what());}
+      bindingDeferred(m->name,ex.what());return true;}
+     promote(*cur,clockMs());s=cur;}
+    if(!attachments.count(r))attachSeen({s},clockMs());
+    if(attachments.count(r)){pendingBinds.erase(r);if(++bindAfterHits<=20)log("bind-attached",m->name+": renderer taken over immediately after the game's mesh/bone binding");}
+    else bindingDeferred(m->name,"renderer skeleton/materials are not ready");
+    return true;}
+ // Renderers whose model files were not read when the game bound them: taken over on the first tick after the read.
+ void processPendingBinds(uint64_t now){
+  for(auto it=pendingBinds.begin();it!=pendingBinds.end();){Ptr r=it->first;auto p=it->second;const ModelInfo* m=nullptr;for(auto* w:wantedNow)if(w->path==p.path)m=w;
+   if(!m||!alive(r)||load<Ptr>(r+0x10)!=p.native||attachments.count(r)||now>p.since+30000){it=pendingBinds.erase(it);continue;}
+   bool ready=liveSet(*m)!=nullptr;if(!ready){std::lock_guard<std::mutex> l(sm);auto x=loaded.find(m->path);ready=x!=loaded.end()&&x->second.generation==m->generation;}
+   if(!ready){++it;continue;}
+   it=pendingBinds.erase(it);
+   try{Ptr mesh=e.get(abi::getMesh,r);std::vector<Fingerprint> targets;if(!alive(mesh)||!targetsFor(*m,targets))continue;
+    bindBuild(r,mesh,fingerprint(mesh,true),m,targets);if(attachments.count(r))log("bind-late-attached",m->name+": taken over right after its files were read");}
+   catch(const std::exception& ex){log("bind-after-error",ex.what());}}}
+ void meshBound(Ptr native){if(!native||!onTickThread("mesh-bound")||inTick)return;
+  if(!ctl.enabled||wantedNow.empty()||!bindingReady){if(timelineOn()){inTick=true;timelineBind("early",native);inTick=false;}return;}
+  inTick=true;
   try{renderBindAfter(native);Ptr r=e.call<Ptr>(abi::wrapperFor,native);if(!alive(r)||load<Ptr>(r+0x10)!=native){inTick=false;return;}
    Ptr mesh=e.get(abi::getMesh,r);if(!alive(mesh)){inTick=false;return;}
    auto attached=attachments.find(r);if(attached!=attachments.end()){auto& a=*attached->second;
     if(!wantedSet(*a.set)){inTick=false;return;}
-    if(mesh!=a.set->parts[a.part].mesh){reclaim(a,mesh);}else if(!showsClones(r))applyMaterials(a);
+    if(mesh!=a.set->parts[a.part].mesh){reclaim(a,mesh);}else if(!showsOurs(a))applyMaterials(a);
     inTick=false;return;}
    if(skipped.count({r,native})){inTick=false;return;}
    // A game-instantiated copy may already carry our mesh. Register it before the set can be disabled/released.
@@ -928,6 +1325,8 @@ struct Runtime::Impl {
     if(vertices&&submeshes&&submeshes<=64&&bones&&bones<=512&&!fp.mesh.empty())bindingRejected.put(key,bindingNow+2000);
     bindingFiltered++;inTick=false;return;}
    bindingDeep++;std::set<Ptr> world;try{for(Ptr w:worldRenderers())world.insert(w);}catch(const std::exception&){}
+   // Timeline: only binds that passed the mesh filter (a part's mesh), so rejected NPC/monster binds cost nothing extra.
+   if(timelineOn())timeline("bind","renderer "+hex(native)+" avatar "+avatarIdentity(r)+" mesh "+fp.mesh+" ("+std::to_string(fp.vertices)+" vertices)"+(world.count(r)?" controlled":" not controlled"));
    std::vector<std::string> tokens;bool tokensRead=false;
    for(auto& row:bindingTargets){auto* m=row.model;const auto& targets=row.parts;if(!row.known){if(world.count(r)&&m->id==ch.config)bindingDeferred(m->name,"the target mesh has not been learned");continue;}bool candidate=false;
     for(auto& t:targets)candidate=candidate||matches(t,fp)||(world.count(r)&&lowerLod(fp.mesh)&&meshName(fp.mesh)==meshName(t.mesh));
@@ -937,23 +1336,10 @@ struct Runtime::Impl {
      if(std::find(tokens.begin(),tokens.end(),"avatar")==tokens.end()||(!m->names.empty()&&!namesMatch(m->names,tokens)))continue;}
     if(!world.count(r)&&m->names.empty()){auto* built=liveSet(*m);bool identity=false;auto root=avatarIdentity(r);
      if(built&&!root.empty())for(auto& bp:built->parts)identity=identity||(bp.avatar==root&&(matches(bp.target,fp)||meshName(bp.target.mesh)==meshName(fp.mesh)));
-     if(!identity){bindingDeferred(m->name,"a non-world renderer's avatar identity is not verified");continue;}}
-    seen.erase(std::remove_if(seen.begin(),seen.end(),[&](const Seen& sn){return sn.renderer==r;}),seen.end());seen.push_back({r,mesh,fp});
-    Set* s=liveSet(*m);if(!s){auto failure=failed.find(m->path);if(failure!=failed.end()&&failure->second.first==m->generation)continue;
-     auto tpl=templatesFor(*m,targets);if(!tpl){bindingDeferred(m->name,"template/bones are not complete");break;}
-     LoadResult res;if(!takeLoaded(*m,res)){requestLoad(*m);bindingDeferred(m->name,"model data is not preloaded");break;}
-     if(!res.error.empty()){failed[m->path]={m->generation,res.error};log("model-error",m->name+": "+res.error);break;}
-     Set* cur=findSet(m->path,m->generation);if(cur&&!cur->built)releaseSet(cur);cur=startSet(*m,res,targets,clockMs());
-     Ptr buildingRenderer=0;try{while(!cur->built){const auto& used=(*tpl)[cur->parts.size()];buildingRenderer=used.renderer;buildStep(*cur,used);}}
-     catch(const std::exception& ex){releaseSet(cur);if(buildingRenderer)skipped.insert({buildingRenderer,alive(buildingRenderer)?load<Ptr>(buildingRenderer+0x10):0});
-      if(++attempts[m->path+"|"+m->generation]>=3){failed[m->path]={m->generation,ex.what()};log("model-error",m->name+": "+ex.what());}
-      else{log("build-retry",m->name+": "+ex.what());}
-      bindingDeferred(m->name,ex.what());break;}
-     promote(*cur,clockMs());s=cur;}
-    if(!attachments.count(r))attachSeen({s},clockMs());
-    if(attachments.count(r)){if(++bindAfterHits<=20)log("bind-attached",m->name+": renderer taken over immediately after the game's mesh/bone binding");}
-    else bindingDeferred(m->name,"renderer skeleton/materials are not ready");
-    break;
+     // Not built yet (a party member loaded but not switched in): the avatar its bone library was recorded from.
+     std::string recorded;if(!identity&&!built&&m->id&&!root.empty()){recorded=libraryAvatar(m->id);identity=root==recorded;}
+     if(!identity){bindingDeferred(m->name,"a non-world renderer's avatar identity is not verified (renderer "+(root.empty()?std::string("?"):root)+", bone library "+(built?std::string("not needed: built"):recorded.empty()?std::string("none"):recorded)+")");continue;}}
+    if(bindBuild(r,mesh,fp,m,targets))break;
    }
   }catch(const std::exception& ex){log("bind-after-error",ex.what());}inTick=false;}
 
@@ -1050,7 +1436,12 @@ struct Runtime::Impl {
 
  // ---------------------------------------------------------------- tick
  bool boneRefreshPending()const{return ctl.refreshBones&&(boneRefreshDone!=ctl.refreshBones||boneRefreshDoneId!=ctl.refreshBonesCharacter);}
- void consume(){std::optional<ControlState> c;std::string cerr;std::deque<BoneResult> bones;{std::lock_guard<std::mutex> l(sm);c.swap(pendingControl);cerr.swap(controlError);bones.swap(boneResults);if(scannedFresh){models=scanned;scannedFresh=false;}}
+ void consume(){std::optional<ControlState> c;std::string cerr;std::deque<BoneResult> bones;std::deque<TextureResult> textures;{std::lock_guard<std::mutex> l(sm);c.swap(pendingControl);cerr.swap(controlError);bones.swap(boneResults);textures.swap(textureResults);if(scannedFresh){models=scanned;scannedFresh=false;}}
+  if(timelineOn()){timelineMeshes.clear();for(auto& m:models)for(auto& p:m.parts)if(p.hasTarget)timelineMeshes.insert(baseMesh(p.target.mesh));}
+  // Background texture reads for variant switches: hand the pixels to their set (if it is still there).
+  for(auto& t:textures){Set* s=nullptr;for(auto& x:sets)if(x->path==t.path&&x->generation==t.generation){s=x.get();break;}if(!s)continue;
+   if(!t.error.empty()){log("texture-read-error",s->name+": "+t.error);continue;}
+   for(auto& kv:t.materials){auto it=s->mats.find(kv.first);if(it!=s->mats.end()&&!it->second.loaded()&&kv.second.loaded()){it->second.main=kv.second.main;it->second.light=kv.second.light;it->second.normal=kv.second.normal;}}}
   for(auto& b:bones){if(b.library)libraryPending.erase(b.id);else manualPending=false;
    if(b.error.empty()){if(b.library){
      if(b.refresh&&b.refresh==ctl.refreshBones&&b.id==ctl.refreshBonesCharacter){boneRefreshDone=b.refresh;boneRefreshDoneId=b.id;libraryRead.erase(b.id);log("bone-refresh-complete",std::to_string(b.id)+": request "+std::to_string(b.refresh));}
@@ -1072,7 +1463,12 @@ struct Runtime::Impl {
   if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel);
    if(!renderControlSeen){renderControlSeen=true;renderMarkSeen=c->renderMark;}
    if(c->logLevel!=int(Level::Debug))renderMarkSeen=c->renderMark;
-   ctl=*c;handoff::publishControl(ctl.enabled);if(!diagnosticOnly){failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();bindingRejected.clear();bindingStamp.clear();}}
+   bool expMaterials=c->exp.gameMaterials!=ctl.exp.gameMaterials||c->exp.slotTextures!=ctl.exp.slotTextures;if(!(c->exp==ctl.exp))log("experiments",c->exp.text());
+   ctl=*c;handoff::publishControl(ctl.enabled);
+   // gameMaterials or slotTextures switched: every attached renderer gets the other kind of materials now (adopted copies
+   // only for slotTextures, whose overrides are their own).
+   if(expMaterials)for(auto& kv:attachments){auto& a=*kv.second;try{if(!a.adopted||a.slotMode||(ctl.exp.slotTextures&&!a.set->originalMaterials))applyMaterials(a);}catch(const std::exception& ex){log("experiment-error",a.set->name+": "+ex.what());}}
+   if(!diagnosticOnly){failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();bindingRejected.clear();bindingStamp.clear();}}
 
   if(!cerr.empty())log("control-error",cerr);}
  void tick(uint64_t now){if(inTick)return;bindingNow=now;if(now<next){guard(now);return;}inTick=true;next=now+100;
@@ -1081,6 +1477,7 @@ struct Runtime::Impl {
    // consume() may replace `models`: hand-off pointers into it are dropped first and set again below.
    wantedNow.clear();bindingTargets.clear();bindingReady=false;if(!worker.background()){workerTick(now);}consume();ch=current();renderTick(now);bindingStats();
    if(ch.config!=shownCharacter){shownCharacter=ch.config;log("character",ch.entity?std::to_string(ch.config):std::string("none"));}
+   glowTick();mirrorTick(now);
    // Reuse the verified Type discovery only here, on the existing serial Tick.
    // Diagnostic hooks never call Runtime::Impl and never scan all objects.
    if(handoff::canSeed()&&now>=handoffTypeRetry){handoffTypeRetry=now+1000;
@@ -1100,10 +1497,14 @@ struct Runtime::Impl {
    if(now>=restorePruneAt){restorePruneAt=now+500;pruneRestoreBackups();}
    if(!ctl.enabled){bool done=true;if(!sets.empty()||!attachments.empty())done=releaseAll();status(done?"disabled":"waiting",done?"":"正在恢复原模型；暂时失败的渲染器会单独重试",{},{});inTick=false;return;}
    auto wanted=chooseModels();wantedNow=wanted;std::set<std::string> wantedPaths;for(auto* m:wanted)wantedPaths.insert(m->path);
+   preload(wanted,wantedPaths);processPendingBinds(now);saveVerified();
    for(auto& kv:attachments)if(wantedSet(*kv.second->set))guardMaterials(*kv.second,now);
+   slotCheck(now);
    // Sets no longer wanted give their renderers back and stay built for quick switching back: released after a minute
    // unused, or sooner, oldest first, while they hold more than 256 MiB together. Wanted sets stay built while unused,
    // so the hand-off can attach them the moment the character appears.
+   // Mesh experiments switched: models built with the other vertex data are built again.
+   {std::vector<Set*> stale;for(auto& s:sets)if(s->meshKey!=ctl.exp.meshKey())stale.push_back(s.get());for(Set* x:stale){log("experiment-rebuild",x->name);releaseSet(x);}}
    bool restoring=false;for(auto& s:sets)if(!wantedPaths.count(s->path)&&!detachSet(*s))restoring=true;
    {std::vector<Set*> idle;for(auto& s:sets){bool attached=false;for(auto& a:attachments)attached|=a.second->set==s.get();if(attached)s->used=now;else if(!wantedPaths.count(s->path))idle.push_back(s.get());}
     std::sort(idle.begin(),idle.end(),[](Set* a,Set* b){return a->used>b->used;});uint64_t kept=0;
@@ -1148,10 +1549,11 @@ struct Runtime::Impl {
 };
 Runtime::Runtime(Engine e,std::string pkg,std::string priv,std::string media,bool threaded):p(std::make_unique<Impl>(std::move(e),std::move(pkg),std::move(priv),std::move(media),threaded)){}
 Runtime::~Runtime()=default; // Engine cleanup requires shutdown() on the game thread; the worker is joined here.
-void Runtime::tick(uint64_t now){p->tick(now);}
-void Runtime::spawned(Ptr go)noexcept{try{p->spawned(go);}catch(...){}}
-void Runtime::spawnedAfter()noexcept{try{p->spawnedAfter();}catch(...){}}
-Ptr Runtime::bindMesh(Ptr renderer,Ptr mesh)noexcept{try{return p->bindMesh(renderer,mesh);}catch(...){return mesh;}}
-void Runtime::meshBound(Ptr renderer)noexcept{try{p->meshBound(renderer);}catch(...){}}
-void Runtime::shutdown(){handoff::disarm();p->renderBinding.clear();p->renderRecorder.reset();p->renderReader.reset();if(p->releaseAll()){p->pruneRestoreBackups(true);p->freeOwned(p->handoffTypeRoots);}}
+// Every engine call below these entry points is GIBox's own (glow trace: "GIBox" rather than "game").
+void Runtime::tick(uint64_t now){glow::OwnScope own;p->tick(now);}
+void Runtime::spawned(Ptr go)noexcept{glow::OwnScope own;try{p->spawned(go);}catch(...){}}
+void Runtime::spawnedAfter()noexcept{glow::OwnScope own;try{p->spawnedAfter();}catch(...){}}
+Ptr Runtime::bindMesh(Ptr renderer,Ptr mesh)noexcept{glow::OwnScope own;try{return p->bindMesh(renderer,mesh);}catch(...){return mesh;}}
+void Runtime::meshBound(Ptr renderer)noexcept{glow::OwnScope own;try{p->meshBound(renderer);}catch(...){}}
+void Runtime::shutdown(){glow::OwnScope own;glow::trace().armed.store(false);glow::trace().mirrorOn.store(false);handoff::disarm();p->renderBinding.clear();p->renderRecorder.reset();p->renderReader.reset();if(p->releaseAll()){p->pruneRestoreBackups(true);p->freeOwned(p->handoffTypeRoots);p->freeOwned(p->slotRoots);p->slotBlock=0;}}
 }

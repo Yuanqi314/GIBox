@@ -196,6 +196,20 @@ class AppState(private val activity: Activity) {
         dismiss = dismiss,
     )
     fun setVariable(mod: Importer.Mod, variable: String, value: Int) = save("保存") { Control.setVariable(game, mod.name, variable, value) }
+    /** Material experiments (debug): read back on every recomposition through `revision`. */
+    fun experiment(key: String): Boolean = Control.experiment(game, key)
+    fun experimentMs(): Int = Control.experimentMs(game)
+    fun experimentInt(key: String): Int = Control.experimentInt(game, key)
+    fun setExperiment(key: String, value: Any) = save("保存实验设置") {
+        Control.setExperiment(game, key, value)
+        AppLog.info(game, LOGGER, "调试实验 $key = $value")
+    }
+    /** MOD 跟随游戏的材质特效 (control.json "effectMirror"), read back through `revision` like the experiments. */
+    fun effectMirror(): Boolean = Control.effectMirror(game)
+    fun setEffectMirror(on: Boolean) = save("保存") {
+        Control.setEffectMirror(game, on)
+        AppLog.info(game, LOGGER, "MOD 跟随游戏的材质特效 = $on")
+    }
     /** 显示替换 开/关 for a model with its own on/off switch (model.json "replaceWhen"). */
     fun setReplacing(mod: Importer.Mod, variants: Variants, on: Boolean) = save("保存") {
         val change = variants.switchTo(on, variants.current(game, mod.name))
@@ -248,8 +262,24 @@ class AppState(private val activity: Activity) {
             open(Screen.Pick(name, picked, pending, null, before))
         }
     }
-    /** Confirmed on the character page. */
-    fun confirm(pick: Screen.Pick, avatar: Characters.Avatar) {
+    /** Model INIs of a package with several schemes (relative paths); fewer than two: nothing to choose. */
+    fun schemes(dir: File?): List<String> = dir?.let { Importer.schemes(it) } ?: emptyList()
+    fun scheme(dir: File?): String = dir?.let { Importer.scheme(it) } ?: ""
+    /** Another INI scheme for an imported mod: stored, and converted again if it already was. */
+    fun chooseScheme(mod: Importer.Mod, rel: String) {
+        val source = mod.source ?: return
+        if (rel == scheme(source)) return
+        try { Importer.setScheme(source, rel); AppLog.info(game, LOGGER, "${mod.name} 改用 INI 方案 $rel") }
+        catch (e: Throwable) { fail("选择 INI 方案", e, null); return }
+        refresh()
+        if (mod.converted && mod.id in 10000000..10001999) convert(source, mod.id)
+    }
+    /** Confirmed on the character page; `scheme` is the INI chosen there for a package with several. */
+    fun confirm(pick: Screen.Pick, avatar: Characters.Avatar, scheme: String? = null) {
+        val dir = pick.pending ?: pick.source
+        if (scheme != null && dir != null) {
+            try { Importer.setScheme(dir, scheme) } catch (e: Throwable) { fail("选择 INI 方案", e, null); return }
+        }
         val pending = pick.pending
         if (pending == null) {
             closeTop()

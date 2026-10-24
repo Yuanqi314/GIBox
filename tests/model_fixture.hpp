@@ -14,6 +14,7 @@ struct Spec {
  bool skeleton=true;          // bone names + bindposes; without them the game's own bone order is used
  std::string target;          // Part0's mesh identity (fingerprint JSON); empty: learned in game
  bool textures=false;         // Material0 with a 1x1 main texture and a lightmap; otherwise the original material
+ unsigned extraMaterials=0;   // with textures: Material1..N as well, each with its own 1x1 main texture
  bool channels=false;         // colors, tangents and uv2, as the converter writes them
  std::string variants;        // "variants" JSON; empty: none
  std::vector<std::string> draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0}]"};  // one list per combination
@@ -39,7 +40,8 @@ inline void writeModel(const std::string& dir,const Spec& s=Spec()){
  if(!s.target.empty())part+=",\"target\":"+s.target;
  if(s.version>=2)part+=",\"draws\":"+s.draws[0]+"}";else{part+=",\"draws\":[";for(size_t i=0;i<s.draws.size();i++)part+=(i?",":"")+s.draws[i];part+="]}";}
  std::string material="{\"name\":\"Material0\",\"original\":true}";
- if(s.textures){Bytes px(4,255);auto main=view(blob,px);auto light=view(blob,px);material="{\"name\":\"Material0\",\"main\":{\"width\":1,\"height\":1,\"data\":"+main+"},\"lightmap\":{\"width\":1,\"height\":1,\"data\":"+light+"}}";}
+ if(s.textures){Bytes px(4,255);auto main=view(blob,px);auto light=view(blob,px);material="{\"name\":\"Material0\",\"main\":{\"width\":1,\"height\":1,\"data\":"+main+"},\"lightmap\":{\"width\":1,\"height\":1,\"data\":"+light+"}}";
+  for(unsigned i=1;i<=s.extraMaterials;i++){Bytes c(4,uint8_t(i));auto v=view(blob,c);material+=",{\"name\":\"Material"+std::to_string(i)+"\",\"main\":{\"width\":1,\"height\":1,\"data\":"+v+"}}";}}
  std::string names="[";for(size_t i=0;i<s.names.size();i++)names+=(i?",":"")+quote(s.names[i]);names+="]";
  std::string json="{\"format\":\"gibox-model\",\"version\":"+std::to_string(s.version)+",\"name\":"+quote(std::filesystem::path(dir).filename().string())+",\"generation\":"+quote(s.generation)
   +",\"character\":{\"id\":"+std::to_string(s.id)+",\"names\":"+names+"}"+(s.variants.empty()?"":",\"variants\":"+s.variants)

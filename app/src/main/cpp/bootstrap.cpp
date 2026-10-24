@@ -63,6 +63,10 @@ extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv*
  std::thread([pkg,priv]{try{bootStatus(pkg,"waiting","等待 libyuanshen.so");Image image;for(unsigned n=0;n<480&&!image.base;n++){dl_iterate_phdr(findImage,&image);if(!image.base)std::this_thread::sleep_for(std::chrono::milliseconds(500));}ms::require(image.base!=0,"libyuanshen.so load timeout");
  auto actual=ms::loadedBuildId(image.base,image.ph,image.count,sizeof(ElfW(Phdr)));if(actual!=ms::abi::buildId){bootStatus(pkg,"buildid-mismatch","实际 Build ID："+actual);return;}
  ms::Engine engine(image.base);
+ // Debug glow trace only (glow_trace.hpp): the image's extent, and Dobby as the inline hook installer.
+ for(size_t i=0;i<image.count;i++)if(image.ph[i].p_type==PT_LOAD)engine.size=std::max<uintptr_t>(engine.size,image.ph[i].p_vaddr+image.ph[i].p_memsz);
+ engine.hook=[base=image.base](uintptr_t rva,void* replacement,void** original){
+  return DobbyHook(reinterpret_cast<void*>(base+rva),reinterpret_cast<dobby_dummy_func_t>(replacement),reinterpret_cast<dobby_dummy_func_t*>(original))==0&&*original;};
  // Debug readback only: exported names from this exact image, never a new fixed RVA.
  engine.namedExport=[base=image.base](const char* name)->ms::Ptr{
   void* handle=dlopen("libyuanshen.so",RTLD_NOW|RTLD_NOLOAD);

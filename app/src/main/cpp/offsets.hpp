@@ -45,7 +45,15 @@ enum Offset:uintptr_t {
  // il2cpp Reflection::GetTypeObject(const Il2CppType*) -> System.Type; IL2CPP typeof code calls it right before 0x8bf5d8c.
  typeObject=0x43066f4,
  // il2cpp Class::FromIl2CppType(const Il2CppType*, bool) -> Il2CppClass*; reads the type enum at +0xA.
- classFromType=0x4307304
+ classFromType=0x4307304,
+ // Debug experiment "slotTextures" (0.7.21, from dump.cs): mod textures per draw slot on the game's own materials.
+ // EDCOENBDHKC.OMKNLIHGPJJ.IBKLJFNMENG(): the game's shared MaterialPropertyBlock; only its class is used (for our own).
+ blockShared=0xa26f2e8,
+ // MaterialPropertyBlock: .ctor(), Clear(), SetTexture(int, Texture), GetTexture(int).
+ blockCtor=0xe90efac,blockClear=0xe90f120,blockSetTexture=0xe90fbb0,blockGetTexture=0xe910290,
+ // Renderer: GetPerMaterialPropertyBlock(block, index), SetPerMaterialPropertyBlock(block, index), AllowPerMaterialProp(),
+ // SetAllowPerMaterialProp(bool), SetPerMaterialCustomPropertyTexture(matID, propID, Texture, updateHash).
+ getSlotBlock=0x8dc1f84,setSlotBlock=0x8dc1f88,allowSlotProps=0x8dc1f7c,setAllowSlotProps=0x8dc1f80,setSlotCustomTexture=0x8dc2170
 };
 // First 16 code bytes of the hand-off and binding entries (from the handoff and locator captures);
 // the hand-off hook is installed only when all match.

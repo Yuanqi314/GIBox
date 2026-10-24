@@ -10,6 +10,8 @@ def run(cmd):
 flags=['-std=c++17','-Wall','-Wextra','-Werror','-Iapp/src/main/cpp','-Ithird_party/bcdec']
 run(['g++',*flags,'tests/core_test.cpp','app/src/main/cpp/runtime.cpp','app/src/main/cpp/dds.cpp','-o',out/'core_test'])
 run([out/'core_test'])
+run(['g++',*flags,'-pthread','tests/glow_test.cpp','-o',out/'glow_test'])
+run([out/'glow_test'])
 if (root/'tests/runtime_test.cpp').exists():
     run(['g++',*flags,'-pthread','tests/runtime_test.cpp','app/src/main/cpp/runtime.cpp','-o',out/'runtime_test'])
     run([out/'runtime_test'])

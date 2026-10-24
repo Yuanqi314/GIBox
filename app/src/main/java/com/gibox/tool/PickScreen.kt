@@ -2,6 +2,7 @@ package com.gibox.tool
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,6 +46,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
+/** A scheme's file name without .ini; the folder too when two schemes share a name. */
+fun schemeLabel(rel: String, all: List<String>): String {
+    val name = rel.substringAfterLast('/').replace(Regex("(?i)\\.ini$"), "")
+    return if (all.count { it.substringAfterLast('/').equals(rel.substringAfterLast('/'), true) } > 1) rel.replace(Regex("(?i)\\.ini$"), "") else name
+}
+
 /**
  * Full page for choosing the mod's character: search by ID or name, the guessed character first marked （推荐）, one tap
  * selects, and only 确定 starts the import (or the re-conversion). Leaving the page imports nothing.
@@ -56,6 +64,10 @@ fun PickScreen(state: AppState, pick: Screen.Pick) {
     var chosen by remember(pick) { mutableIntStateOf(0) }
     val list = remember(guess, query) { Characters.ordered(guess, query) }
     val selected = Characters.byId(chosen)
+    val dir = pick.pending ?: pick.source
+    val schemes = remember(pick) { state.schemes(dir) }
+    var scheme by remember(pick) { mutableStateOf(state.scheme(dir).takeIf { it in schemes }) }
+    val needScheme = schemes.size > 1 && scheme == null
     Scaffold(
         topBar = {
             TopAppBar(
@@ -73,15 +85,15 @@ fun PickScreen(state: AppState, pick: Screen.Pick) {
                     Column(Modifier.weight(1f)) {
                         Text(if (selected == null) "还没有选择" else "已选：${selected.name}", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            if (selected == null) "点一个角色，再点确定" else "${selected.id}" + if (recorded.contains(selected.id)) " · 已记录骨骼" else "",
+                            if (needScheme) "先在上面选一套 INI 方案" else if (selected == null) "点一个角色，再点确定" else "${selected.id}" + if (recorded.contains(selected.id)) " · 已记录骨骼" else "",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     val height = ButtonDefaults.MediumContainerHeight
                     Button(
-                        onClick = { selected?.let { state.confirm(pick, it) } },
-                        enabled = selected != null,
+                        onClick = { selected?.let { state.confirm(pick, it, if (schemes.size > 1) scheme else null) } },
+                        enabled = selected != null && !needScheme,
                         shapes = ButtonDefaults.shapesFor(height),
                         modifier = Modifier.heightIn(min = height),
                         contentPadding = ButtonDefaults.contentPaddingFor(height),
@@ -95,6 +107,20 @@ fun PickScreen(state: AppState, pick: Screen.Pick) {
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
+            if (schemes.size > 1) {
+                Text(
+                    "这个 MOD 有 ${schemes.size} 套 INI 方案，选一套转换（之后可在 MOD 详情里更换）",
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (scheme == null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    for (s in schemes) FilterChip(selected = s == scheme, onClick = { scheme = s }, label = { Text(schemeLabel(s, schemes)) })
+                }
+            }
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },

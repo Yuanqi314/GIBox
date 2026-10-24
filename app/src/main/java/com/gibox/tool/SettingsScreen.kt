@@ -1,6 +1,8 @@
 package com.gibox.tool
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,6 +13,9 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedListItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.ListItemDefaults
@@ -18,12 +23,14 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.dp
 import com.alorma.compose.settings.ui.expressive.SettingsGroup
 import com.alorma.compose.settings.ui.expressive.SettingsMenuLink
 import com.alorma.compose.settings.ui.expressive.SettingsRadioButton
+import com.alorma.compose.settings.ui.expressive.SettingsSwitch
 
 private val SERVERS = listOf("com.miHoYo.Yuanshen", "com.miHoYo.ys.bilibili")
 
@@ -78,20 +85,90 @@ fun SettingsScreen(state: AppState) {
                     )
                 }
             }
+            if (state.logLevel == "debug") item {
+                // Only while the log level is 调试. The trace and the slot textures take effect at once; the other experiments one at
+                // a time, then restart the game and switch characters once.
+                val rev = state.revision
+                val games = remember(rev) { state.experiment("gameMaterials") }
+                val colors = remember(rev) { state.experiment("neutralColors") }
+                val uv2 = remember(rev) { state.experiment("noUv2") }
+                val trace = remember(rev) { state.experiment("glowTrace") }
+                val ms = remember(rev) { state.experimentMs() }
+                val slots = remember(rev) { state.experimentInt("slotTextures") }
+                SettingsGroup(title = { SectionTitle("材质实验（调试）") }, verticalArrangement = gap) {
+                    SettingsSwitch(
+                        state = trace,
+                        title = { Text("追踪游戏对材质的写入") },
+                        subtitle = { Text("不改画面。切人、装上模型和「标记画面异常」时，把谁改了哪个参数、改成什么写进日志") },
+                        shapes = ListItemDefaults.segmentedShapes(0, 6),
+                        onCheckedChange = { state.setExperiment("glowTrace", it) },
+                    )
+                    SettingsSwitch(
+                        state = games,
+                        title = { Text("只换网格，材质用游戏自己的") },
+                        subtitle = { Text("贴图会不对；看还发不发光") },
+                        shapes = ListItemDefaults.segmentedShapes(1, 6),
+                        onCheckedChange = { state.setExperiment("gameMaterials", it) },
+                    )
+                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(2, 6)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("贴图用按槽覆盖（保留游戏材质）", style = MaterialTheme.typography.titleSmall)
+                            Text("不复制材质，MOD 的贴图按绘制槽盖到游戏材质上；选后马上生效，日志里看 slot-textures", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                for ((value, label) in listOf(0 to "关（复制材质）", 1 to "按槽属性块", 2 to "按槽自定义贴图")) {
+                                    FilterChip(selected = slots == value, onClick = { state.setExperiment("slotTextures", value) }, label = { Text(label) })
+                                }
+                            }
+                        }
+                    }
+                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(3, 6)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("挂上后第一次重新复制材质", style = MaterialTheme.typography.titleSmall)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                for ((value, label) in listOf(0 to "默认 1.5 秒", 300 to "0.3 秒", 600 to "0.6 秒")) {
+                                    FilterChip(selected = ms == value, onClick = { state.setExperiment("firstRefreshMs", value) }, label = { Text(label) })
+                                }
+                            }
+                        }
+                    }
+                    SettingsSwitch(
+                        state = colors,
+                        title = { Text("顶点色改为原模型的常用值") },
+                        subtitle = { Text("模型会重新构建") },
+                        shapes = ListItemDefaults.segmentedShapes(4, 6),
+                        onCheckedChange = { state.setExperiment("neutralColors", it) },
+                    )
+                    SettingsSwitch(
+                        state = uv2,
+                        title = { Text("第二套 UV 清零") },
+                        subtitle = { Text("模型会重新构建") },
+                        shapes = ListItemDefaults.segmentedShapes(5, 6),
+                        onCheckedChange = { state.setExperiment("noUv2", it) },
+                    )
+                }
+            }
             item {
+                val mirror = remember(state.revision) { state.effectMirror() }
                 SettingsGroup(title = { SectionTitle("高级") }, verticalArrangement = gap) {
+                    SettingsSwitch(
+                        state = mirror,
+                        title = { Text("MOD 跟随游戏的材质特效") },
+                        subtitle = { Text("出场溶解等特效在 MOD 上同样播放并恢复；关掉后 MOD 不显示这些特效，刚换上模型时可能残留元素色光") },
+                        shapes = ListItemDefaults.segmentedShapes(0, 3),
+                        onCheckedChange = { state.setEffectMirror(it) },
+                    )
                     SettingsMenuLink(
                         title = { Text("导出当前角色骨骼") },
                         subtitle = { Text("游戏里有角色在场时，导出一份带时间的骨骼目录，供手动转换用") },
                         icon = { Icon(Icons.Filled.Person, contentDescription = null) },
-                        shapes = ListItemDefaults.segmentedShapes(0, 2),
+                        shapes = ListItemDefaults.segmentedShapes(1, 3),
                         onClick = { state.exportBones() },
                     )
                     SettingsMenuLink(
                         title = { Text("手动转换（旧流程）") },
                         subtitle = { Text("直接指定骨骼文件夹、角色 ID 和部件映射，不经过 Mods 列表") },
                         icon = { Icon(Icons.Filled.Build, contentDescription = null) },
-                        shapes = ListItemDefaults.segmentedShapes(1, 2),
+                        shapes = ListItemDefaults.segmentedShapes(2, 3),
                         onClick = { state.open(Screen.Manual) },
                     )
                 }

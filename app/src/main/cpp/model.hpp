@@ -92,15 +92,20 @@ inline void activeDraws(const std::vector<DrawSpec>& draws,const Assignment& a,s
  if(subs.empty()&&!draws.empty()){subs.push_back({0,0});rows.push_back({draws[0].row.name,0});}
  require(subs.size()<=64,"More than 64 draws at once");}
 struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;std::vector<DrawSpec> draws;std::vector<std::pair<std::string,Bytes>> channels;std::vector<std::string> sourceBones;std::vector<int> sourceParents;Bytes sourceBinds;};
-struct MaterialFile {bool original=true;std::shared_ptr<Texture> main,light,normal;};
-struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;};
+// Where a texture sits in model.bin (checked against the file when the manifest is read); its pixels are read only for
+// the materials an assignment draws (readTextures), so a model with many variants does not hold every texture at once.
+struct TexRef {unsigned w=0,h=0;uint64_t off=0,len=0;bool present()const{return len>0;}};
+struct MaterialFile {bool original=true;std::shared_ptr<Texture> main,light,normal;TexRef mainRef,lightRef,normalRef;
+ bool loaded()const{return original||main!=nullptr;}};
+struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;uint64_t blobSize=0;uint32_t blobCrc=0;};
 
 namespace detail {
 // model.bin, checked whole (size, CRC-32 streamed in 1 MiB steps) before any view is read from it; views are then read
 // one by one, so a model never sits in memory twice.
 class Blob {std::ifstream f;uint64_t n=0;public:
- Blob(const std::string& path,uint64_t size,uint32_t crc):f(path,std::ios::binary|std::ios::ate){
-  require(bool(f),"Cannot read: "+path);auto end=f.tellg();require(end>=0&&uint64_t(end)==size,"model.bin: size differs from model.json (copied incompletely?)");n=size;f.seekg(0);
+ // verify=false: the same file (inode, time, size) was checked whole before (runtime cache); size still checked.
+ Blob(const std::string& path,uint64_t size,uint32_t crc,bool verify=true):f(path,std::ios::binary|std::ios::ate){
+  require(bool(f),"Cannot read: "+path);auto end=f.tellg();require(end>=0&&uint64_t(end)==size,"model.bin: size differs from model.json (copied incompletely?)");n=size;f.seekg(0);if(!verify)return;
   std::vector<uint8_t> buf(1<<20);uint32_t c=0;for(uint64_t left=n;left;){auto k=size_t(std::min<uint64_t>(left,buf.size()));f.read(reinterpret_cast<char*>(buf.data()),k);require(bool(f),"Short read: "+path);c=crc32(buf.data(),k,c);left-=k;}
   require(c==crc,"model.bin: checksum mismatch (damaged file)");}
  uint64_t size()const{return n;}
@@ -111,13 +116,18 @@ inline Bytes view(const Json& v,Blob& blob,uint64_t expect,const std::string& wh
  require(v.type==Json::Array&&v.array.size()==2,"View "+what);auto off=jnum(v.array[0],0,blob.size(),what+" offset"),len=jnum(v.array[1],0,blob.size(),what+" length");
  require(off%16==0,what+": misaligned");require(len==expect,what+": wrong length");require(off+len<=blob.size(),what+": outside model.bin");return blob.read(off,len);}
 inline void finite(const Bytes& b,const std::string& what){for(size_t i=0;i+4<=b.size();i+=4)require(std::isfinite(f32(b.data()+i)),what+": not a finite number");}
+inline TexRef textureRef(const Json& t,uint64_t size,const std::string& what){
+ auto w=unsigned(juint(t,"width",1,model::maxTexture)),h=unsigned(juint(t,"height",1,model::maxTexture));const auto& v=jfield(t,"data");
+ require(v.type==Json::Array&&v.array.size()==2,"View "+what);auto off=jnum(v.array[0],0,size,what+" offset"),len=jnum(v.array[1],0,size,what+" length");
+ require(off%16==0,what+": misaligned");require(len==4ull*w*h,what+": wrong length");require(off+len<=size,what+": outside model.bin");return {w,h,off,len};}
 inline std::shared_ptr<Texture> texture(const Json& t,Blob& blob,const std::string& what){
  auto w=unsigned(juint(t,"width",1,model::maxTexture)),h=unsigned(juint(t,"height",1,model::maxTexture));
  return std::make_shared<Texture>(Texture{w,h,view(jfield(t,"data"),blob,4ull*w*h,what)});}
 }
 
 /** Reads and checks a model folder. Nothing partially valid is returned: any problem throws with what and where. */
-inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir){
+// allTextures=false: geometry and texture positions only; readTextures() fetches the pixels that are needed.
+inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allTextures=true,bool verify=true){
  auto m=JsonParser(manifestText(dir)).parse();auto summary=summaryOf(m);
  auto out=std::make_shared<ModelFile>();out->name=summary.name;out->path=dir;out->generation=summary.generation;out->id=summary.id;out->names=summary.names;
  const auto& flags=m.at("flags");if(flags.type!=Json::Null){out->originalMaterials=jbool(flags,"originalMaterials",false);out->diffuseOnly=jbool(flags,"diffuseOnly",false);}
@@ -125,14 +135,18 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir){
  // The data file: exact size and CRC-32 before any view is taken from it.
  const auto& blobInfo=jfield(m,"blob");require(jstr(blobInfo,"file",64)=="model.bin","blob.file must be model.bin");
  auto size=juint(blobInfo,"size",1,model::maxBlob);auto crc=uint32_t(juint(blobInfo,"crc32",0,0xffffffffull));
- detail::Blob blob(dir+"/model.bin",size,crc);
+ detail::Blob blob(dir+"/model.bin",size,crc,verify);
  // Materials first: draws refer to them by name.
  for(auto& mt:jarr(m,"materials",1,model::maxMaterials)){auto name=jstr(mt,"name",64);require(safeName(name)&&!out->materials.count(name),"Material name: "+name);MaterialFile f;f.original=jbool(mt,"original",false);
-  if(!f.original){f.main=detail::texture(jfield(mt,"main"),blob,name+".main");
-   if(mt.at("lightmap").type!=Json::Null){f.light=detail::texture(mt.at("lightmap"),blob,name+".lightmap");}
-   if(mt.at("normalmap").type!=Json::Null){f.normal=detail::texture(mt.at("normalmap"),blob,name+".normalmap");}
-   if(out->diffuseOnly){f.light.reset();f.normal.reset();}}
+  if(!f.original){f.mainRef=detail::textureRef(jfield(mt,"main"),size,name+".main");
+   if(mt.at("lightmap").type!=Json::Null){f.lightRef=detail::textureRef(mt.at("lightmap"),size,name+".lightmap");}
+   if(mt.at("normalmap").type!=Json::Null){f.normalRef=detail::textureRef(mt.at("normalmap"),size,name+".normalmap");}
+   if(out->diffuseOnly){f.lightRef={};f.normalRef={};}
+   if(allTextures){f.main=std::make_shared<Texture>(Texture{f.mainRef.w,f.mainRef.h,blob.read(f.mainRef.off,f.mainRef.len)});
+    if(f.lightRef.present())f.light=std::make_shared<Texture>(Texture{f.lightRef.w,f.lightRef.h,blob.read(f.lightRef.off,f.lightRef.len)});
+    if(f.normalRef.present())f.normal=std::make_shared<Texture>(Texture{f.normalRef.w,f.normalRef.h,blob.read(f.normalRef.off,f.normalRef.len)});}}
   out->materials[name]=f;}
+ out->blobSize=size;out->blobCrc=crc;
  const auto& parts=jarr(m,"parts",1,model::maxParts);
  for(size_t pi=0;pi<parts.size();pi++){const auto& p=parts[pi];const auto& ps=summary.parts[pi];PartFile f;
   unsigned n=unsigned(juint(p,"vertices",1,model::maxVertices)),ni=unsigned(juint(p,"indices",3,model::maxIndices));require(ni%3==0,ps.name+": index count not a multiple of 3");
@@ -166,6 +180,18 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir){
   else for(auto& dr:jarr(p,"draws",1,model::maxPartDraws)){auto d=drawOf(dr);d.when=whenOf(dr.at("when"),out->variants,ps.name);f.draws.push_back(d);}
   out->parts.push_back(std::move(f));}
  return out;}
+// Pixels for the named materials, read from model.bin later on (a variant switch, or a build whose variant changed after
+// the preload). The folder must still be the same conversion: same generation and the same model.bin size.
+inline void readTextures(const std::string& dir,const std::string& generation,uint64_t blobSize,std::map<std::string,MaterialFile>& materials,const std::set<std::string>& names){
+ bool any=false;for(auto& n:names){auto it=materials.find(n);if(it!=materials.end()&&!it->second.loaded())any=true;}if(!any)return;
+ auto m=JsonParser(manifestText(dir)).parse();require(jstr(m,"generation",64)==generation,"model.json changed: convert again or reload");
+ std::ifstream f(dir+"/model.bin",std::ios::binary|std::ios::ate);require(bool(f),"Cannot read: "+dir+"/model.bin");auto end=f.tellg();require(end>=0&&uint64_t(end)==blobSize,"model.bin changed: convert again or reload");
+ auto get=[&](const TexRef& r){Bytes b(size_t(r.len),0);f.seekg(std::streamoff(r.off));f.read(reinterpret_cast<char*>(b.data()),std::streamsize(r.len));require(bool(f),"Short read: model.bin");return std::make_shared<Texture>(Texture{r.w,r.h,std::move(b)});};
+ for(auto& n:names){auto it=materials.find(n);if(it==materials.end()||it->second.loaded())continue;auto& mf=it->second;
+  mf.main=get(mf.mainRef);if(mf.lightRef.present())mf.light=get(mf.lightRef);if(mf.normalRef.present())mf.normal=get(mf.normalRef);}}
+// The materials an assignment draws, over all parts.
+inline std::set<std::string> materialsDrawn(const std::vector<PartFile>& parts,const Assignment& a){std::set<std::string> out;std::vector<Submesh> subs;std::vector<Material> rows;
+ for(auto& p:parts){activeDraws(p.draws,a,subs,rows);for(auto& r:rows)out.insert(r.name);}return out;}
 
 // ---------------------------------------------------------------- learned.json (runtime-written)
 struct Learned {unsigned id=0;std::map<std::string,Fingerprint> targets;};
@@ -197,7 +223,8 @@ inline void validateSkeleton(unsigned id,const std::vector<SkeletonRenderer>& re
 }
 // Read back by the runtime: a character showing only a lower level of detail (the world Traveler on some devices) can
 // build on it when its bones and bindposes are exactly the full mesh's recorded here.
-inline std::vector<SkeletonRenderer> readSkeleton(const std::string& file){auto b=read(file,64*1024*1024);auto j=JsonParser(std::string(b.begin(),b.end())).parse();
+inline std::vector<SkeletonRenderer> readSkeleton(const std::string& file,std::string* root=nullptr){auto b=read(file,64*1024*1024);auto j=JsonParser(std::string(b.begin(),b.end())).parse();
+ if(root){*root=j.at("root").type==Json::String?j.at("root").string:"";}
  require(j.type==Json::Object&&j.at("format").type==Json::String&&j.at("format").string=="gibox-skeleton","skeleton.json: not a GIBox skeleton");std::vector<SkeletonRenderer> out;
  for(auto& r:jarr(j,"renderers",1,64)){SkeletonRenderer x;x.name=jstr(r,"name",256);x.target=fingerprintOf(jfield(r,"target"));
   for(auto& n:jarr(r,"bones",1,512)){require(n.type==Json::String,"skeleton.json: bone name");x.bones.push_back(n.string);}

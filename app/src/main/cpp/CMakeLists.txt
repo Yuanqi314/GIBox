@@ -16,5 +16,6 @@ FetchContent_MakeAvailable(dobby_source)
 add_library(gibox SHARED runtime.cpp bootstrap.cpp dds.cpp)
 target_include_directories(gibox PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/bcdec")
 target_link_libraries(gibox PRIVATE dobby_static log dl)
-target_compile_options(gibox PRIVATE -Wall -Wextra -fexceptions)
+# Frame pointers: the glow trace walks two frames up from a hooked call to name its callers.
+target_compile_options(gibox PRIVATE -Wall -Wextra -fexceptions -fno-omit-frame-pointer)
 target_link_options(gibox PRIVATE -Wl,-z,max-page-size=16384)

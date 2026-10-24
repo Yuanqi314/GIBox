@@ -198,8 +198,9 @@ public final class Characters {
      * three times, every INI section ([TextureOverrideCitlaliBody]) and resource file name (CitlaliHeadDiffuse.dds) once.
      * Characters in the bone library also match by the model name the game itself gave them.
      */
-    public static Guess guess(File modRoot, String importedAs, List<ModLibrary.Character> library) throws Exception {
-        Map<String, Integer> counts = new HashMap<>(); File ini = ModLibrary.ini(modRoot);
+    public static Guess guess(File modRoot, String importedAs, List<ModLibrary.Character> library) throws Exception { return guess(modRoot, ModLibrary.ini(modRoot), importedAs, library); }
+    public static Guess guess(File modRoot, File ini, String importedAs, List<ModLibrary.Character> library) throws Exception {
+        Map<String, Integer> counts = new HashMap<>();
         count(importedAs == null ? "" : importedAs, 3, counts); count(modRoot.getName(), 3, counts); count(ini.getName().replaceFirst("(?i)\\.ini$", ""), 3, counts);
         for (String l : new String(Files.readAllBytes(ini.toPath()), StandardCharsets.UTF_8).split("\\r?\\n")) {
             String t = l.trim();

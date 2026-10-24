@@ -54,6 +54,20 @@ public final class Control {
     public static int logThreshold(String pkg) { return AppLog.threshold(logLevel(pkg)); }
     public static synchronized void setLogLevel(String pkg, String level) throws Exception { JSONObject j = load(pkg); j.put("logLevel", level); save(pkg, j); }
     /** A monotonically increasing marker; game retains the preceding 30 seconds only while logLevel=debug. */
+    /** Material experiments (control.json "experiments"; read by the game, debug only): glowTrace, gameMaterials,
+     *  neutralColors, noUv2 (booleans), firstRefreshMs (0 = default 1.5 s) and slotTextures (0 off, 1 per-material
+     *  property block, 2 per-material custom texture). */
+    public static boolean experiment(String pkg, String key) { JSONObject x = load(pkg).optJSONObject("experiments"); return x != null && x.optBoolean(key, false); }
+    public static int experimentMs(String pkg) { return experimentInt(pkg, "firstRefreshMs"); }
+    public static int experimentInt(String pkg, String key) { JSONObject x = load(pkg).optJSONObject("experiments"); return x == null ? 0 : x.optInt(key, 0); }
+    public static synchronized void setExperiment(String pkg, String key, Object value) throws Exception {
+        JSONObject j = load(pkg); JSONObject x = j.optJSONObject("experiments"); if (x == null) x = new JSONObject();
+        x.put(key, value); j.put("experiments", x); save(pkg, j);
+    }
+    /** The game's material effects (switch-in dissolve and others) repeated on GIBox's material copies (control.json
+     *  "effectMirror", read by the game; on unless set to false). */
+    public static boolean effectMirror(String pkg) { return load(pkg).optBoolean("effectMirror", true); }
+    public static synchronized void setEffectMirror(String pkg, boolean on) throws Exception { JSONObject j = load(pkg); j.put("effectMirror", on); save(pkg, j); }
     public static synchronized void requestRenderMark(String pkg) throws Exception {
         JSONObject j = load(pkg);
         if (!"debug".equals(j.optString("logLevel", "info"))) throw new IllegalStateException("请先把日志等级设为调试，再复现异常");

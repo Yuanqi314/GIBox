@@ -66,7 +66,7 @@ public final class Importer {
         File root = pendingRoot(modsRoot); if (!root.isDirectory() && !root.mkdirs()) throw new IllegalStateException("无法创建：" + root);
         File dir = new File(root, ModLibrary.modelName(stripZip(source.name()))); ModelConverter.remove(dir);
         if (!dir.mkdirs()) throw new IllegalStateException("无法创建：" + dir);
-        try { source.copyTo(dir, log); ModLibrary.modRoot(dir); return dir; }
+        try { source.copyTo(dir, log); ModLibrary.check(dir); return dir; }
         catch (Exception e) { ModelConverter.remove(dir); throw e; }
     }
     /** Moves a prepared mod to Mods/<name>, replacing a previous copy of that name; the old copy's modelswap.txt is kept. */
@@ -74,7 +74,10 @@ public final class Importer {
         File dest = new File(modsRoot, ModLibrary.modelName(name));
         Map<String, String> keep = dest.isDirectory() ? ModLibrary.overrides(dest) : new LinkedHashMap<>();
         ModelConverter.remove(dest); Files.move(pending.toPath(), dest.toPath(), StandardCopyOption.ATOMIC_MOVE);
-        if (!keep.isEmpty() && !new File(dest, "modelswap.txt").isFile()) for (Map.Entry<String, String> e : keep.entrySet()) ModLibrary.setOverride(dest, e.getKey(), e.getValue());
+        // The previous copy's choices (character, mapping, name) carry over unless this import made its own; a stored
+        // INI scheme only while that INI still exists in the new files.
+        Map<String, String> now = ModLibrary.overrides(dest);
+        for (Map.Entry<String, String> e : keep.entrySet()) if (!now.containsKey(e.getKey()) && (!e.getKey().equals("ini") || ModConfig.scheme(dest, e.getValue()) != null)) ModLibrary.setOverride(dest, e.getKey(), e.getValue());
         return dest;
     }
     public static void discard(File pending) { try { if (pending != null) ModelConverter.remove(pending); } catch (Exception ignored) {} }
@@ -88,7 +91,7 @@ public final class Importer {
      */
     public static File stage(File source, File modsRoot, String name, StringBuilder log) throws Exception {
         if (!modsRoot.isDirectory() && !modsRoot.mkdirs()) throw new IllegalStateException("无法创建 Mods 文件夹：" + modsRoot);
-        if (source.isDirectory() && inside(source, modsRoot)) { ModLibrary.modRoot(source); log.append("使用 Mods 文件夹中的：").append(source).append('\n'); return source; }
+        if (source.isDirectory() && inside(source, modsRoot)) { ModLibrary.check(source); log.append("使用 Mods 文件夹中的：").append(source).append('\n'); return source; }
         if (source.isDirectory() && inside(modsRoot, source)) throw new IllegalArgumentException("不能导入包含 Mods 文件夹的目录：" + source);
         File pending = prepare(file(source), modsRoot, log);
         try { return commit(pending, modsRoot, name); } finally { discard(pending); }
@@ -101,7 +104,8 @@ public final class Importer {
 
     /** The character the mod most likely belongs to, from the name it was imported under and its INI. */
     public static Characters.Guess guess(File mod, String importedAs, File boneRoot) {
-        try { return Characters.guess(ModLibrary.modRoot(mod), importedAs, ModLibrary.library(boneRoot)); }
+        try { File ini = ModLibrary.schemes(mod).size() > 1 && !ModLibrary.overrides(mod).containsKey("ini") ? ModConfig.geometryInis(mod).get(0) : ModLibrary.mainIni(mod);
+            return Characters.guess(ini.getParentFile(), ini, importedAs, ModLibrary.library(boneRoot)); }
         catch (Exception e) { return new Characters.Guess(); }
     }
 
@@ -110,15 +114,24 @@ public final class Importer {
      * Converts a staged mod for character `id` into modelsRoot/<name> (replacing the previous conversion) and records
      * the choice in the mod's modelswap.txt, so a re-import or re-conversion keeps it.
      */
+    /** The model INIs to choose from (relative paths); fewer than two: nothing to choose. */
+    public static List<String> schemes(File mod) { try { return ModLibrary.schemes(mod); } catch (Exception e) { return new ArrayList<>(); } }
+    /** The chosen scheme, or "" when the package has only one. */
+    public static String scheme(File mod) { String s = ModLibrary.overrides(mod).get("ini"); return s == null ? "" : s; }
+    public static void setScheme(File mod, String rel) throws Exception {
+        if (ModConfig.scheme(mod, rel) == null) throw new IllegalArgumentException("不是这个 MOD 里的模型 INI：" + rel);
+        ModLibrary.setOverride(mod, "ini", rel);
+    }
     public static Result convert(File mod, int id, File modelsRoot, File boneRoot, ModelConverter.TextureDecoder decoder, StringBuilder log) throws Exception {
         if (id < 10000000 || id > 10001999) throw new IllegalArgumentException("角色 ID 无效：" + id);
-        File src = ModLibrary.modRoot(mod); ModLibrary.setOverride(mod, "id", Integer.toString(id));
+        File ini = ModLibrary.mainIni(mod), src = ini.getParentFile(); ModLibrary.setOverride(mod, "id", Integer.toString(id));
         Map<String, String> o = ModLibrary.overrides(mod); String name = ModLibrary.modelName(o.containsKey("name") ? o.get("name") : mod.getName());
         ModLibrary.Character recorded = ModLibrary.recorded(boneRoot, id); Characters.Avatar avatar = Characters.byId(id);
         // A record of a lower level of detail (made right after loading, before 0.6.5) has a shorter bone list than the
         // full model the mod is made for: it is not used. The game records the full model the next time the character appears.
         String lodLibrary = recorded != null ? recorded.lodMesh : ""; if (!lodLibrary.isEmpty()) recorded = null;
-        ModelConverter.Options opt = new ModelConverter.Options().mapping(o.containsKey("map") ? o.get("map") : "").variants(true).replace(true).fallback("Body");
+        ModelConverter.Options opt = new ModelConverter.Options().mapping(o.containsKey("map") ? o.get("map") : "").variants(true).replace(true).fallback("Body").ini(ini);
+        if (o.containsKey("ini")) log.append("INI 方案：").append(o.get("ini")).append('\n');
         opt.source(mod.getAbsolutePath(), ModLibrary.signature(mod));
         Result r = new Result(); r.id = id; r.library = recorded != null;
         log.append("角色：").append(Characters.nameOf(id)).append("（").append(id).append("）").append(r.library ? "，使用骨骼库：" + recorded.bones : lodLibrary.isEmpty() ? "，骨骼库里还没有这个角色：按游戏原骨骼顺序转换" : "，骨骼库里这个角色的记录是低精度模型 " + lodLibrary + "，不使用：按游戏原骨骼顺序转换").append('\n');

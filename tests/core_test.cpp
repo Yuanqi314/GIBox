@@ -130,6 +130,16 @@ int main(int argc,char**argv){
  Fingerprint t{"Body","Avatar_Body_LOD1",23521,3,142},live{"Body","avatar_body (Clone)",23521,3,142};assert(matches(t,live)&&fingerprintOf(JsonParser(fingerprintJson(t)).parse()).mesh==t.mesh);
  assert(lowerLod("Body_LOD3")&&lowerLod("body_lod1 (Clone)")&&lowerLod("Body_LOD12 Instance")&&!lowerLod("Body")&&!lowerLod("Body_LOD0")&&!lowerLod("Body_LOD")&&!lowerLod("Body_LODx")&&!lowerLod("Lod1_Body"));
  live.mesh="avatar_body Instance";assert(matches(t,live));live.vertices++;assert(!matches(t,live));live.vertices--;live.mesh="Avatar_Face";assert(!matches(t,live));
+ // Texture positions without pixels; readTextures fetches only the named materials, and refuses another conversion.
+ {Spec lz;lz.textures=true;lz.extraMaterials=2;fixture::writeModel(root+"/lazy",lz);auto m=loadModelFile(root+"/lazy",false);
+  assert(m->materials.size()==3&&!m->materials.at("Material0").main&&m->materials.at("Material0").mainRef.present()&&m->materials.at("Material0").lightRef.present()&&!m->materials.at("Material1").lightRef.present());
+  readTextures(root+"/lazy",m->generation,m->blobSize,m->materials,{"Material2"});
+  assert(!m->materials.at("Material0").loaded()&&!m->materials.at("Material1").loaded()&&m->materials.at("Material2").main->pixels==Bytes(4,2));
+  readTextures(root+"/lazy",m->generation,m->blobSize,m->materials,{"Material0"});assert(m->materials.at("Material0").main->pixels==Bytes(4,255)&&m->materials.at("Material0").light);
+  auto full=loadModelFile(root+"/lazy");assert(full->materials.at("Material1").main->pixels==Bytes(4,1));
+  auto again=loadModelFile(root+"/lazy",false);fixture::writeModel(root+"/lazy",lz.gen("2"));bool refused=false;
+  try{readTextures(root+"/lazy",again->generation,again->blobSize,again->materials,{"Material1"});}catch(const std::exception& ex){refused=std::string(ex.what()).find("model.json changed")!=std::string::npos;}assert(refused);
+  Assignment a;std::vector<PartFile> none;assert(materialsDrawn(m->parts,a)==std::set<std::string>{"Material0"}&&materialsDrawn(none,a).empty());}
  std::filesystem::remove_all(root);
- std::cout<<"Native core: PASS (GIBox model format: manifest, model.bin views, CRC-32, value/range/reference checks, variants, learned.json, skeleton.json; bones, JSON, ELF notes, DDS, targets)\n";
+ std::cout<<"Native core: PASS (GIBox model format: manifest, model.bin views, CRC-32, value/range/reference checks, variants, on-demand textures, learned.json, skeleton.json; bones, JSON, ELF notes, DDS, targets)\n";
 }

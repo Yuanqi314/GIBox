@@ -72,14 +72,25 @@ public final class CompatibilityTest {
         ok(log.toString().contains("重复 Present")&&log.toString().contains("重复按键")&&log.toString().contains("未复刻 PC 着色器")&&log.toString().contains("face.ini"),"compatibility decisions and limits must be visible");
         // Two actual geometry INIs must never silently pick one, even when both have a face sidecar.
         GimiPatternsTest.put(src,"second.ini",text);boolean refused=false;
-        try{ModLibrary.modRoot(archive);}catch(IllegalArgumentException e){refused=e.getMessage().contains("多份模型 INI");}ok(refused,"ambiguous geometry must be refused");
+        try{ModLibrary.modRoot(archive);}catch(IllegalArgumentException e){refused=e.getMessage().contains("套 INI 方案");}ok(refused,"ambiguous geometry must be refused until a scheme is chosen");
+        // Several model INIs are schemes: listed, the choice stored in modelswap.txt, and only that one converted.
+        ModLibrary.check(archive);List<String> schemes=Importer.schemes(archive);
+        ok(schemes.equals(Arrays.asList("HoHE/Citlali.ini","HoHE/second.ini")),"schemes are the model INIs, not help/face sidecars: "+schemes);
+        boolean help=false,escape=false;try{Importer.setScheme(archive,"HoHE/help.ini");}catch(IllegalArgumentException e){help=true;}
+        try{Importer.setScheme(archive,"../escape.ini");}catch(IllegalArgumentException e){escape=true;}ok(help&&escape,"only model INIs inside the mod can be chosen");
+        Importer.setScheme(archive,"HoHE/second.ini");ok(Importer.scheme(archive).equals("HoHE/second.ini")&&ModLibrary.mainIni(archive).getName().equals("second.ini")&&ModLibrary.modRoot(archive).equals(src),"the stored scheme is used");
+        File chosenOut=new File(base,"scheme-out");StringBuilder chosenLog=new StringBuilder();
+        ModelConverter.convert(src,null,chosenOut,10000073,new ModelConverter.Options().variants(true).fallback("Body").ini(ModLibrary.mainIni(archive)),DECODE,chosenLog);
+        ok(chosenLog.toString().contains("模型主 INI：second.ini")&&chosenLog.toString().contains("未导入辅助 INI：Citlali.ini"),"conversion uses the chosen scheme: "+chosenLog);
+        Files.delete(new File(src,"second.ini").toPath());refused=false;try{ModLibrary.mainIni(archive);}catch(IllegalArgumentException e){refused=e.getMessage().contains("已不存在");}ok(refused,"a removed scheme asks again");
+        ModLibrary.setOverride(archive,"ini",null);GimiPatternsTest.put(src,"second.ini",text);
         // Conflicting duplicate model sections remain errors; only the known harmless control duplicates are merged.
         Files.delete(new File(src,"second.ini").toPath());GimiPatternsTest.put(src,"Citlali.ini",text+"\n[TextureOverrideCitlaliHead]\nib = ResourceCitlaliHeadIB\n");
         refused=false;try{new ModelConverter.Ini(src);}catch(IllegalArgumentException e){refused=e.getMessage().contains("重复 INI 段");}ok(refused,"do not merge conflicting geometry sections");
     }
     public static void main(String[] args)throws Exception{
         File base=Files.createTempDirectory("gibox-compatibility-").toFile();
-        try{legacy(base);hohe(base);System.out.println("Compatibility: PASS (layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity)");}
+        try{legacy(base);hohe(base);System.out.println("Compatibility: PASS (layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
         finally{ModelConverter.remove(base);}
     }
 }

@@ -102,6 +102,20 @@ fun DetailScreen(state: AppState, name: String) {
                     )
                 }
             }
+            val schemes = mod.source?.let { state.schemes(it) }.orEmpty()
+            if (schemes.size > 1) item {
+                val current = state.scheme(mod.source)
+                SettingsGroup(title = { SectionTitle("INI 方案") }, verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(0, 1)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(if (mod.converted) "换一套会重新转换" else "选一套，再选择角色转换", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                for (s in schemes) FilterChip(selected = s == current, onClick = { state.chooseScheme(mod, s) }, label = { Text(schemeLabel(s, schemes)) })
+                            }
+                        }
+                    }
+                }
+            }
             if (variants != null && (variants.values.keys.any { !variants.hidden(it) } || variants.hasSwitch())) item {
                 SettingsGroup(title = { SectionTitle("款式") }, verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                     val names = variants.values.keys.filter { !variants.hidden(it) }

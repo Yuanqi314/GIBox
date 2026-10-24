@@ -37,10 +37,28 @@ final class ModConfig {
         }
         return vertex && draw;
     }
+    /** Every INI with model geometry under dir (several = alternative schemes of one package). */
+    static List<File> geometryInis(File dir) { List<File> out = new ArrayList<>(); for (File f : allInis(dir)) if (geometry(f)) out.add(f); return out; }
+    /** The scheme's path as stored in modelswap.txt ("ini"): relative to the mod folder, with forward slashes. */
+    static String relative(File dir, File ini) { return dir.toPath().toAbsolutePath().normalize().relativize(ini.toPath().toAbsolutePath().normalize()).toString().replace('\\', '/'); }
+    /** A stored scheme, only if it is still a model INI inside dir. */
+    static File scheme(File dir, String rel) {
+        if (rel == null || rel.isEmpty() || rel.startsWith("/") || rel.contains("..")) return null;
+        try {
+            File f = new File(dir, rel).getCanonicalFile(); String root = dir.getCanonicalPath() + File.separator;
+            if (!f.getPath().startsWith(root) || !f.isFile() || !f.getName().toLowerCase(Locale.ROOT).endsWith(".ini") || !geometry(f)) return null;
+            return f;
+        } catch (IOException e) { return null; }
+    }
+    /** The model INI to convert: the stored scheme, else the only one. Several without a choice ask for one. */
+    static File find(File dir, String rel) {
+        if (rel != null && !rel.isEmpty()) { File f = scheme(dir, rel); if (f == null) throw new IllegalArgumentException("选择的 INI 方案已不存在：" + rel + "，请重新选择"); return f; }
+        return find(dir);
+    }
     private static File choose(List<File> files) {
         List<File> models = new ArrayList<>(); for (File f : files) if (geometry(f)) models.add(f);
         if (models.size() == 1) return models.get(0);
-        if (models.size() > 1) throw new IllegalArgumentException("找到多份模型 INI，请分开导入或先合并：" + models);
+        if (models.size() > 1) throw new IllegalArgumentException("这个 MOD 有 " + models.size() + " 套 INI 方案，请先选择要用哪一套");
         if (files.size() == 1) return files.get(0); // Preserve a precise converter error for texture-only inputs.
         throw new IllegalArgumentException(files.isEmpty() ? "找不到 MOD 的 INI 文件"
             : "只有帮助或贴图配置，没有可确定的模型主 INI：" + files);

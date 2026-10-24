@@ -42,8 +42,10 @@ public final class ModelConverter {
         final LinkedHashMap<String,TreeSet<Integer>> excludedChoices=new LinkedHashMap<>();
         final LinkedHashSet<String> compatibility=new LinkedHashSet<>();
         final File file;
-        Ini(File root)throws Exception {
-            file=ModConfig.mainIni(root);List<Section> blocks=new ArrayList<>();
+        Ini(File root)throws Exception {this(root,null);}
+        /** chosen: the INI scheme picked for a package with several model INIs; null picks the only one in root. */
+        Ini(File root,File chosen)throws Exception {
+            file=chosen!=null?chosen:ModConfig.mainIni(root);List<Section> blocks=new ArrayList<>();
             Section current=null;for(String raw:ModConfig.source(file).split("\\r?\\n")) {
                 String l=clean(raw);if(l.isEmpty())continue;
                 if(l.startsWith("[")&&l.endsWith("]")){String n=l.substring(1,l.length()-1).trim();current=new Section(n);blocks.add(current);}
@@ -543,7 +545,9 @@ public final class ModelConverter {
         }
     }
     public static final class Options {
-        public String mapping="",fallback=null,sourcePath=null,sourceSignature=null;public boolean variants=false;public boolean replace=false;public List<String> names=new ArrayList<>();
+        public String mapping="",fallback=null,sourcePath=null,sourceSignature=null;public File ini=null;
+        /** The INI scheme to convert when the mod folder holds several model INIs. */
+        public Options ini(File f){ini=f;return this;}public boolean variants=false;public boolean replace=false;public List<String> names=new ArrayList<>();
         public Options mapping(String m){mapping=m==null?"":m;return this;}public Options variants(boolean v){variants=v;return this;}public Options replace(boolean r){replace=r;return this;}
         /** Renderer for draws whose names match no renderer and share no IB hash with one that does (one-click import uses "Body"). */
         public Options fallback(String r){fallback=r;return this;}
@@ -556,7 +560,7 @@ public final class ModelConverter {
     private static int generationCounter=0;
     /** Converts one PC mod into one GIBox model folder. Variant combinations share the vertices; each has its own draws. */
     public static File convert(File src,File boneDir,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log)throws Exception {
-        Ini ini=new Ini(src);List<Bones> bones;
+        Ini ini=new Ini(src,o.ini);List<Bones> bones;
         log.append("模型主 INI：").append(ini.file.getName()).append('\n');
         for(File sibling:ModConfig.allInis(src))if(!sibling.equals(ini.file))log.append("未导入辅助 INI：").append(src.toPath().relativize(sibling.toPath())).append("（帮助、菜单或独立贴图配置；不包含在本次模型转换中）\n");
         if(o.variants)for(Map.Entry<String,TreeSet<Integer>> e:ini.excludedChoices.entrySet())
