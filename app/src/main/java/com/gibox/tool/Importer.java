@@ -122,6 +122,8 @@ public final class Importer {
         if (ModConfig.scheme(mod, rel) == null) throw new IllegalArgumentException("不是这个 MOD 里的模型 INI：" + rel);
         ModLibrary.setOverride(mod, "ini", rel);
     }
+    public static boolean animationBoneFallback(File mod) { return "retain-valid".equals(ModLibrary.overrides(mod).get("animationbones")); }
+    public static void setAnimationBoneFallback(File mod, boolean enabled) throws Exception { ModLibrary.setOverride(mod, "animationbones", enabled ? "retain-valid" : null); }
     public static Result convert(File mod, int id, File modelsRoot, File boneRoot, ModelConverter.TextureDecoder decoder, StringBuilder log) throws Exception {
         if (id < 10000000 || id > 10001999) throw new IllegalArgumentException("角色 ID 无效：" + id);
         File ini = ModLibrary.mainIni(mod), src = ini.getParentFile(); ModLibrary.setOverride(mod, "id", Integer.toString(id));
@@ -131,6 +133,7 @@ public final class Importer {
         // full model the mod is made for: it is not used. The game records the full model the next time the character appears.
         String lodLibrary = recorded != null ? recorded.lodMesh : ""; if (!lodLibrary.isEmpty()) recorded = null;
         ModelConverter.Options opt = new ModelConverter.Options().mapping(o.containsKey("map") ? o.get("map") : "").variants(true).replace(true).fallback("Body").ini(ini);
+        opt.animationBoneFallback(animationBoneFallback(mod));
         if (o.containsKey("ini")) log.append("INI 方案：").append(o.get("ini")).append('\n');
         opt.source(mod.getAbsolutePath(), ModLibrary.signature(mod));
         Result r = new Result(); r.id = id; r.library = recorded != null;
@@ -139,7 +142,7 @@ public final class Importer {
         r.model = ModelConverter.convert(src, r.library ? recorded.bones : null, new File(modelsRoot, name), id, opt, decoder, log);
         r.summary = Characters.nameOf(id) + "（" + id + "）" + (r.library ? "：骨骼库已有该角色，进游戏即可替换" : opt.reusedSkeleton ? "：复用本 MOD 已有骨骼记录，目标网格信息已保留"
             : "：骨骼库里还没有该角色，" + (opt.names.isEmpty() ? "需要该角色在大世界出场一次后生效" : "在大世界、队伍界面或角色详情页出现时识别部件"));
-        for (String l : log.toString().split("\n")) if (l.startsWith("款式变量") || l.startsWith("模型动画：") || l.contains("个顶点没有权重")) r.summary += "\n" + l;
+        for (String l : log.toString().split("\n")) if (l.startsWith("款式变量") || l.startsWith("模型动画：") || l.startsWith("动画骨骼兼容：") || l.contains("个顶点没有权重")) r.summary += "\n" + l;
         return r;
     }
 

@@ -128,6 +128,11 @@ public final class ConverterTest {
   // One vertex's weights: a bone listed twice is added up, the largest comes first, the sum is 1.
   {float[] w={.1f,.4f,.2f,0};int[] ids={7,3,7,9};ByteBuffer o=b(32);ModelConverter.tidy(w,ids,o);
    ok(Math.abs(o.getFloat(0)-4/7f)<1e-6&&o.getInt(16)==3&&Math.abs(o.getFloat(4)-3/7f)<1e-6&&o.getInt(20)==7&&o.getFloat(8)==0&&o.getInt(24)==0,"weights tidied");}
+  // The opt-in animation fallback keeps the supported association ratios and still rejects malformed data.
+  {ModelConverter.ExtraBoneFallback fallback=new ModelConverter.ExtraBoneFallback();float[] w={1,.25f,.75f,0};int[] ids={119,2,4,0};fallback.apply(w,ids,114,"Blend.buf",1641);ByteBuffer out=b(32);ModelConverter.cleanWeights(w,ids,114);ModelConverter.tidy(w,ids,out);
+   ok(out.getFloat(0)==.75f&&out.getInt(16)==4&&out.getFloat(4)==.25f&&out.getInt(20)==2&&fallback.vertices==1&&fallback.associations==1,"experimental fallback preserves the relative supported associations");
+   for(float invalid:new float[]{-1,Float.NaN,Float.POSITIVE_INFINITY}){boolean refused=false;try{fallback.apply(new float[]{1,invalid,0,0},new int[]{0,119,0,0},114,"Blend.buf",1);}catch(IllegalArgumentException ex){refused=true;}ok(refused,"fallback still rejects malformed weights");}
+   boolean refused=false;try{fallback.apply(new float[]{1,1,0,0},new int[]{-1,119,0,0},114,"Blend.buf",1);}catch(IllegalArgumentException ex){refused=true;}ok(refused,"fallback must not hide negative indices");}
   // Lumine's Body contains 20 vertices with a fourth, tiny weight on index 114. Test the actual vertex-7891 values,
   // then both conversion paths: named skeleton index validation and synthetic minimum-bone count calculation.
   {float[] w={.5608007311820984f,.3355036675930023f,.1036955714225769f,5.960464477539063e-8f};int[] ids={1,0,2,114};ByteBuffer out=b(32);

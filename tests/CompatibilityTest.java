@@ -118,6 +118,31 @@ public final class CompatibilityTest {
         ok(rejected&&generation.equals(ModelManifest.read(out).generation),"unsupported programs fail before replacing a working conversion");
         GimiPatternsTest.put(src,"Citlali.ini",text);File models=new File(base,"animation-models");models.mkdir();
         Importer.Result result=Importer.convert(src,10000107,models,new File(base,"no-skeleton"),DECODE,new StringBuilder());ok(result.summary.contains("模型动画：3 帧"),"the import dialog must explain full animation conversion");
+        // The additional blend groups of a baked animation are NOT additional observed game bones. Strict remains
+        // the default. A per-mod opt-in can retain supported associations, with provenance and no geometry loss.
+        File library=new File(base,"animation-library/10000107");library.mkdirs();Fixtures.skeleton(library,10000107,"Scene/Avatar_Girl_Catalyst_Citlali",new String[]{"Body"},new String[]{"BoneA","BoneB"},Collections.singletonMap("Body",Fixtures.target("Body",6,2,2)));
+        for(int i=0;i<6;i++){skin.putFloat(i*32,1).putFloat(i*32+4,1).putInt(i*32+16,119).putInt(i*32+20,i%2);}GimiPatternsTest.put(src,"CitlaliBlend.buf",skin.array());
+        rejected=false;try{ModelConverter.convert(src,library,out,10000107,new ModelConverter.Options().replace(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("骨骼索引越界");}
+        ok(rejected&&generation.equals(ModelManifest.read(out).generation),"strict animated import must retain the previous working model");
+        rejected=false;try{ModelConverter.convert(src,null,out,10000107,new ModelConverter.Options().replace(true).animationBoneFallback(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("需要完整骨骼库");}
+        ok(rejected&&generation.equals(ModelManifest.read(out).generation),"fallback cannot guess a palette's valid boundary");
+        byte[] originalBlend=skin.array().clone();StringBuilder fallbackLog=new StringBuilder();ModelConverter.convert(src,library,out,10000107,new ModelConverter.Options().replace(true).animationBoneFallback(true),DECODE,fallbackLog);
+        Map<String,Object> fallbackManifest=Json.obj(Json.read(new File(out,"model.json"),4L<<20),"model"),fallbackAnimation=Json.obj(fallbackManifest.get("animation"),"animation");
+        ok("retain-valid-experimental".equals(fallbackAnimation.get("bonePolicy"))&&fallbackLog.toString().contains("rawWeights=[1.0, 1.0")&&fallbackLog.toString().contains("animation-bone-fallback frame=2"),"lossy policy and original associations must be disclosed");
+        for(Object fr:Json.arr(fallbackAnimation.get("frames"),"frames",3,3)){Map<String,Object> p=Json.obj(Json.arr(Json.obj(fr,"frame").get("parts"),"parts",1,1).get(0),"part");ByteBuffer w=Fixtures.view(out,Json.obj(p.get("data"),"data").get("weights"));
+            ok(Fixtures.number(p,"vertices")==6&&Fixtures.number(p,"indices")==6,"fallback never removes new geometry");for(int i=0;i<6;i++)ok(w.getFloat(32*i)==1&&w.getInt(32*i+16)<2&&w.getFloat(32*i+4)==0,"each vertex keeps its own supported bone");}
+        ok(Arrays.equals(originalBlend,Files.readAllBytes(new File(src,"CitlaliBlend.buf").toPath())),"source blend data remains untouched");
+        String compatibleGeneration=ModelManifest.read(out).generation;skin.putFloat(4,0);GimiPatternsTest.put(src,"CitlaliBlend.buf",skin.array());rejected=false;
+        try{ModelConverter.convert(src,library,out,10000107,new ModelConverter.Options().replace(true).animationBoneFallback(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("有效权重全部引用库外骨骼");}
+        ok(rejected&&compatibleGeneration.equals(ModelManifest.read(out).generation),"all-extra vertices must fail, never borrow a neighbour's weight");
+        GimiPatternsTest.put(src,"Citlali.ini",text+"\n[CustomShaderPose]\nvs = Pose.hlsl\n");rejected=false;try{ModelConverter.convert(src,library,out,10000107,new ModelConverter.Options().replace(true).animationBoneFallback(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("自定义着色器");}ok(rejected,"a custom shader requires its own semantics instead of this fallback");
+        GimiPatternsTest.put(src,"Citlali.ini",text+"\n[CommandListPose]\nvs-t10 = ResourcePose\n");rejected=false;try{ModelConverter.convert(src,library,out,10000107,new ModelConverter.Options().replace(true).animationBoneFallback(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("自定义矩阵资源");}ok(rejected,"matrix resources cannot be ignored");
+        GimiPatternsTest.put(src,"CitlaliBlend.buf",originalBlend);GimiPatternsTest.put(src,"Citlali.ini",text.replace(program,""));rejected=false;
+        try{ModelConverter.convert(src,library,new File(base,"static-fallback-refused"),10000107,new ModelConverter.Options().animationBoneFallback(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("骨骼索引越界");}
+        ok(rejected,"ordinary models keep strict validation even when the per-mod experiment is enabled");GimiPatternsTest.put(src,"Citlali.ini",text);
+        File libraryRoot=library.getParentFile();ok(!Importer.animationBoneFallback(src),"per-mod fallback starts off");Importer.setAnimationBoneFallback(src,true);ok(Importer.animationBoneFallback(src),"per-mod option is read back");
+        result=Importer.convert(src,10000107,models,libraryRoot,DECODE,new StringBuilder());ok(result.summary.contains("动画骨骼兼容：开启（实验）"),"import summary must disclose the experiment");
+        Importer.setAnimationBoneFallback(src,false);rejected=false;try{Importer.convert(src,10000107,models,libraryRoot,DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("骨骼索引越界");}ok(rejected&&!Importer.animationBoneFallback(src),"disabling restores strict conversion");
     }
     public static void main(String[] args)throws Exception{
         File base=Files.createTempDirectory("gibox-compatibility-").toFile();

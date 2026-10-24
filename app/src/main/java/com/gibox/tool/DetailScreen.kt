@@ -103,6 +103,18 @@ fun DetailScreen(state: AppState, name: String) {
                 }
             }
             val schemes = mod.source?.let { state.schemes(it) }.orEmpty()
+            if (mod.source != null && state.logLevel == "debug") item {
+                SettingsGroup(title = { SectionTitle("动画转换实验（调试）") }) {
+                    SettingsSwitch(
+                        state = state.animationBoneFallback(mod.source),
+                        title = { Text("忽略越界骨骼关联") },
+                        subtitle = { Text("仅作用于此 MOD 的逐帧动画转换。保留每个顶点自身的有效权重后重新归一化；需要完整骨骼库，可能改变新增部件的运动。保存后重新转换。") },
+                        enabled = state.busy == null,
+                        shapes = ListItemDefaults.segmentedShapes(0, 1),
+                        onCheckedChange = { state.setAnimationBoneFallback(mod, it) },
+                    )
+                }
+            }
             if (schemes.size > 1) item {
                 val current = state.scheme(mod.source)
                 SettingsGroup(title = { SectionTitle("INI 方案") }, verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {

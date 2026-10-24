@@ -260,6 +260,12 @@ class AppState(private val activity: Activity) {
     /** Model INIs of a package with several schemes (relative paths); fewer than two: nothing to choose. */
     fun schemes(dir: File?): List<String> = dir?.let { Importer.schemes(it) } ?: emptyList()
     fun scheme(dir: File?): String = dir?.let { Importer.scheme(it) } ?: ""
+    fun animationBoneFallback(dir: File?): Boolean = dir?.let { Importer.animationBoneFallback(it) } ?: false
+    fun setAnimationBoneFallback(mod: Importer.Mod, enabled: Boolean) = save("保存动画转换实验") {
+        mod.source?.let { Importer.setAnimationBoneFallback(it, enabled) }
+        AppLog.info(game, LOGGER, "${mod.name} 动画骨骼兼容 = $enabled（下次转换生效）")
+        toast(if (enabled) "已开启动画骨骼兼容，请重新转换此 MOD" else "已恢复严格检查，请重新转换此 MOD")
+    }
     /** Another INI scheme for an imported mod: stored, and converted again if it already was. */
     fun chooseScheme(mod: Importer.Mod, rel: String) {
         val source = mod.source ?: return

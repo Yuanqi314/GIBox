@@ -445,9 +445,24 @@ public final class ModelConverter {
     /** Submeshes and material rows of one renderer part in one variant combination. */
     static final class ComboRows {final List<int[]> subs=new ArrayList<>();final List<String[]> rows=new ArrayList<>();String key(){StringBuilder s=new StringBuilder();for(int i=0;i<subs.size();i++)s.append(subs.get(i)[0]).append(',').append(subs.get(i)[1]).append(':').append(rows.get(i)[0]).append('#').append(rows.get(i)[1]).append(';');return s.toString();}}
     /** One renderer: union of every combination's vertices and index ranges, plus per-combination submeshes. */
-    static final class Group {Bones bones;String name;PackedVertices vertices=new PackedVertices();IntList indices=new IntList();Map<String,int[]> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();List<Object> draws;Group(Bones b,String n){bones=b;name=n;} }
+    static final class Group {Bones bones;String name;PackedVertices vertices=new PackedVertices();IntList indices=new IntList();Map<String,int[]> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();List<Object> draws;final ExtraBoneFallback extraBones=new ExtraBoneFallback();Group(Bones b,String n){bones=b;name=n;} }
     static final class MaterialDef {String name;Resource diffuse,light,normal;}
-    static final class Build {final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final BufferCache cache=new BufferCache();}
+    static final class Build {boolean animationBoneFallback=false;final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final BufferCache cache=new BufferCache();}
+    /** Explicit, lossy import experiment for baked geometry animation, never the default or a PC-equivalence claim.
+     * Keep each vertex's own supported associations; refuse a vertex with no supported association instead of
+     * inventing a bone, borrowing a neighbour, or dropping the vertex. tidy() then normalizes the retained weights. */
+    static final class ExtraBoneFallback {
+        int vertices,associations,min=Integer.MAX_VALUE,max=-1;float keptMin=Float.POSITIVE_INFINITY,keptMax;String first="";
+        void apply(float[] w,int[] ids,int count,String file,int vertex){
+            float total=0;for(float x:w){check(Float.isFinite(x)&&x>=0,"非法权重");total+=x;}check(Float.isFinite(total),"非法权重");if(total==0)return;
+            int bad=0;float kept=0;for(int k=0;k<4;k++)if(w[k]/total>WEIGHT_EPSILON){check(ids[k]>=0,"负骨骼索引："+ids[k]);if(ids[k]>=count)bad++;else kept+=w[k];}
+            if(bad==0)return;check(kept>0,"动画骨骼兼容失败："+file+" 顶点 "+vertex+" 的有效权重全部引用库外骨骼，不能确定如何绑定；未修改已有模型");
+            if(first.isEmpty())first=file+" vertex="+vertex+" rawWeights="+Arrays.toString(w)+" rawIndices="+Arrays.toString(ids);
+            vertices++;associations+=bad;keptMin=Math.min(keptMin,kept);keptMax=Math.max(keptMax,kept);
+            for(int k=0;k<4;k++)if(ids[k]>=count){if(w[k]/total>WEIGHT_EPSILON){min=Math.min(min,ids[k]);max=Math.max(max,ids[k]);}w[k]=0;ids[k]=0;}
+        }
+        String summary(){return vertices+" 个顶点，忽略 "+associations+" 条库外关联，编号 "+min+".."+max+"；保留权重原始总和 "+keptMin+".."+keptMax+"；"+first;}
+    }
     /** Relative to this vertex's total: a little above one float32 ULP at 1. Unused exporter slots can contain a tiny
      * positive residue and a sentinel bone index. Remove that residue before checking indices; real weights still fail. */
     static final float WEIGHT_EPSILON=2e-7f;
@@ -459,9 +474,11 @@ public final class ModelConverter {
         }
         return trimmed;
     }
-    private static Vertex vertex(Resource position,Resource blend,Resource tex,byte[] p,byte[] b,byte[] t,int i,int boneCount){
+    private static Vertex vertex(Resource position,Resource blend,Resource tex,byte[] p,byte[] b,byte[] t,int i,int boneCount,ExtraBoneFallback fallback){
         check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);v.uv=uv(t,to+4);for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(t,to+k));v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);}
-        v.trimmedWeights=cleanWeights(w,ids,boneCount);boolean weighted=false;for(float x:w)weighted|=x>0;if(weighted)tidy(w,ids,wo);else v.unweighted=true;for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
+        if(fallback!=null)fallback.apply(w,ids,boneCount,blend.file.getName(),i);
+        try{v.trimmedWeights=cleanWeights(w,ids,boneCount);}catch(IllegalArgumentException ex){float[] originalWeights=new float[4];int[] originalIndices=new int[4];for(int k=0;k<4;k++){originalWeights[k]=bi.getFloat(bo+4*k);originalIndices[k]=bi.getInt(bo+16+4*k);}throw new IllegalArgumentException(ex.getMessage()+" ["+blend.file.getName()+" vertex="+i+" rawWeights="+Arrays.toString(originalWeights)+" rawIndices="+Arrays.toString(originalIndices)+"]",ex);}
+        boolean weighted=false;for(float x:w)weighted|=x>0;if(weighted)tidy(w,ids,wo);else v.unweighted=true;for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
     }
     /** One vertex's four weights: the same bone listed twice added together, largest first, summing to 1; empty slots 0 on bone 0. */
     static void tidy(float[] w,int[] ids,ByteBuffer out){
@@ -536,7 +553,7 @@ public final class ModelConverter {
             int stride=lower(indices.format).contains("r16_uint")?2:lower(indices.format).contains("r32_uint")?4:indices.stride;check(stride==2||stride==4,"索引格式必须为 R16_UINT 或 R32_UINT");check(ix.length%stride==0,"索引流长度");int count=d.count==-1?ix.length/stride-d.start:d.count;check(count>0&&count%3==0&&(long)d.start+count<=ix.length/stride,"drawindexed 范围");
             // The same draw in several combinations shares one index range.
             String rangeKey=pos.file.getPath()+"|"+blend.file+"|"+tex.file+"|"+indices.file+"|"+stride+"|"+d.start+"|"+count;int[] range=g.ranges.get(rangeKey);
-            if(range==null){String streamId=identity(pos)+"|"+identity(blend)+"|"+identity(tex);int[] remap=g.compact.get(streamId);if(remap==null){remap=new int[Math.min(p.length/pos.stride,Math.min(bl.length/32,t.length/tex.stride))];g.compact.put(streamId,remap);}int start=g.indices.size();ByteBuffer ib=buf(ix);for(int j=0;j<count;j++){int old=stride==2?(ib.getShort((d.start+j)*2)&65535):ib.getInt((d.start+j)*4);check(old>=0&&old<p.length/pos.stride&&old<bl.length/32&&old<t.length/tex.stride,"顶点索引越界");int compact=remap[old]-1;if(compact<0){compact=g.vertices.size();check(compact<500000,"顶点数超限");remap[old]=compact+1;g.vertices.add(vertex(pos,blend,tex,p,bl,t,old,target.count));}g.indices.add(compact);}range=new int[]{start,count};g.ranges.put(rangeKey,range);}
+            if(range==null){String streamId=identity(pos)+"|"+identity(blend)+"|"+identity(tex);int[] remap=g.compact.get(streamId);if(remap==null){remap=new int[Math.min(p.length/pos.stride,Math.min(bl.length/32,t.length/tex.stride))];g.compact.put(streamId,remap);}int start=g.indices.size();ByteBuffer ib=buf(ix);for(int j=0;j<count;j++){int old=stride==2?(ib.getShort((d.start+j)*2)&65535):ib.getInt((d.start+j)*4);check(old>=0&&old<p.length/pos.stride&&old<bl.length/32&&old<t.length/tex.stride,"顶点索引越界");int compact=remap[old]-1;if(compact<0){compact=g.vertices.size();check(compact<500000,"顶点数超限");remap[old]=compact+1;g.vertices.add(vertex(pos,blend,tex,p,bl,t,old,target.count,b.animationBoneFallback?g.extraBones:null));}g.indices.add(compact);}range=new int[]{start,count};g.ranges.put(rangeKey,range);}
             ComboRows rows=g.combos.computeIfAbsent(combo,k->new ComboRows());Resource[] tx=textures(d,rs);String materialKey=path(tx[0])+"|"+path(tx[1])+"|"+path(tx[2]);
             if("8b268d05".equals(d.hash)&&!"nnfix".equals(d.bindings.get("texture-role:layout"))&&tx[0]!=null&&tx[1]!=null&&tx[2]!=null)
                 ini.compatibility.add("已按纳西妲 IB 8b268d05 识别贴图：ps-t0 为法线，ps-t1 为颜色，ps-t2 为光照遮罩（优先于文件名）");
@@ -648,14 +665,19 @@ public final class ModelConverter {
         check(estimate<=budget,"模型几何预计超出转换内存预算（"+estimate/1024/1024+" / "+budget/1024/1024+" MiB）；请减少同时转换的款式或拆分动画资源");
     }
     private static File convertAnimation(Ini ini,File src,List<Bones> bones,Map<String,String> mapping,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log,Animation animation)throws Exception {
+        if(o.animationBoneFallback){for(Bones bone:bones)check(!bone.synthetic,"动画骨骼兼容需要完整骨骼库或本 MOD 已保存的完整骨骼记录，不能用未知的索引上限判断哪些关联可忽略");
+            for(Section section:ini.sections.values()){String n=lower(section.name);check(!n.startsWith("customshader")&&!n.startsWith("shaderoverride"),"动画骨骼兼容暂不支持自定义着色器；需要先实现其矩阵资源和蒙皮规则");
+                for(String line:section.lines){String[] a=kv(line);if(a!=null)check(!a[0].startsWith("vs-t")&&!a[0].startsWith("vs-cb")&&!a[0].startsWith("cs-t")&&!a[0].startsWith("cs-u"),"动画骨骼兼容暂不支持自定义矩阵资源绑定："+a[0]);}}}
         dest=dest.getCanonicalFile();File parent=dest.getParentFile();check(parent.isDirectory()||parent.mkdirs(),"无法创建输出根目录");check(o.replace||!dest.exists(),"输出目录已存在："+dest);
         File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
         log.append("模型动画：").append(animation.values.size()).append(" 帧，按 Present 次数推进；计数周期 ").append(animation.period).append("，完整转换，不合并为款式网格\n");
+        log.append("动画骨骼兼容：").append(o.animationBoneFallback?"开启（实验）：忽略库外关联，保留每个顶点自身的有效权重并重新归一化；可能改变运动，不保证与 PC 等价":"关闭：越界的有效权重仍会拒绝转换").append('\n');
         try{
             Build registry=new Build();Map<String,WeightOrder> weights=new HashMap<>();List<Object> frames=new ArrayList<>(),firstParts=null;String layout=null;
             try(BlobWriter blob=new BlobWriter(new File(tmp,"model.bin"))){
                 for(int frame:animation.values){Map<String,Integer> vars=new LinkedHashMap<>(ini.vars);vars.put(animation.variable,frame);memoryBudget(ini,src,bones,mapping,Collections.singletonList(vars),o.fallback,log);
-                    Build b=new Build();b.materials.putAll(registry.materials);collect(ini,src,bones,mapping,vars,0,b,log,o.fallback);check(!b.groups.isEmpty(),"动画帧没有有效模型绘制："+frame);
+                    Build b=new Build();b.animationBoneFallback=o.animationBoneFallback;b.materials.putAll(registry.materials);collect(ini,src,bones,mapping,vars,0,b,log,o.fallback);check(!b.groups.isEmpty(),"动画帧没有有效模型绘制："+frame);
+                    for(Group g:b.groups.values())if(g.extraBones.vertices>0)log.append("animation-bone-fallback frame=").append(frame).append(' ').append(g.name).append(": ").append(g.extraBones.summary()).append('\n');
                     Variation one=new Variation(ini,new ArrayList<>(),new ArrayList<>());for(Group g:b.groups.values()){fixUnweighted(g);WeightOrder order=weights.get(g.name);if(order==null)weights.put(g.name,new WeightOrder(g.vertices));else if(!order.align(g))animation.stableWeights=false;g.draws=drawTable(g,one,new int[]{0},1,new HashSet<>());g.compact.clear();g.ranges.clear();}b.cache.clear();
                     List<Object> parts=emitParts(b,blob);StringBuilder key=new StringBuilder();for(Object raw:parts){Map<String,Object> p=Json.obj(raw,"part");key.append(p.get("name")).append('|').append(p.get("renderer")).append('|').append(p.get("vertices")).append('|').append(p.get("bones")).append(Json.obj(p.get("data"),"data").keySet());
                         for(Object dr:Json.arr(p.get("draws"),"draws",1,64)){Map<String,Object> d=Json.obj(dr,"draw");key.append('|').append(d.get("material")).append('#').append(d.get("slot"));}}
@@ -665,7 +687,8 @@ public final class ModelConverter {
                 }
                 log.append("动画权重固定排列：").append(animation.stableWeights?"所有帧一致；动态模式不改写权重":"存在实际权重变化；请使用缓存帧网格模式").append('\n');
                 weights.clear();List<Object> materials=emitMaterials(registry,decoder,blob);blob.out.flush();String generation;synchronized(ModelConverter.class){generation=System.currentTimeMillis()+"-"+(++generationCounter);}
-                Map<String,Object> manifest=Json.of("format","gibox-model","version",4,"name",dest.getName(),"generation",generation,"character",Json.of("id",id,"names",new ArrayList<Object>(o.names)),"flags",Json.of("originalMaterials",false,"diffuseOnly",false),"animation",animation.json(frames),"parts",firstParts,"materials",materials,"blob",Json.of("file","model.bin","size",blob.size,"crc32",blob.crc.getValue()));
+                Map<String,Object> animationInfo=animation.json(frames);animationInfo.put("bonePolicy",o.animationBoneFallback?"retain-valid-experimental":"strict");
+                Map<String,Object> manifest=Json.of("format","gibox-model","version",4,"name",dest.getName(),"generation",generation,"character",Json.of("id",id,"names",new ArrayList<Object>(o.names)),"flags",Json.of("originalMaterials",false,"diffuseOnly",false),"animation",animationInfo,"parts",firstParts,"materials",materials,"blob",Json.of("file","model.bin","size",blob.size,"crc32",blob.crc.getValue()));
                 if(o.sourcePath!=null)manifest.put("source",Json.of("path",o.sourcePath,"signature",o.sourceSignature==null?"":o.sourceSignature));
                 write(tmp,"conversion.log",text(log.toString()));write(tmp,"model.json",text(Json.write(manifest)));
             }
@@ -675,6 +698,9 @@ public final class ModelConverter {
     public static final class Options {
         /** Set by convert when the same model's checked, embedded source skeleton was reused. */
         public boolean reusedSkeleton=false;
+        /** Lossy, opt-in experiment, applied only to present-loop geometry animation with a known skeleton. */
+        public boolean animationBoneFallback=false;
+        public Options animationBoneFallback(boolean value){animationBoneFallback=value;return this;}
         public String mapping="",fallback=null,sourcePath=null,sourceSignature=null;public File ini=null;
         /** The INI scheme to convert when the mod folder holds several model INIs. */
         public Options ini(File f){ini=f;return this;}public boolean variants=false;public boolean replace=false;public List<String> names=new ArrayList<>();
