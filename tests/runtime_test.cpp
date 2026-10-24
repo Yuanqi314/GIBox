@@ -318,7 +318,7 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   Ptr good=f->renderer(original);f->world(good);lib.tick(634000);lib.tick(634500);assert(exists(shared6+"/skeletons/10000107/skeleton.json"));lib.shutdown();assert(f->handles.empty());}
  // 18. Why a model waits: before the character is known the scan has not started; then the same mesh at another level of
  //     detail is named with the number that differs (status and log); once LOD0 shows, it attaches.
- {std::string media7=root+"/media7",shared7=media7+"/"+pkg+"/GIBox",models7=shared7+"/models",logFile=shared7+"/GIBox Log.txt";writeModel(models7+"/A",Spec().withTarget(fixture::target("Body")));
+ {std::string media7=root+"/media7",shared7=media7+"/"+pkg+"/GIBox",models7=shared7+"/models",logFile=shared7+"/GIBox Log.txt";writeModel(models7+"/A",Spec().noSkeleton().withTarget(fixture::target("Body")));
   std::filesystem::create_directories(shared7);write(shared7+"/control.json","{\"enabled\":true,\"selected\":[\"A\"]}");
   Ptr lod=f->renderer(f->mesh("Body_LOD1",2));f->world(lod);f->scene={lod};store<uint32_t>(f->manager+0x288,0);
   Runtime why(e,pkg,root+"/private7",media7,false);why.tick(700000);auto st=JsonParser(text(shared7+"/status.json")).parse();
@@ -460,7 +460,7 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   slot.shutdown();assert(f->handles.empty());}
  // 28. Only Body_LOD1 in sight from the start: built on it when its bones and bindposes are exactly the bone library's
  //     record of the full Body; without that record it waits as before.
- {std::string mediaLod=root+"/mediaLod",sharedLod=mediaLod+"/"+pkg+"/GIBox";Spec s;s.withTarget(fixture::target("Body"));writeModel(sharedLod+"/models/Lod",s);
+ {std::string mediaLod=root+"/mediaLod",sharedLod=mediaLod+"/"+pkg+"/GIBox";Spec s;s.noSkeleton().withTarget(fixture::target("Body"));writeModel(sharedLod+"/models/Lod",s);
   Ptr lodMesh=f->mesh("Body_LOD1",2),lod=f->renderer(lodMesh);f->world(lod);f->scene={lod};write(sharedLod+"/control.json","{\"enabled\":true,\"selected\":[\"Lod\"]}");
   Runtime first(e,pkg,root+"/privateLod",mediaLod,false);for(uint64_t t=1700000;t<=1702000;t+=500){first.tick(t);}assert(meshOf(lod)==lodMesh);first.shutdown();
   SkeletonRenderer rec;rec.name="Body";rec.target=fingerprintOf(JsonParser(fixture::target("Body")).parse());rec.bones={"BoneA"};rec.parents={-1};
@@ -469,6 +469,18 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   Runtime second(e,pkg,root+"/privateLod2",mediaLod,false);for(uint64_t t=1710000;t<=1713000;t+=500){second.tick(t);}
   auto log=text(sharedLod+"/GIBox Log.txt");assert(meshOf(lod)!=lodMesh&&log.find("template-lod Lod: Body only shows Body_LOD1")!=std::string::npos&&log.find("attached-lod Lod/Part0 over Body_LOD1")!=std::string::npos);
   second.shutdown();assert(meshOf(lod)==lodMesh&&f->handles.empty());}
+ // A converted legacy mod already contains the same full skeleton proof as the library. The checked preload is
+ // enough when that separate file is missing; a same-sized palette with different names or bindposes is not.
+ {auto mediaE=root+"/embedded-lod-media",sharedE=mediaE+"/"+pkg+"/GIBox";Spec source;source.withTarget(fixture::target("Body"));writeModel(sharedE+"/models/Legacy",source);
+  write(sharedE+"/control.json","{\"enabled\":true,\"selected\":[\"Legacy\"],\"experiments\":{\"animationMode\":2}}");
+  Ptr low=f->mesh("Body_LOD1",2),renderer=f->renderer(low);f->world(renderer);f->scene={renderer};
+  Runtime saved(e,pkg,root+"/embedded-lod-private",mediaE,false);for(uint64_t t=1720000;t<=1723000;t+=500)saved.tick(t);
+  assert(meshOf(renderer)!=low&&!exists(sharedE+"/skeletons/10000107/skeleton.json")&&text(sharedE+"/GIBox Log.txt").find("bones and bindposes equal the model's saved Body")!=std::string::npos);
+  saved.shutdown();assert(meshOf(renderer)==low&&f->handles.empty());
+  Ptr wrong=f->renderer(f->mesh("Body_LOD1",2),"BoneZ");f->world(wrong);f->scene={wrong};auto wrongMesh=meshOf(wrong);unsigned clones=f->meshClones;
+  {Runtime rejected(e,pkg,root+"/embedded-lod-wrong-name",mediaE,false);for(uint64_t t=1730000;t<=1732000;t+=500)rejected.tick(t);assert(meshOf(wrong)==wrongMesh&&f->meshClones==clones);rejected.shutdown();}
+  Ptr movedMesh=f->mesh("Body_LOD1",2),moved=f->renderer(movedMesh);auto bind=f->obj[movedMesh].arrays[abi::getBindposes];store<float>(bind+0x20,2.f);f->world(moved);f->scene={moved};
+  {Runtime rejected(e,pkg,root+"/embedded-lod-wrong-binds",mediaE,false);for(uint64_t t=1740000;t<=1742000;t+=500)rejected.tick(t);assert(meshOf(moved)==movedMesh&&f->meshClones==clones);rejected.shutdown();}assert(f->handles.empty());}
  // 29. A preview's game code instantiates our materials (new pointers, same mod texture). Every kind of off switch
  //     must restore the saved original mesh AND texture. A reclaim must not overwrite the clean material backup.
  for(int mode=0;mode<3;mode++){
@@ -913,7 +925,7 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   auto log=[&]{return text(sharedA+"/GIBox Log.txt");};control(0);for(int n=0;n<8;n++){animated.tick(now);now+=600;}
   auto st=JsonParser(text(sharedA+"/status.json")).parse();auto note=log();
   assert(st.at("state").string=="waiting"&&st.at("models").array.size()==1&&st.at("models").array[0].string=="Other"&&meshOf(other)!=otherMesh&&meshOf(renderer)==low);
-  assert(st.at("detail").string.find("按索引绑定至少 2 根骨骼")!=std::string::npos&&note.find("animation-wait Animated mode=cached stage=target-not-learned playback=not-started")!=std::string::npos&&note.find("Body_LOD1（顶点 2，子网格 1，骨骼 1）")!=std::string::npos&&note.find("animation-ready Animated")==std::string::npos);
+  assert(st.at("detail").string.find("按索引绑定至少 2 根骨骼")!=std::string::npos&&st.at("detail").string.find("不能据此认定游戏必须有同样多的骨骼")!=std::string::npos&&note.find("animation-wait Animated mode=cached stage=target-not-learned playback=not-started")!=std::string::npos&&note.find("Body_LOD1（顶点 2，子网格 1，骨骼 1）")!=std::string::npos&&note.find("animation-ready Animated")==std::string::npos);
   auto once=note.find("animation-wait Animated");assert(note.find("animation-wait Animated",once+1)==std::string::npos);unsigned clones=f->meshClones;
   control(1);animated.tick(now);now+=600;assert(log().find("animation-wait Animated mode=dynamic")!=std::string::npos&&f->meshClones==clones);
   control(2);animated.tick(now);now+=600;assert(log().find("animation-wait Animated mode=paused")!=std::string::npos&&f->meshClones==clones);

@@ -384,6 +384,24 @@ public final class ModelConverter {
             Bones b=new Bones(n,names,binds.array(),target);b.parents=parents;out.add(b);
         }
         return out;}
+    /** A re-conversion can reuse this model's complete source palette when the separate library is unavailable. */
+    static List<Bones> previousBones(File dir,int id)throws Exception {
+        if(!ModelManifest.exists(dir)||id==0)return null;ModelManifest summary=ModelManifest.read(dir);if(summary.id!=id)return null;
+        Map<String,Object> model=Json.obj(Json.read(new File(dir,"model.json"),4L<<20),"model.json");List<Object> parts=Json.arr(model.get("parts"),"parts",1,64);
+        for(Object raw:parts){Map<String,Object> p=Json.obj(raw,"part");if(!(p.get("skeleton") instanceof Map))return null;}
+        Map<String,Object> blob=Json.obj(model.get("blob"),"blob");check("model.bin".equals(blob.get("file")),"已有模型 blob.file 无效");long size=Json.integer(blob.get("size"),"blob.size",1,768L<<20),expected=Json.integer(blob.get("crc32"),"blob.crc32",0,0xffffffffL);
+        File file=new File(dir,"model.bin");java.util.zip.CRC32 crc=new java.util.zip.CRC32();
+        List<Bones> out=new ArrayList<>();Set<String> seen=new HashSet<>();
+        try(RandomAccessFile bin=new RandomAccessFile(file,"r")){check(bin.length()==size,"已有模型数据尺寸不符，不能复用骨骼");byte[] chunk=new byte[65536];for(long left=size;left>0;){int n=(int)Math.min(left,chunk.length);bin.readFully(chunk,0,n);crc.update(chunk,0,n);left-=n;}check(crc.getValue()==expected,"已有模型数据校验失败，不能复用骨骼");
+         for(Object raw:parts){Map<String,Object> p=Json.obj(raw,"part"),sk=Json.obj(p.get("skeleton"),"skeleton"),target=fingerprint(p.get("target"));
+            check(p.get("target")==null||target!=null,"已有模型目标记录无效");if(target!=null&&ModelManifest.lowerLod((String)target.get("mesh")))return null;String name=Json.str(p.get("renderer"),"renderer",256);if(!seen.add(lower(name)))return null;
+            int count=(int)Json.integer(p.get("bones"),"bones",1,512);if(target!=null){check(((Number)target.get("bones")).intValue()==count,"已有模型目标骨骼数不符");check(name.equalsIgnoreCase((String)target.get("renderer")),"已有模型目标渲染器不符");}
+            List<String> names=new ArrayList<>();for(Object value:Json.arr(sk.get("bones"),"skeleton.bones",count,count)){String n=Json.str(value,"bone",256);check(n.indexOf('\t')<0&&n.indexOf('\n')<0&&n.indexOf('\r')<0,"已有模型骨骼名无效");names.add(n);}
+            List<Object> view=Json.arr(sk.get("bindposes"),"bindposes",2,2);long offset=Json.integer(view.get(0),"bindposes offset",0,size),length=Json.integer(view.get(1),"bindposes size",64L*count,64L*count);check(offset<=size-length,"已有模型绑定矩阵越界");
+            byte[] bytes=new byte[(int)length];bin.seek(offset);bin.readFully(bytes);ByteBuffer values=buf(bytes);while(values.hasRemaining())check(Float.isFinite(values.getFloat()),"已有模型绑定矩阵含无效数值");
+            Bones b=new Bones(name,names,bytes,target);if(sk.get("parents")!=null){b.parents=new ArrayList<>();for(Object parent:Json.arr(sk.get("parents"),"parents",count,count))b.parents.add((int)Json.integer(parent,"parent",-1,count-1));}out.add(b);
+        }}return out;
+    }
     /** The original mesh's identity (model.hpp fingerprintOf); one that does not check out is left for the runtime to learn. */
     static Map<String,Object> fingerprint(Object v){
         if(!(v instanceof Map))return null;
@@ -655,6 +673,8 @@ public final class ModelConverter {
         }finally{if(tmp.exists())remove(tmp);}
     }
     public static final class Options {
+        /** Set by convert when the same model's checked, embedded source skeleton was reused. */
+        public boolean reusedSkeleton=false;
         public String mapping="",fallback=null,sourcePath=null,sourceSignature=null;public File ini=null;
         /** The INI scheme to convert when the mod folder holds several model INIs. */
         public Options ini(File f){ini=f;return this;}public boolean variants=false;public boolean replace=false;public List<String> names=new ArrayList<>();
@@ -676,7 +696,9 @@ public final class ModelConverter {
         if(o.variants)for(Map.Entry<String,TreeSet<Integer>> e:ini.excludedChoices.entrySet())
             log.append("款式 ").append(e.getKey()).append(" 按按键列出的值和初始值取 ").append(ini.choices.get(e.getKey())).append("；仅在条件中出现的值不作为可选款式：").append(e.getValue()).append('\n');
         check(o.names.size()<=16,"角色名过多");for(String n:o.names)check(n.matches("[a-z0-9]{3,40}"),"角色名格式："+n);
-        if(boneDir==null){check((id==0&&!o.names.isEmpty())||(id>=10000000&&id<=10001999),"没有骨骼目录时需要角色 ID 或角色名");bones=new ArrayList<>();for(String r:DEFAULT_RENDERERS)bones.add(new Bones(r));if(o.fallback==null)o.fallback="Body";}
+        o.reusedSkeleton=false;List<Bones> saved=null;if(boneDir==null&&o.replace)try{saved=previousBones(dest,id);}catch(Exception ex){log.append("未复用已有骨骼记录：").append(ex.getMessage()).append('\n');}
+        if(saved!=null){bones=saved;o.reusedSkeleton=true;log.append("骨骼复用：独立骨骼库不可用，保留本 MOD 已有转换中的完整骨骼和目标网格记录\n");}
+        else if(boneDir==null){check((id==0&&!o.names.isEmpty())||(id>=10000000&&id<=10001999),"没有骨骼目录时需要角色 ID 或角色名");bones=new ArrayList<>();for(String r:DEFAULT_RENDERERS)bones.add(new Bones(r));if(o.fallback==null)o.fallback="Body";}
         else{check(id>=10000000&&id<=10001999,"角色 ID 越界");bones=bones(boneDir,id);}Map<String,String> map=new LinkedHashMap<>();
         if(!o.mapping.trim().isEmpty())for(String row:o.mapping.split(";")){String[] a=row.trim().split("=",-1);check(a.length==2&&!a[0].trim().isEmpty()&&!a[1].trim().isEmpty(),"映射格式：部件=渲染器;部件=skip");check(map.put(lower(a[0].trim()),a[1].trim())==null,"重复映射");}
         Animation animation=Animation.parse(ini);
@@ -763,7 +785,7 @@ public final class ModelConverter {
     }
     /** Same character before and after a re-conversion: same ID and names in model.json. */
     static boolean sameCharacter(File before,File after){
-        try{ModelManifest a=ModelManifest.read(before),b=ModelManifest.read(after);return a.id==b.id&&a.names.equals(b.names);}catch(Exception e){return false;}
+        try{ModelManifest a=ModelManifest.read(before),b=ModelManifest.read(after);return a.id==b.id&&(a.id!=0||a.names.equals(b.names));}catch(Exception e){return false;}
     }
     static void remove(File f)throws IOException {if(f.isDirectory()){File[] a=f.listFiles();if(a!=null)for(File c:a)remove(c);}Files.deleteIfExists(f.toPath());}
 }

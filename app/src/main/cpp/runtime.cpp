@@ -772,14 +772,23 @@ struct Runtime::Impl {
  // No full mesh in sight, but the controlled character shows a lower LOD of it whose bones (names, order) and bindposes
  // are exactly those the bone library recorded from the full mesh: the skinning is the same, so it can be the template.
  std::optional<Seen> lodTemplate(const ModelInfo& m,const Fingerprint& t,unsigned minBones){
-  if(!m.id||!ch.entity||m.id!=ch.config){return std::nullopt;}auto* lib=libraryRecord(m.id);if(!lib){return std::nullopt;}const SkeletonRenderer* rec=nullptr;
-  for(auto& r:*lib)if(matches(t,r.target)||(normalize(r.name)==normalize(t.renderer)&&r.target.mesh==t.mesh&&r.target.vertices==t.vertices&&r.target.bones==t.bones)){rec=&r;break;}
+  if(!m.id||!ch.entity||m.id!=ch.config){return std::nullopt;}auto* lib=libraryRecord(m.id);const SkeletonRenderer* rec=nullptr;SkeletonRenderer embedded;
+  if(lib)for(auto& r:*lib)if(matches(t,r.target)||(normalize(r.name)==normalize(t.renderer)&&r.target.mesh==t.mesh&&r.target.vertices==t.vertices&&r.target.bones==t.bones)){rec=&r;break;}
+  // The converter also saved the full palette in this model. A missing library file must not discard that proof.
+  // Copy only preloaded, CRC-checked data; no file read is added to a renderer hook. Still require exact names,
+  // order and bindposes below, as on the main branch's library-backed path.
+  std::shared_ptr<ModelFile> saved;
+  if(!lib){std::lock_guard<std::mutex> lock(sm);auto it=loaded.find(m.path);if(it!=loaded.end()&&it->second.generation==m.generation)saved=it->second.data;}
+  if(!lib&&!saved)if(auto* building=findSet(m.path,m.generation))saved=building->data;
+  if(!rec&&saved)for(size_t i=0;i<m.parts.size()&&i<saved->parts.size();i++){auto& part=m.parts[i];auto& data=saved->parts[i];
+   if(!part.hasTarget||!matches(t,part.target)||data.sourceBones.size()!=t.bones||data.sourceBinds.size()!=64ull*t.bones)continue;
+   embedded.name=t.renderer;embedded.target=t;embedded.bones=data.sourceBones;embedded.parents=data.sourceParents;embedded.bindposes=data.sourceBinds;rec=&embedded;break;}
   if(!rec){return std::nullopt;}std::set<Ptr> world;try{for(Ptr r:worldRenderers())world.insert(r);}catch(const std::exception&){return std::nullopt;}
   for(auto& s:seen){if(!world.count(s.renderer)||!alive(s.renderer)||!alive(s.mesh)||!lowerLod(s.fp.mesh)||meshName(s.fp.mesh)!=meshName(t.mesh)||s.fp.bones!=rec->bones.size()||normalize(rendererName(s.renderer))!=normalize(t.renderer))continue;
    if(attachments.count(s.renderer)||skipped.count({s.renderer,load<Ptr>(s.renderer+0x10)})||e.get(abi::getMesh,s.renderer)!=s.mesh||!sameBones(s.renderer,rec->bones))continue;
    Owned tmp;bool same=false;try{Ptr binds=e.get(abi::getBindposes,s.mesh);if(binds){pin(tmp,binds);auto b=arrayBytes(binds,64,512);same=b.size()==rec->bindposes.size()&&std::memcmp(b.data(),rec->bindposes.data(),b.size())==0;}}catch(const std::exception&){same=false;}freeOwned(tmp);
    if(!same||!usableTemplate(s,minBones,true))continue;
-   auto key=m.path+"|"+t.renderer;if(lodLogged.insert(key).second)log("template-lod",m.name+": "+t.renderer+" only shows "+s.fp.mesh+"; its bones and bindposes equal the library's "+t.mesh+", building on it");
+   auto key=m.path+"|"+t.renderer;if(lodLogged.insert(key).second)log("template-lod",m.name+": "+t.renderer+" only shows "+s.fp.mesh+"; its bones and bindposes equal "+(rec==&embedded?"the model's saved ":"the library's ")+t.mesh+", building on it");
    return s;}
   return std::nullopt;}
  std::optional<std::vector<Seen>> templatesFor(const ModelInfo& model,const std::vector<Fingerprint>& targets){std::vector<Seen> out;
@@ -1560,19 +1569,20 @@ struct Runtime::Impl {
   if(w.scan==scanCount&&w.context==context)return w.reason;
   w.scan=scanCount;w.context=context;auto why=staleNote.find(m.path);
   w.reason=why==staleNote.end()?"等待"+(m.id?std::string("该角色"):"名字含 "+m.names[0]+" 的角色")+"出现以识别部件":why->second;
-  std::string details;
+  std::string details;bool animationPaletteMismatch=false;
   if(ch.entity&&m.id==ch.config){auto pool=worldRenderers();
    for(auto& p:m.parts){auto learnedModel=learned.find(m.path);if(p.hasTarget||(learnedModel!=learned.end()&&learnedModel->second.count(p.name)&&learnedModel->second.at(p.name).bones>=p.minBones))continue;
     std::string candidates;unsigned count=0;
     for(Ptr r:pool){if(!alive(r))continue;Ptr mesh=originalMesh(r);if(!alive(mesh))continue;auto fp=fingerprint(mesh);auto rn=rendererName(r);
      if(normalize(rn)!=normalize(p.group)&&normalize(fp.mesh)!=normalize(p.group))continue;
-     candidates+=(candidates.empty()?"":"；")+rn+" / "+describe(fp);if(++count==4)break;}
+     animationPaletteMismatch=animationPaletteMismatch||(m.animated&&p.minBones>fp.bones);candidates+=(candidates.empty()?"":"；")+rn+" / "+describe(fp);if(++count==4)break;}
     details+="\n"+p.name+" 要 "+p.group+(p.minBones?"，按索引绑定至少 "+std::to_string(p.minBones)+" 根骨骼":"，按骨骼名映射")+(candidates.empty()?"；当前角色没有同名部件":"；当前 "+candidates);
     unsigned full=0;for(auto& s:seen){if(std::find(pool.begin(),pool.end(),s.renderer)!=pool.end()||!alive(s.renderer)||lowerLod(s.fp.mesh)||normalize(rendererName(s.renderer))!=normalize(p.group))continue;
      auto* tokens=chains.find({s.renderer,load<Ptr>(s.renderer+0x10)});if(!tokens||!namesMatch(m.names,*tokens)||std::find(tokens->begin(),tokens->end(),"avatar")==tokens->end())continue;
      details+="；场景同角色完整候选 "+describe(s.fp);if(++full==4)break;}}
    if(!details.empty())w.reason+=details;
-   if(w.reason.find("低精度")!=std::string::npos)w.reason+="；请靠近镜头或打开角色详情，让完整模型出现后再试；当前 LOD 的骨骼数不能证明完整模型也相同";
+   if(animationPaletteMismatch)w.reason="当前动画文件按 Unity 骨骼索引解释的范围超过现场骨骼数；PC 新增几何、额外顶点组和权重语义尚需适配，不能据此认定游戏必须有同样多的骨骼。"+w.reason;
+   else if(w.reason.find("低精度")!=std::string::npos)w.reason+="；请靠近镜头或打开角色详情，让完整模型出现后再试；当前 LOD 的骨骼数不能证明完整模型也相同";
   }
   auto detail=context+"|"+w.reason;
   if(w.logged!=detail||now>=w.loggedAt+30000){auto mode=ctl.exp.animationMode==0?"cached":ctl.exp.animationMode==1?"dynamic":"paused";
