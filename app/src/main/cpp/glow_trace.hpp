@@ -13,11 +13,9 @@
 //    native function is hooked; a short entry that is not a branch is skipped and reported, never patched;
 //  * public overloads have the same size as their Impl (an inlined copy), so both are hooked: only the outermost hooked
 //    call on a thread records (writeDepth), the inner ones pass through.
-// The same hooks also carry the effect mirror (control.json "effectMirror", on by default, no debug needed): the game's
-// material effects (switch-in dissolve: shader swap, SHADER_LERP_CHAR_DISSOLVE, _DissolveColor/_DissolveValue, and its
-// restore) are written only to the materials the game holds. A write to such an original is made again, with the same
-// arguments, on each GIBox copy of it, except textures and texture transforms GIBox replaced. A copy taken while an
-// effect runs then also gets the restore; 0.7.19's trace showed copies keeping the dissolve shader and keyword.
+// The hooks are installed for the trace only (Runtime::glowTick: debug log level and experiments.glowTrace both on), at
+// most once per process: a game started without the trace hooks nothing. Switching the trace off stops recording
+// (armed); the entries stay hooked until the game process ends, passing every call straight to the engine.
 //
 // GGCDDCOCKLG is the game's own Material subclass (renderer at +0x18, an int at +0x20 that is logged, not interpreted,
 // two materials at +0x28/+0x30, a private method returning a Material that is followed as the one it writes to). Its overrides are hooked as "intent" with their own depth, so
@@ -273,43 +271,6 @@ constexpr uint8_t kindOf(Op o){switch(o){
  case Op::SetTextureOffset:case Op::SetTextureScale:case Op::SetMainTextureOffset:case Op::SetMainTextureScale:return KindScaleOffset;
  default:return 0;}}
 inline bool keywordIdOp(Op o){return o==Op::EnableKeywordId||o==Op::DisableKeywordId;}
-// Material writes the effect mirror repeats on GIBox copies. Not: the main texture and its transform (always GIBox's),
-// Lerp / CopyPropertiesFrom / CopyFromMaterialAsClone (they would bring the game's textures over), SetOwner.
-constexpr bool mirroredOp(Op o){switch(o){
- case Op::SetFloat:case Op::SetInt:case Op::SetColor:case Op::SetVector:case Op::SetTexture:case Op::SetTextureOffset:case Op::SetTextureScale:case Op::SetMainColor:
- case Op::SetFloatArray:case Op::SetVectorArray:case Op::SetColorArray:case Op::SetShader:case Op::SetRenderQueue:case Op::EnableKeyword:case Op::DisableKeyword:
- case Op::EnableKeywordId:case Op::DisableKeywordId:case Op::SetKeywords:case Op::ModifyKeywordSet:case Op::SetOverrideTag:case Op::SetShaderPass:return true;
- default:return false;}}
-constexpr bool mirrorable(size_t i){return kHooks[i].scope==Scope::Material&&mirroredOp(kHooks[i].op);}
-// Texture properties GIBox sets on its copies (Runtime::applyMaterials / extraTexture): never overwritten by the mirror.
-inline constexpr const char* kProtectedTextures[]={"_MainTex","_LightMap","_LightMapTex","_Lightmap","_LightmapTex","_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"};
-inline constexpr size_t kProtectedCount=sizeof(kProtectedTextures)/sizeof(kProtectedTextures[0]);
-
-// Original material -> its GIBox copies. Hooks read without locking; the Runtime (Tick thread) is the only writer. Every
-// copy is checked against the native pointer it had when published, so a destroyed copy is skipped.
-class Mirrors {
- public:
- static constexpr size_t per=8;
- private:
- static constexpr size_t N=1024,probe=32;static constexpr Ptr tomb=1;
- std::array<std::atomic<Ptr>,N> keys{},natives{};std::array<std::array<std::atomic<Ptr>,per>,N> copies{},copyNatives{};std::array<std::atomic<uint32_t>,N> counts{};
- static size_t slot(Ptr p){uint64_t x=p;x^=x>>33;x*=0xff51afd7ed558ccdull;x^=x>>33;return size_t(x)&(N-1);}
- public:
- size_t find(Ptr p,Ptr* out)const noexcept{if(p<=tomb)return 0;size_t i=slot(p);
-  for(size_t n=0;n<probe;n++,i=(i+1)&(N-1)){Ptr k=keys[i].load(std::memory_order_acquire);if(!k){return 0;}if(k!=p)continue;
-   Ptr native=natives[i].load(std::memory_order_relaxed);if(native&&load<Ptr>(p+0x10)!=native)return 0;
-   size_t c=std::min<size_t>(counts[i].load(std::memory_order_acquire),per),m=0;
-   for(size_t j=0;j<c;j++){Ptr x=copies[i][j].load(std::memory_order_relaxed),xn=copyNatives[i][j].load(std::memory_order_relaxed);if(x>tomb&&x!=p&&xn&&load<Ptr>(x+0x10)==xn)out[m++]=x;}
-   return m;}
-  return 0;}
- bool set(Ptr p,Ptr native,const std::vector<std::pair<Ptr,Ptr>>& list){if(p<=tomb)return false;size_t i=slot(p),free=N;bool existing=false;
-  for(size_t n=0;n<probe;n++,i=(i+1)&(N-1)){Ptr k=keys[i].load(std::memory_order_relaxed);if(k==p){free=i;existing=true;break;}if(k==tomb&&free==N){free=i;}if(!k){if(free==N)free=i;break;}}
-  if(free==N){return false;}size_t c=std::min(list.size(),per);
-  if(existing&&c<counts[free].load(std::memory_order_relaxed))counts[free].store(uint32_t(c),std::memory_order_release);
-  for(size_t j=0;j<c;j++){copies[free][j].store(list[j].first,std::memory_order_relaxed);copyNatives[free][j].store(list[j].second,std::memory_order_relaxed);}
-  natives[free].store(native,std::memory_order_relaxed);counts[free].store(uint32_t(c),std::memory_order_release);if(!existing)keys[free].store(p,std::memory_order_release);return true;}
- void erase(Ptr p){if(p<=tomb)return;size_t i=slot(p);for(size_t n=0;n<probe;n++,i=(i+1)&(N-1)){Ptr k=keys[i].load(std::memory_order_relaxed);if(!k)return;if(k==p){keys[i].store(tomb,std::memory_order_release);return;}}}
-};
 inline bool customOp(Op o){return o>=Op::SlotCustomFloat&&o<=Op::GroupEnablePropertyArray;}
 
 // Threads: game writes are "GIBox" while one of the Runtime's entry points is on the stack (OwnScope).
@@ -321,10 +282,8 @@ class Trace {
  std::atomic<bool> armed{false};std::atomic<uint64_t> testClockMs{0},dropped{0};
  using FrameFn=int32_t(*)();std::atomic<FrameFn> frameFn{nullptr};
  Ptr imageBase=0,imageSize=0;Table table;std::array<void*,kCount> originals{};
- // install(): entries already hooked (by the mirror or the trace), and the code each one hooked.
+ // install(): entries already hooked, and the code each one hooked; everything: install() has run in this process.
  std::array<bool,kCount> done{};std::map<uintptr_t,size_t> taken;bool everything=false;unsigned hooked=0;
- // effect mirror
- std::atomic<bool> mirrorOn{false},protectReady{false};Mirrors mirrors;std::array<std::atomic<int32_t>,kProtectedCount> protectedIds{};std::atomic<uint64_t> mirrored{0},mirrorFailures{0};
  std::mutex m;  // everything below, and Table writes
  static constexpr size_t ringSize=16384;std::vector<Event> ring;uint64_t head=0;
  struct Key {Ptr target;uint8_t op;int32_t id,name,i0;bool operator==(const Key& o)const{return target==o.target&&op==o.op&&id==o.id&&name==o.name&&i0==o.i0;}};
@@ -421,20 +380,6 @@ template<size_t I>inline void note(Ptr target,const Payload& p,Ptr lr,Ptr fp)noe
   else if constexpr(s==Scope::Proxy){if(!t.proxyTracked(target,tag))return;}
   else{if(!t.table.find(target,tag))return;}
   t.record(uint16_t(I),kHooks[I].op,subject,tag,p,lr,fp);}catch(...){t.dropped++;}}
-// A texture write GIBox must keep: by name, or by the IDs the Runtime looked up (unknown IDs count as protected).
-template<size_t I>inline bool protectedWrite(const Payload& p){constexpr uint8_t k=kindOf(kHooks[I].op);
- if constexpr(!(k&(KindTexture|KindScaleOffset))){(void)p;return false;}
- else{if(p.name){auto s=Trace::managedString(p.name,32);for(auto* n:kProtectedTextures){if(s==n)return true;}return false;}
-  auto& t=trace();if(p.id<0||!t.protectReady.load(std::memory_order_acquire))return true;
-  for(auto& x:t.protectedIds){if(x.load(std::memory_order_relaxed)==p.id)return true;}return false;}}
-// After the game's write to `s`: the same call on each GIBox copy of `s` (outermost hooked call only, never for GIBox's own
-// writes). The copies' writes count as GIBox's in the trace. A managed exception from one copy is not passed on.
-template<size_t I,class C>inline void mirror(Ptr s,const Payload& p,bool outer,Ptr lr,Ptr fp,C&& call){
- if constexpr(mirrorable(I)){auto& t=trace();if(!outer||ownDepth||!s||!t.mirrorOn.load(std::memory_order_relaxed))return;
-  Ptr copies[Mirrors::per];size_t n=t.mirrors.find(s,copies);if(!n||protectedWrite<I>(p))return;
-  OwnScope own;for(size_t k=0;k<n;k++){try{call(copies[k]);t.mirrored.fetch_add(1,std::memory_order_relaxed);}catch(...){t.mirrorFailures.fetch_add(1,std::memory_order_relaxed);}
-   if(t.armed.load(std::memory_order_relaxed))note<I>(copies[k],p,lr,fp);}}
- else{(void)s;(void)p;(void)outer;(void)lr;(void)fp;(void)call;}}
 // After the original: `obj` came from, or was put on, the tracked `from` (material, renderer, proxy).
 template<size_t I>inline void follow(Ptr from,Ptr obj,Role role,int16_t slot,Payload p,Ptr lr,Ptr fp)noexcept{auto& t=trace();if(!t.armed.load(std::memory_order_relaxed)||!from||!obj)return;
  try{uint64_t source=0;constexpr Scope s=kHooks[I].scope;if constexpr(s==Scope::Proxy){if(!t.proxyTracked(from,source))return;}else if(!t.table.find(from,source))return;
@@ -443,8 +388,8 @@ template<size_t I>inline void follow(Ptr from,Ptr obj,Role role,int16_t slot,Pay
   else{p.ref=obj;t.record(uint16_t(I),kHooks[I].op,from,source,p,lr,fp);}}catch(...){t.dropped++;}}
 #define GLOW_SITE const Ptr lr_=reinterpret_cast<Ptr>(__builtin_extract_return_addr(__builtin_return_address(0)));const Ptr fp_=reinterpret_cast<Ptr>(__builtin_frame_address(0));Depth<I> d_
 #define GLOW_NOTE(target,...) if(d_.on){Payload p;__VA_ARGS__;note<I>(target,p,lr_,fp_);}
-// Write shapes: recorded (trace), made, then made on the copies (mirror; Material scope and mirrored ops only).
-#define GLOW_WRITE(F,FILL,...) GLOW_SITE;const auto f_=orig<I,F>();Payload p;if(d_.on){FILL note<I>(s,p,lr_,fp_);}f_(s,__VA_ARGS__);mirror<I>(s,p,d_.on,lr_,fp_,[&](Ptr c_){f_(c_,__VA_ARGS__);});
+// Write shapes: recorded (trace), then made.
+#define GLOW_WRITE(F,FILL,...) GLOW_SITE;const auto f_=orig<I,F>();Payload p;if(d_.on){FILL note<I>(s,p,lr_,fp_);}f_(s,__VA_ARGS__);
 template<size_t I>void hIdFloat(Ptr s,int32_t id,float v,Ptr mi){GLOW_WRITE(void(*)(Ptr,int32_t,float,Ptr),{p.id=id;p.v[0]=v;p.nv=1;},id,v,mi)}
 template<size_t I>void hNameFloat(Ptr s,Ptr n,float v,Ptr mi){GLOW_WRITE(void(*)(Ptr,Ptr,float,Ptr),{p.name=n;p.v[0]=v;p.nv=1;},n,v,mi)}
 template<size_t I>void hIdInt(Ptr s,int32_t id,int32_t v,Ptr mi){GLOW_WRITE(void(*)(Ptr,int32_t,int32_t,Ptr),{p.id=id;p.i0=v;},id,v,mi)}
@@ -525,12 +470,12 @@ inline bool resolveEntry(const uint8_t* image,uintptr_t size,const Hook& h,uintp
  if(at==h.rva&&h.span<16){char b[48];std::snprintf(b,sizeof b,"%lu-byte entry is not a branch",static_cast<unsigned long>(h.span));how=b;return false;}
  if(size&&at+16>size){how="outside the image";return false;}
  if(how.empty()){how="direct";}target=at;return true;}
-// everything=false: only the entries the effect mirror needs; true: all (glow trace). Each entry is hooked at most once
-// per process; a later call adds the rest. Without an installer (host tests) nothing is marked as done.
-inline std::string install(Engine& e,bool everything){auto& t=trace();if(!e.hook)return "no inline hook installer in this process";
+// Every entry, each hooked at most once per process: a later call adds only the ones not done yet. Without an installer
+// (host tests) nothing is marked as done.
+inline std::string install(Engine& e){auto& t=trace();if(!e.hook)return "no inline hook installer in this process";
  if(!t.imageBase){t.imageBase=e.base;t.imageSize=e.size;}const uint8_t* image=reinterpret_cast<const uint8_t*>(e.base);const auto& reps=replacements();
  unsigned tried=0,hooked=0,shared=0,skipped=0,failed=0;std::string lines;char b[160];
- for(size_t i=0;i<kCount;i++){if(t.done[i]||(!everything&&!mirrorable(i)))continue;t.done[i]=true;tried++;const Hook& h=kHooks[i];uintptr_t target=0;std::string how;
+ for(size_t i=0;i<kCount;i++){if(t.done[i])continue;t.done[i]=true;tried++;const Hook& h=kHooks[i];uintptr_t target=0;std::string how;
   std::snprintf(b,sizeof b,"\n%s 0x%lx: ",h.name,static_cast<unsigned long>(h.rva));lines+=b;
   if(!resolveEntry(image,e.size,h,target,how)){skipped++;lines+="skipped, "+how;continue;}
   lines+=how;auto prev=t.taken.find(target);
@@ -539,7 +484,7 @@ inline std::string install(Engine& e,bool everything){auto& t=trace();if(!e.hook
   if(!reps[i]||!e.hook(target,reps[i],&t.originals[i])||!t.originals[i]){failed++;t.originals[i]=nullptr;lines+=", hook failed";continue;}
   t.taken[target]=i;t.hooked++;hooked++;}
  if(e.size&&!t.frameFn.load())t.frameFn.store(reinterpret_cast<Trace::FrameFn>(e.resolver?e.resolver(rvaFrameCount):e.base+rvaFrameCount));
- if(everything)t.everything=true;
+ t.everything=true;
  std::snprintf(b,sizeof b,"%u of %u entries hooked, %u share code with another entry, %u skipped, %u failed (%u hooked in this process)",hooked,tried,shared,skipped,failed,t.hooked);
  return std::string(b)+lines;}
 

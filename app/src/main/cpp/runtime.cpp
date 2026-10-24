@@ -34,7 +34,7 @@ std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static
 //   neutralColors / noUv2  mesh data: vertex colours set to the original's usual value, UV2 zeroed (rebuilds the model)
 //   glowTrace      record every write to the tracked materials and renderers (glow_trace.hpp); changes nothing itself
 //   slotTextures   1/2: the game's own materials stay on, the mod's textures go into each draw slot's per-material
-//                  property block (1) or per-material custom texture (2); no copies, refreshes or mirroring
+//                  property block (1) or per-material custom texture (2); no copies or refreshes
 //   separateDraws  every draw in effect its own submesh, as before 0.7.23 (mergeDraws, model.hpp): for comparing the
 //                  picture and the draw count (rebuilds the model)
 struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false,separateDraws=false;int firstRefreshMs=0,slotTextures=0;
@@ -42,8 +42,7 @@ struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glo
  bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&separateDraws==o.separateDraws&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures;}
  bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||separateDraws||firstRefreshMs||slotTextures;}
  std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off");}};
-// effectMirror (control.json, default true): the game's material effects are repeated on GIBox's copies (glow_trace.hpp).
-struct ControlState {Experiments exp;bool enabled=false,effectMirror=true;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
+struct ControlState {Experiments exp;bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"Control JSON object");ControlState s;
  const auto& a=c.at("selected");require(a.type==Json::Array&&a.array.size()<=128,"Selected list");
@@ -56,7 +55,7 @@ ControlState parseControl(const std::string& raw){
  if(s.refreshBones){s.refreshBonesCharacter=unsigned(refreshId);}
  const auto& vars=c.at("variables");require(vars.type==Json::Object||vars.type==Json::Null,"Variables object");
  for(auto& model:vars.object){require(model.second.type==Json::Object,"Variables object");for(auto& kv:model.second.object){require(kv.first.size()>1&&kv.first[0]=='$',"Variable name");auto n=integerOf(kv.second);require(std::abs(n)<=1000000,"Variable value");s.variables[model.first][kv.first]=int(n);}}
- s.logLevel=logThreshold(c);s.effectMirror=c.at("effectMirror").type!=Json::Bool||c.at("effectMirror").boolean;
+ s.logLevel=logThreshold(c);
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
   s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");
   auto ms=integerOf(x.at("firstRefreshMs"));require(ms>=0&&ms<=10000,"experiments.firstRefreshMs");s.exp.firstRefreshMs=int(ms);
@@ -442,8 +441,8 @@ struct Runtime::Impl {
    if(!custom.empty())log("glow-diff",when+" "+a.set->name+"/"+bp.name+" renderer custom floats: "+custom);}
   catch(const std::exception& ex){log("glow-note","read-back "+a.set->name+": "+ex.what());}freeOwned(tmp);}
  void glowTick(){auto& t=glow::trace();if(!worker.background())t.testClockMs.store(bindingNow);
-  if(!glowOn()){if(glowWasOn){glowWasOn=false;t.armed.store(false);glowWindows.clear();log("glow-note","trace off");}return;}
-  if(!t.everything&&!glowNoHook){if(!e.hook){glowNoHook=true;log("glow-note","no inline hook installer: nothing is recorded");}else log("glow-hooks",glow::install(e,true));}
+  if(!glowOn()){if(glowWasOn){glowWasOn=false;t.armed.store(false);glowWindows.clear();log("glow-note","trace off: nothing is recorded; the engine entries stay hooked until the game restarts");}return;}
+  if(!t.everything&&!glowNoHook){if(!e.hook){glowNoHook=true;log("glow-note","no inline hook installer: nothing is recorded");}else log("glow-hooks",glow::install(e));}
   if(!glowWasOn){glowWasOn=true;glowRegistryAt=0;glowCharacter=ch.config;t.armed.store(true);
    log("glow-note","trace on: "+std::to_string(t.hooked)+" engine entries hooked; windows open on a switch to a character with a model, on attaching, and on 标记画面异常");}
   uint64_t now=glowNow();if(now>=glowRegistryAt){glowRegistryAt=now+250;glowRegister();}
@@ -571,35 +570,6 @@ struct Runtime::Impl {
     if(!from){continue;}
     auto d=o.direct.at(from);d.native=load<Ptr>(m+0x10);d.copy=true;directPin(o,m);for(auto& b:d.before)directPin(o,b.second);o.direct[m]=d;
     log("direct-textures",where+": the game's copy "+name(m)+" of "+name(from)+" carries our textures; it gets its own back with "+name(from));break;}}}
- // ---------------------------------------------------------------- effect mirror (control.json "effectMirror", default on)
- // The game plays its material effects (switch-in dissolve and others) on the materials it holds, never on our copies.
- // The hooks in glow_trace.hpp make each such write again on the copies of that original; here the original -> copies
- // table is kept current. It is republished right after copies change (attach, adopt, re-copy), on the same thread that
- // makes the game's writes, so an effect already running when a copy is taken still reaches it with its restore.
- bool mirrorTried=false,mirrorInstalled=false;uint64_t mirrorStatsAt=0,mirrorStatsSeen=0;std::map<Ptr,std::vector<std::pair<Ptr,Ptr>>> mirrorPublished;
- void mirrorProtect(){auto& t=glow::trace();size_t i=0;
-  try{for(auto* n:glow::kProtectedTextures){Ptr str=e.call<Ptr>(abi::newString,Ptr(0),n);require(str!=0,"managed string allocation failed");t.protectedIds[i++].store(e.call<int32_t>(glow::rvaPropertyToId,str,Ptr(0)));}
-   t.protectReady.store(true);}
-  catch(const std::exception& ex){log("effect-mirror","texture property IDs unknown ("+std::string(ex.what())+"): texture writes are not repeated on the copies");}}
- void mirrorSync(){auto& t=glow::trace();if(!t.mirrorOn.load(std::memory_order_relaxed))return;
-  std::map<Ptr,std::vector<std::pair<Ptr,Ptr>>> want;std::map<Ptr,Ptr> natives;
-  auto add=[&](Ptr src,Ptr copy){if(!alive(src)||!alive(copy)||src==copy)return;auto& list=want[src];natives[src]=load<Ptr>(src+0x10);
-   for(auto& x:list){if(x.first==copy)return;}list.push_back({copy,load<Ptr>(copy+0x10)});};
-  // The copies on show first, then retired ones (an adopted renderer can still show them).
-  for(auto& kv:attachments){auto& a=*kv.second;for(auto& c:a.clones){auto src=a.materialSources.find(c.second);if(src!=a.materialSources.end())add(src->second,c.second);}}
-  for(auto& kv:attachments){for(auto& m:kv.second->materialSources)add(m.second,m.first);}
-  for(auto it=mirrorPublished.begin();it!=mirrorPublished.end();){if(!want.count(it->first)){t.mirrors.erase(it->first);it=mirrorPublished.erase(it);}else ++it;}
-  for(auto& kv:want){auto old=mirrorPublished.find(kv.first);if(old!=mirrorPublished.end()&&old->second==kv.second)continue;
-   if(t.mirrors.set(kv.first,natives[kv.first],kv.second))mirrorPublished[kv.first]=kv.second;}}
- void mirrorTick(uint64_t now){auto& t=glow::trace();
-  if(!ctl.enabled||!ctl.effectMirror){if(t.mirrorOn.load()){t.mirrorOn.store(false);for(auto& kv:mirrorPublished)t.mirrors.erase(kv.first);mirrorPublished.clear();log("effect-mirror","off");}return;}
-  if(!mirrorTried){mirrorTried=true;
-   if(!e.hook){log("effect-mirror","unavailable: no inline hook installer");return;}
-   auto report=glow::install(e,false);mirrorProtect();mirrorInstalled=true;log("effect-mirror-hooks",report);}
-  if(!mirrorInstalled)return;
-  if(!t.mirrorOn.load()){t.mirrorOn.store(true);log("effect-mirror","on: the game's material effects are repeated on GIBox's copies ("+std::to_string(t.hooked)+" engine entries hooked)");}
-  mirrorSync();
-  if(now>=mirrorStatsAt){mirrorStatsAt=now+30000;auto n=t.mirrored.load();if(n!=mirrorStatsSeen){log("effect-mirror-stats",std::to_string(n-mirrorStatsSeen)+" writes repeated on copies in the last 30 s ("+std::to_string(n)+" this session, "+std::to_string(t.mirrorFailures.load())+" failed)");mirrorStatsSeen=n;}}}
 
  // ---------------------------------------------------------------- engine helpers (game thread)
  std::string name(Ptr p){require(alive(p),"Destroyed Unity object");Ptr s=e.get(abi::getName,p);if(!s)return {};auto n=load<uint32_t>(s+0x10);require(n<=1024,"Unity name bound");std::string out;for(unsigned i=0;i<n;i++){unsigned a=load<uint16_t>(s+0x14+i*2);if(a>=0xd800&&a<=0xdbff){require(i+1<n,"UTF16 name");unsigned b=load<uint16_t>(s+0x14+(++i)*2);require(b>=0xdc00&&b<=0xdfff,"UTF16 name");a=0x10000+((a-0xd800)<<10)+(b-0xdc00);}utf8(out,a);}return out;}
@@ -1008,7 +978,7 @@ struct Runtime::Impl {
     require(alive(src),"Original material missing (slot "+std::to_string(row.slot)+")");m=clone(a,src);a.materialSources[m]=src;pin(a,src);auto& t=s.textures.at(row.name);
     if(!t.original){e.set(abi::mainTexture,m,t.main);if(t.light)extraTexture(m,t.light,{"_LightMap","_LightMapTex","_Lightmap","_LightmapTex"});if(t.normal)extraTexture(m,t.normal,{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"});}a.clones[key]=m;}
    mats.push_back(m);}
-  Owned tmp;try{e.set(abi::setMaterials,a.renderer,array(tmp,a.originalMaterials,mats.data(),mats.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);mirrorSync();}
+  Owned tmp;try{e.set(abi::setMaterials,a.renderer,array(tmp,a.originalMaterials,mats.data(),mats.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}
  bool attach(Ptr r,Ptr mesh,Set& s,size_t part,uint64_t now){
   auto& bp=s.parts[part];auto a=std::make_unique<Attachment>();a->renderer=r;a->native=load<Ptr>(r+0x10);a->original=mesh;a->set=&s;a->part=part;a->backup=bp.backup;bool meshSet=false;
   auto readyKey=s.path+"|attach|"+std::to_string(a->native);auto waiting=[&](const std::string& reason){if(missingLogged[readyKey]!=reason){missingLogged[readyKey]=reason;log("attach-wait",s.name+"/"+bp.name+": "+reason);}freeOwned(*a);return false;};
@@ -1029,7 +999,7 @@ struct Runtime::Impl {
    e.set(abi::setMesh,r,bp.mesh);meshSet=true;applyMaterials(*a);if(!s.originalMaterials)a->refreshAt=now+(ctl.exp.firstRefreshMs?uint64_t(ctl.exp.firstRefreshMs):1500);
    if(!alive(bp.originMesh)){bp.originMesh=mesh;bp.originMaterials=a->originalMaterials;pin(s,mesh);pin(s,bp.originMaterials);}}
   catch(...){try{directRestore(*a,"attach failed");}catch(const std::exception&){}if(meshSet&&alive(r))e.set(abi::setMesh,r,mesh);freeOwned(*a);throw;}
-   log("attached",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);mirrorSync();beginMaterialTrace(*attachments.at(r),now);s.used=now;return true;}
+   log("attached",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);beginMaterialTrace(*attachments.at(r),now);s.used=now;return true;}
  // Bounded observations, not an effect-parameter fix: identify palette replacements during party hand-off versus
  // unchanged material instances. Existing INFO palette logs stay intact; debug readback uses named managed methods.
  void materialState(Attachment& a,const std::string& phase,uint64_t now){
@@ -1069,7 +1039,7 @@ struct Runtime::Impl {
   freeOwned(roots);return result;
  }
  void retakeClones(Attachment& a){
-  auto old=a.clones;a.clones.clear();try{applyMaterials(a);}catch(...){a.clones=old;throw;}for(auto& kv:old){a.retired[kv.second]=kv.first;}mirrorSync();
+  auto old=a.clones;a.clones.clear();try{applyMaterials(a);}catch(...){a.clones=old;throw;}for(auto& kv:old){a.retired[kv.second]=kv.first;}
   std::map<Ptr,Ptr> swap;for(auto& kv:a.retired){auto it=a.clones.find(kv.second);if(it!=a.clones.end())swap[kv.first]=it->second;}
   for(auto& kv:attachments){auto& o=*kv.second;if(o.source!=a.renderer||!alive(o.renderer))continue;Ptr om=e.get(abi::getMaterials,o.renderer);if(!om)continue;
    auto list=pointers(om,64);bool changed=false;for(auto& p:list){auto f=swap.find(p);if(f!=swap.end()){p=f->second;changed=true;}}
@@ -1218,7 +1188,7 @@ struct Runtime::Impl {
    require(alive(original)&&originalMats!=0,"Original of adopted renderer unknown");
    pin(*a,r);pin(*a,original);pin(*a,originalMats);a->original=original;a->originalMaterials=originalMats;a->source=src?src->renderer:0;}
   catch(...){freeOwned(*a);throw;}
-   log("adopted",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);mirrorSync();beginMaterialTrace(*attachments.at(r),now);s.used=now;
+   log("adopted",s.name+"/"+bp.name+" -> "+name(r));attachments[r]=std::move(a);beginMaterialTrace(*attachments.at(r),now);s.used=now;
   // A copy keeps the material references but not necessarily the per-slot overrides of its source.
   if(ctl.exp.slotTextures&&!s.originalMaterials){try{applyMaterials(*attachments.at(r));}catch(const std::exception& ex){log("slot-textures","adopted copy "+s.name+": "+ex.what());}}}
  void discover(const std::vector<Set*>& live,uint64_t now){materialWait.clear();
@@ -1566,7 +1536,7 @@ struct Runtime::Impl {
    // consume() may replace `models`: hand-off pointers into it are dropped first and set again below.
    wantedNow.clear();bindingTargets.clear();bindingReady=false;if(!worker.background()){workerTick(now);}consume();ch=current();renderTick(now);bindingStats();
    if(ch.config!=shownCharacter){shownCharacter=ch.config;log("character",ch.entity?std::to_string(ch.config):std::string("none"));}
-   glowTick();mirrorTick(now);
+   glowTick();
    // Reuse the verified Type discovery only here, on the existing serial Tick.
    // Diagnostic hooks never call Runtime::Impl and never scan all objects.
    if(handoff::canSeed()&&now>=handoffTypeRetry){handoffTypeRetry=now+1000;
@@ -1644,5 +1614,5 @@ void Runtime::spawned(Ptr go)noexcept{glow::OwnScope own;try{p->spawned(go);}cat
 void Runtime::spawnedAfter()noexcept{glow::OwnScope own;try{p->spawnedAfter();}catch(...){}}
 Ptr Runtime::bindMesh(Ptr renderer,Ptr mesh)noexcept{glow::OwnScope own;try{return p->bindMesh(renderer,mesh);}catch(...){return mesh;}}
 void Runtime::meshBound(Ptr renderer)noexcept{glow::OwnScope own;try{p->meshBound(renderer);}catch(...){}}
-void Runtime::shutdown(){glow::OwnScope own;glow::trace().armed.store(false);glow::trace().mirrorOn.store(false);handoff::disarm();p->renderBinding.clear();p->renderRecorder.reset();p->renderReader.reset();if(p->releaseAll()){p->pruneRestoreBackups(true);p->freeOwned(p->handoffTypeRoots);p->freeOwned(p->slotRoots);p->slotBlock=0;}}
+void Runtime::shutdown(){glow::OwnScope own;glow::trace().armed.store(false);handoff::disarm();p->renderBinding.clear();p->renderRecorder.reset();p->renderReader.reset();if(p->releaseAll()){p->pruneRestoreBackups(true);p->freeOwned(p->handoffTypeRoots);p->freeOwned(p->slotRoots);p->slotBlock=0;}}
 }

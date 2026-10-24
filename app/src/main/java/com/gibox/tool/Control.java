@@ -64,10 +64,6 @@ public final class Control {
         JSONObject j = load(pkg); JSONObject x = j.optJSONObject("experiments"); if (x == null) x = new JSONObject();
         x.put(key, value); j.put("experiments", x); save(pkg, j);
     }
-    /** The game's material effects (switch-in dissolve and others) repeated on GIBox's material copies (control.json
-     *  "effectMirror", read by the game; on unless set to false). */
-    public static boolean effectMirror(String pkg) { return load(pkg).optBoolean("effectMirror", true); }
-    public static synchronized void setEffectMirror(String pkg, boolean on) throws Exception { JSONObject j = load(pkg); j.put("effectMirror", on); save(pkg, j); }
     public static synchronized void requestRenderMark(String pkg) throws Exception {
         JSONObject j = load(pkg);
         if (!"debug".equals(j.optString("logLevel", "info"))) throw new IllegalStateException("请先把日志等级设为调试，再复现异常");

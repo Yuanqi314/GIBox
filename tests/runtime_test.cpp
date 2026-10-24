@@ -746,15 +746,20 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
  // 47. Glow trace (debug + experiments.glowTrace): engine entries hooked once, every write to this model's materials kept
  //     with its frame and caller, a switch-in window summarised, and the clone read back against its original. Here the
  //     game turns a colour on for the clone and the original, and off for the original only: that is what must show.
+ //     A game started without the trace hooks nothing; switching the trace off stops recording but unhooks nothing.
  {std::string mediaGlow=root+"/mediaGlow",sharedGlow=mediaGlow+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedGlow+"/models/Glow",s);
   Ptr original=f->mesh(),w=f->renderer(original),gameMat=load<Ptr>(f->obj[w].materials+0x20);f->world(w);f->scene={w};f->keywords[gameMat]={"_NORMALMAP"};
-  write(sharedGlow+"/control.json","{\"enabled\":true,\"effectMirror\":false,\"logLevel\":\"debug\",\"selected\":[\"Glow\"],\"experiments\":{\"glowTrace\":true}}");
+  auto ctlGlow=[&](const char* json){write(sharedGlow+"/control.json.tmp",json);std::filesystem::rename(sharedGlow+"/control.json.tmp",sharedGlow+"/control.json");};
+  ctlGlow("{\"enabled\":true,\"selected\":[\"Glow\"]}");
   auto rvaOf=[](const char* n){for(auto& h:glow::kHooks)if(std::string(h.name)==n)return h.rva;std::abort();};
   static std::map<uintptr_t,void*> hooked;static int dummy;
   struct G {static void setColor(Ptr m,int32_t id,const float* v,Ptr){std::array<float,4> c;std::memcpy(c.data(),v,16);f->props[m][id]=c;}static int32_t toId(Ptr,Ptr){return 7;}};
   Engine ge=e;ge.size=0x16000000;ge.hook=[&](uintptr_t rva,void* replacement,void** original){hooked[rva]=replacement;
    *original=rva==rvaOf("Material.INTERNAL_CALL_SetColorImpl(Material,int,Color*)")?reinterpret_cast<void*>(&G::setColor):rva==rvaOf("Shader.PropertyToID(string)")?reinterpret_cast<void*>(&G::toId):static_cast<void*>(&dummy);return true;};
   auto setColor=[&](Ptr m,std::array<float,4> c){reinterpret_cast<void(*)(Ptr,int32_t,const float*,Ptr)>(hooked.at(rvaOf("Material.INTERNAL_CALL_SetColorImpl(Material,int,Color*)")))(m,7,c.data(),0);};
+  {Runtime cold(ge,pkg,root+"/privateGlowCold",mediaGlow,false);cold.tick(3790000);cold.tick(3790600);   // the model on, no trace: no hooks
+   assert(meshOf(w)!=original&&hooked.empty()&&glow::trace().hooked==0&&!glow::trace().everything);cold.shutdown();assert(meshOf(w)==original&&f->handles.empty());}
+  ctlGlow("{\"enabled\":true,\"logLevel\":\"debug\",\"selected\":[\"Glow\"],\"experiments\":{\"glowTrace\":true}}");
   Runtime gr(ge,pkg,root+"/privateGlow",mediaGlow,false);gr.tick(3800000);gr.tick(3800600);assert(meshOf(w)!=original);
   for(uint64_t t=3801200;t<=3806000;t+=600)gr.tick(t);                         // both material refreshes, attach window ends
   Ptr clone=load<Ptr>(f->obj[w].materials+0x20);assert(clone!=gameMat);
@@ -772,34 +777,12 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   assert(log.find("glow-diff #2 +4000ms Glow/Part0 row 0 Glow/Part0 clone row 0 Material vs original slot 0: _ElementRimColor#7 (0.2,0.9,1,1) vs (0,0,0,0) (3 equal, 1 GIBox textures, 1 parameters the game wrote, 1 keywords)")!=std::string::npos);
   assert(log.find("glow-diff #2 +0ms Glow/Part0 row 0 Glow/Part0 clone row 0 Material vs original slot 0: no difference")!=std::string::npos);
   assert(log.find("glow-diff refresh-before 2 Glow/Part0 row 0")!=std::string::npos&&log.find("glow-window #2 end: 3 by the game, 0 by GIBox")!=std::string::npos);
-  assert(log.find("effect-mirror")==std::string::npos);   // switched off for this run
+  assert(log.find("effect-mirror")==std::string::npos);   // no effect mirror any more
+  unsigned installed=glow::trace().hooked;size_t entries=hooked.size();assert(installed>0&&entries>0);
+  ctlGlow("{\"enabled\":true,\"logLevel\":\"debug\",\"selected\":[\"Glow\"]}");gr.tick(3812400);   // trace off: the hooks stay
+  assert(!glow::trace().armed.load()&&glow::trace().hooked==installed&&hooked.size()==entries&&glow::trace().everything);
+  assert(text(sharedGlow+"/GIBox Log.txt").find("glow-note trace off: nothing is recorded; the engine entries stay hooked until the game restarts")!=std::string::npos);
   gr.shutdown();assert(meshOf(w)==original&&f->handles.empty()&&!glow::trace().armed.load());}
- // 48. Effect mirror (default on): the copy is taken while the game's effect is on the original (the 0.7.19 trace of
- //     Barbara); the game's later writes to the original, its restore included, are made on the copy too, so read back
- //     it matches the original. A texture GIBox replaced (_MainTex) is not overwritten; another texture is copied.
- {std::string mediaMir=root+"/mediaMirror",sharedMir=mediaMir+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedMir+"/models/Mir",s);
-  Ptr original=f->mesh(),w=f->renderer(original),gameMat=load<Ptr>(f->obj[w].materials+0x20);f->world(w);f->scene={w};f->props[gameMat][7]={0,0.75f,1,1};   // effect on
-  write(sharedMir+"/control.json","{\"enabled\":true,\"logLevel\":\"debug\",\"selected\":[\"Mir\"],\"experiments\":{\"glowTrace\":true}}");
-  auto at=[](const char* n){for(size_t i=0;i<glow::kCount;i++)if(std::string(glow::kHooks[i].name)==n)return i;std::abort();};
-  struct T {static void setTexture(Ptr m,int32_t id,Ptr x,Ptr){if(id==5)f->diffuse[m]=x;else f->props[m][id]={float(x&0xff),0,0,0};}};
-  glow::trace().originals[at("Material.SetTextureImpl(int,Texture)")]=reinterpret_cast<void*>(&T::setTexture);
-  auto setColor=reinterpret_cast<void(*)(Ptr,int32_t,const float*,Ptr)>(glow::replacements()[at("Material.INTERNAL_CALL_SetColorImpl(Material,int,Color*)")]);
-  auto setTexture=reinterpret_cast<void(*)(Ptr,int32_t,Ptr,Ptr)>(glow::replacements()[at("Material.SetTextureImpl(int,Texture)")]);
-  Engine me=e;me.size=0x16000000;me.hook=[](uintptr_t,void*,void** original){static int unused;*original=&unused;return true;};   // every entry already hooked (47)
-  Runtime mr(me,pkg,root+"/privateMirror",mediaMir,false);mr.tick(3900000);mr.tick(3900600);Ptr copy=load<Ptr>(f->obj[w].materials+0x20);
-  assert(meshOf(w)!=original&&copy!=gameMat&&f->props[copy][7][1]==0.75f);                  // taken during the effect
-  Ptr ours=f->diffuse[copy];float off[4]={0,0,0,0};setColor(gameMat,7,off,0);               // the game's restore
-  assert(f->props[gameMat][7][1]==0&&f->props[copy][7][1]==0);
-  setTexture(gameMat,5,0x1234,0);setTexture(gameMat,6,0x77,0);assert(f->diffuse[copy]==ours&&f->diffuse[gameMat]==0x1234&&f->props[copy][6][0]==0x77);
-  for(uint64_t t=3901200;t<=3904800;t+=600)mr.tick(t);
-  auto log=text(sharedMir+"/GIBox Log.txt");
-  assert(log.find("effect-mirror on: the game's material effects are repeated on GIBox's copies")!=std::string::npos);
-  assert(log.find("GIBox x1 SetColor _ElementRimColor#7 on Mir/Part0 clone row 0 Material: (0,0,0,0)")!=std::string::npos);
-  assert(log.find("glow-diff #1 +3000ms Mir/Part0 row 0 Mir/Part0 clone row 0 Material vs original slot 0: no difference")!=std::string::npos);
-  write(sharedMir+"/control.json","{\"enabled\":true,\"effectMirror\":false,\"selected\":[\"Mir\"]}");mr.tick(3905400);
-  Ptr now=load<Ptr>(f->obj[w].materials+0x20);float on[4]={1,1,1,1};setColor(gameMat,7,on,0);assert(f->props[now][7][0]!=1);   // switched off: copies left alone
-  assert(text(sharedMir+"/GIBox Log.txt").find("effect-mirror off")!=std::string::npos);
-  mr.shutdown();assert(meshOf(w)==original&&f->handles.empty()&&!glow::trace().mirrorOn.load());}
  // 49. Slot textures (debug experiment): the game's own material stays on our mesh and the mod's textures go into draw
  //     slot 0 as an override, through its per-material property block (1) or its custom texture (2). A block the game
  //     dropped is written again, materials the game swaps into the slot are kept, and a mode change or turning the model
@@ -907,5 +890,5 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
    assert(meshOf(w5)==original&&load<Ptr>(f->obj[w5].materials+0x20)==mat5&&f->diffuse[mat5]==gameTex&&f->named[mat5][lightId]==0);   // left as the game had it
    d5.shutdown();assert(f->handles.empty());}}
  std::filesystem::remove_all(root);
- std::cout<<"Native runtime: PASS (direct textures: written, put back, game copies tracked, assets and shared materials copied; merged draws: hidden and non-contiguous ranges, variant switches, separateDraws rebuild; slot textures by property block and custom texture, effect mirror, glow trace windows and read-back, structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, glow experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
+ std::cout<<"Native runtime: PASS (direct textures: written, put back, game copies tracked, assets and shared materials copied; merged draws: hidden and non-contiguous ranges, variant switches, separateDraws rebuild; slot textures by property block and custom texture, glow trace windows and read-back, structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, glow experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }

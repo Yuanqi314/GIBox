@@ -156,27 +156,19 @@ fun SettingsScreen(state: AppState) {
                 }
             }
             item {
-                val mirror = remember(state.revision) { state.effectMirror() }
                 SettingsGroup(title = { SectionTitle("高级") }, verticalArrangement = gap) {
-                    SettingsSwitch(
-                        state = mirror,
-                        title = { Text("MOD 跟随游戏的材质特效") },
-                        subtitle = { Text("出场溶解等特效在复制出来的 MOD 材质上同样播放并恢复；关掉后，复制材质的部分刚换上模型时可能残留元素色光（写进游戏材质的部分不受影响）") },
-                        shapes = ListItemDefaults.segmentedShapes(0, 3),
-                        onCheckedChange = { state.setEffectMirror(it) },
-                    )
                     SettingsMenuLink(
                         title = { Text("导出当前角色骨骼") },
                         subtitle = { Text("游戏里有角色在场时，导出一份带时间的骨骼目录，供手动转换用") },
                         icon = { Icon(Icons.Filled.Person, contentDescription = null) },
-                        shapes = ListItemDefaults.segmentedShapes(1, 3),
+                        shapes = ListItemDefaults.segmentedShapes(0, 2),
                         onClick = { state.exportBones() },
                     )
                     SettingsMenuLink(
                         title = { Text("手动转换（旧流程）") },
                         subtitle = { Text("直接指定骨骼文件夹、角色 ID 和部件映射，不经过 Mods 列表") },
                         icon = { Icon(Icons.Filled.Build, contentDescription = null) },
-                        shapes = ListItemDefaults.segmentedShapes(2, 3),
+                        shapes = ListItemDefaults.segmentedShapes(1, 2),
                         onClick = { state.open(Screen.Manual) },
                     )
                 }

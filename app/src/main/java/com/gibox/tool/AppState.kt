@@ -204,12 +204,6 @@ class AppState(private val activity: Activity) {
         Control.setExperiment(game, key, value)
         AppLog.info(game, LOGGER, "调试实验 $key = $value")
     }
-    /** MOD 跟随游戏的材质特效 (control.json "effectMirror"), read back through `revision` like the experiments. */
-    fun effectMirror(): Boolean = Control.effectMirror(game)
-    fun setEffectMirror(on: Boolean) = save("保存") {
-        Control.setEffectMirror(game, on)
-        AppLog.info(game, LOGGER, "MOD 跟随游戏的材质特效 = $on")
-    }
     /** 显示替换 开/关 for a model with its own on/off switch (model.json "replaceWhen"). */
     fun setReplacing(mod: Importer.Mod, variants: Variants, on: Boolean) = save("保存") {
         val change = variants.switchTo(on, variants.current(game, mod.name))

@@ -30,9 +30,6 @@ void proxyFloat(Ptr self,int32_t id,float v,Ptr mi){hook<void(*)(Ptr,int32_t,flo
 void groupFloat(Ptr,int32_t,float,Ptr){}
 void keywordImpl(Ptr,Ptr,Ptr){}
 int32_t frame(){return 4321;}
-std::map<std::pair<Ptr,int32_t>,Ptr> textures;   // (material, property ID or, by name, the name's length) -> texture
-void textureById(Ptr m,int32_t id,Ptr x,Ptr){std::lock_guard<std::mutex> l(fakeLock);textures[{m,id}]=x;}
-void textureByName(Ptr m,Ptr n,Ptr x,Ptr){std::lock_guard<std::mutex> l(fakeLock);textures[{m,int32_t(Trace::managedString(n).size())}]=x;}
 bool has(const std::vector<std::string>& lines,const std::string& a,const std::string& b=""){for(auto& l:lines)if(l.find(a)!=std::string::npos&&l.find(b)!=std::string::npos)return true;return false;}
 }
 int main(){
@@ -49,12 +46,12 @@ int main(){
  Engine e(base);e.size=imageSize;std::map<uintptr_t,void*> hooked;static int dummy;
  e.hook=[&](uintptr_t rva,void* replacement,void** original){hooked[rva]=replacement;*original=&dummy;return true;};
  e.resolver=[](abi::Offset o)->Ptr{assert(o==rvaFrameCount);return reinterpret_cast<Ptr>(&frame);};
- // The mirror's entries first (its own call), then the rest for the trace; nothing is hooked twice.
- auto first=install(e,false);for(size_t i=0;i<kCount;i++)assert(trace().done[i]==mirrorable(i));
- auto report=install(e,true);auto& t=trace();assert(install(e,true).find("0 of 0 entries hooked")==0);
+ // Every entry in one call; a second call hooks nothing again.
+ auto& t=trace();assert(!t.everything);auto report=install(e);for(size_t i=0;i<kCount;i++)assert(t.done[i]);
+ assert(t.everything&&install(e).find("0 of 0 entries hooked")==0);
  assert(hooked.count(0xc000000)&&hooked.count(kHooks[at("Material.SetFloatImpl(int,float)")].rva)&&!hooked.count(kHooks[at("Renderer.set_enabled(bool)")].rva));
- assert(first.find("Material.EnableKeyword(string) 0xc2c63e4: B 0xc000000, same code as Material.EnableKeywordImpl(string)")!=std::string::npos);
- assert(report.find("Renderer.set_enabled(bool) 0x8dc2988: skipped, 4-byte entry is not a branch")!=std::string::npos&&first.find(" entries hooked, 1 share code")!=std::string::npos&&report.find(" entries hooked, 0 share code")!=std::string::npos);
+ assert(report.find("Material.EnableKeyword(string) 0xc2c63e4: B 0xc000000, same code as Material.EnableKeywordImpl(string)")!=std::string::npos);
+ assert(report.find("Renderer.set_enabled(bool) 0x8dc2988: skipped, 4-byte entry is not a branch")!=std::string::npos&&report.find(" entries hooked, 1 share code")!=std::string::npos);
  assert(t.frameFn.load()==&frame);
  setOriginal("Material.INTERNAL_CALL_SetColorImpl(Material,int,Color*)",reinterpret_cast<void*>(&colorImpl));setOriginal("Material.SetColor(int,Color)",reinterpret_cast<void*>(&colorPublic));
  setOriginal("Material.SetFloatImpl(int,float)",reinterpret_cast<void*>(&floatImpl));setOriginal("Shader.PropertyToID(string)",reinterpret_cast<void*>(&propertyToId));
@@ -113,27 +110,6 @@ int main(){
   std::thread a(work,clone),b(work,other);
   for(int i=0;i<300;i++){t.beginRefresh();t.put(renderer,Role::Renderer,owner,-1,"Exp/Part0 renderer Body");if(i%2)t.put(clone,Role::Clone,owner,0,"Exp/Part0 clone row 0 Mat_Body(Clone)");t.endRefresh();}
   stop=true;a.join();b.join();bool cut=false;assert(!t.collect(0,~0ull,cut).empty());}
- // 11. Effect mirror: a game write to an original is made again on each GIBox copy, once, with the same arguments; not
- //     GIBox's own writes, not the texture properties GIBox replaced (by ID or name), not on a destroyed copy. With the
- //     trace on, the repeated writes are GIBox's.
- {setOriginal("Material.SetTextureImpl(int,Texture)",reinterpret_cast<void*>(&textureById));setOriginal("Material.SetTexture(string,Texture)",reinterpret_cast<void*>(&textureByName));
-  t.testClockMs=200000;Ptr source=object(),copyA=object(),copyB=object(),gone=object(),tex=object();
-  t.beginRefresh();t.put(source,Role::Original,owner,1,"Exp/Part0 original slot 1 Mat_Hair");t.put(copyA,Role::Clone,owner,1,"Exp/Part0 clone row 1 Mat_Hair(Clone)");t.endRefresh();
-  t.mirrors.set(source,load<Ptr>(source+0x10),{{copyA,load<Ptr>(copyA+0x10)},{copyB,load<Ptr>(copyB+0x10)},{gone,load<Ptr>(gone+0x10)}});store<Ptr>(gone+0x10,0);
-  t.protectedIds[0]=5;t.protectReady=true;t.mirrorOn=true;auto writes=colorWrites.load();V4 blue{0,0.75f,1,1};
-  hook<void(*)(Ptr,int32_t,V4,Ptr)>("Material.SetColor(int,Color)")(source,7,blue,0);   // public -> Impl: each object once
-  assert(colorWrites==writes+3&&colors[copyA][1]==0.75f&&colors[copyB][2]==1&&!colors.count(gone));
-  {OwnScope own;hook<void(*)(Ptr,int32_t,float,Ptr)>("Material.SetFloatImpl(int,float)")(source,7,0.5f,0);}assert(floats[source]==0.5f&&!floats.count(copyA));
-  hook<void(*)(Ptr,int32_t,float,Ptr)>("Material.SetFloatImpl(int,float)")(source,7,0.25f,0);assert(floats[copyA]==0.25f&&floats[copyB]==0.25f);
-  hook<void(*)(Ptr,int32_t,Ptr,Ptr)>("Material.SetTextureImpl(int,Texture)")(source,5,tex,0);assert(textures.count({source,5})&&!textures.count({copyA,5}));
-  hook<void(*)(Ptr,int32_t,Ptr,Ptr)>("Material.SetTextureImpl(int,Texture)")(source,6,tex,0);assert(textures.count({copyA,6})&&textures.count({copyB,6}));
-  hook<void(*)(Ptr,Ptr,Ptr,Ptr)>("Material.SetTexture(string,Texture)")(source,managedString("_LightMapTex"),tex,0);assert(!textures.count({copyA,12}));
-  hook<void(*)(Ptr,Ptr,Ptr,Ptr)>("Material.SetTexture(string,Texture)")(source,managedString("_DissolveTex"),tex,0);assert(textures.count({copyA,12}));
-  assert(t.mirrored.load()==2+2+2+2&&t.mirrorFailures.load()==0);
-  bool cut=false;auto ev=t.collect(uint64_t(200000)*1000000,~0ull,cut);std::string counts;
-  auto lines=summarize(t,ev,[&](uint64_t tag){return ownerOf(tag)==owner;},uint64_t(200000)*1000000,4,80,counts);
-  assert(has(lines,"GIBox x1 SetColor _ElementRimColor#7 on Exp/Part0 clone row 1 Mat_Hair(Clone): (0,0.75,1,1)")&&has(lines,"game x1 SetColor _ElementRimColor#7 on Exp/Part0 original slot 1 Mat_Hair"));
-  t.mirrorOn=false;hook<void(*)(Ptr,int32_t,float,Ptr)>("Material.SetFloatImpl(int,float)")(source,7,0.75f,0);assert(floats[copyA]==0.25f);}
  t.armed=false;munmap(mapped,imageSize);for(void* p:blocks)std::free(p);
- std::cout<<"Glow trace: PASS ("<<t.hooked<<" of "<<kCount<<" entries hooked in the fake image; effect mirror)\n";
+ std::cout<<"Glow trace: PASS ("<<t.hooked<<" of "<<kCount<<" entries hooked in the fake image)\n";
 }
