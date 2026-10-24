@@ -55,8 +55,8 @@ public final class Control {
     public static synchronized void setLogLevel(String pkg, String level) throws Exception { JSONObject j = load(pkg); j.put("logLevel", level); save(pkg, j); }
     /** A monotonically increasing marker; game retains the preceding 30 seconds only while logLevel=debug. */
     /** Material experiments (control.json "experiments"; read by the game, debug only): glowTrace, gameMaterials,
-     *  neutralColors, noUv2 (booleans), firstRefreshMs (0 = default 1.5 s) and slotTextures (0 off, 1 per-material
-     *  property block, 2 per-material custom texture). */
+     *  neutralColors, noUv2, separateDraws (booleans), firstRefreshMs (0 = default 1.5 s) and slotTextures (0 off,
+     *  1 per-material property block, 2 per-material custom texture). */
     public static boolean experiment(String pkg, String key) { JSONObject x = load(pkg).optJSONObject("experiments"); return x != null && x.optBoolean(key, false); }
     public static int experimentMs(String pkg) { return experimentInt(pkg, "firstRefreshMs"); }
     public static int experimentInt(String pkg, String key) { JSONObject x = load(pkg).optJSONObject("experiments"); return x == null ? 0 : x.optInt(key, 0); }

@@ -35,11 +35,13 @@ std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static
 //   glowTrace      record every write to the tracked materials and renderers (glow_trace.hpp); changes nothing itself
 //   slotTextures   1/2: the game's own materials stay on, the mod's textures go into each draw slot's per-material
 //                  property block (1) or per-material custom texture (2); no copies, refreshes or mirroring
-struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false;int firstRefreshMs=0,slotTextures=0;
- std::string meshKey()const{return std::string(neutralColors?"c":"-")+(noUv2?"u":"-");}
- bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures;}
- bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||firstRefreshMs||slotTextures;}
- std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off");}};
+//   separateDraws  every draw in effect its own submesh, as before 0.7.23 (mergeDraws, model.hpp): for comparing the
+//                  picture and the draw count (rebuilds the model)
+struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false,separateDraws=false;int firstRefreshMs=0,slotTextures=0;
+ std::string meshKey()const{return std::string(neutralColors?"c":"-")+(noUv2?"u":"-")+(separateDraws?"s":"-");}
+ bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&separateDraws==o.separateDraws&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures;}
+ bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||separateDraws||firstRefreshMs||slotTextures;}
+ std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off");}};
 // effectMirror (control.json, default true): the game's material effects are repeated on GIBox's copies (glow_trace.hpp).
 struct ControlState {Experiments exp;bool enabled=false,effectMirror=true;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
 ControlState parseControl(const std::string& raw){
@@ -56,7 +58,7 @@ ControlState parseControl(const std::string& raw){
  for(auto& model:vars.object){require(model.second.type==Json::Object,"Variables object");for(auto& kv:model.second.object){require(kv.first.size()>1&&kv.first[0]=='$',"Variable name");auto n=integerOf(kv.second);require(std::abs(n)<=1000000,"Variable value");s.variables[model.first][kv.first]=int(n);}}
  s.logLevel=logThreshold(c);s.effectMirror=c.at("effectMirror").type!=Json::Bool||c.at("effectMirror").boolean;
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
-  s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");
+  s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");
   auto ms=integerOf(x.at("firstRefreshMs"));require(ms>=0&&ms<=10000,"experiments.firstRefreshMs");s.exp.firstRefreshMs=int(ms);
   auto slots=integerOf(x.at("slotTextures"));require(slots>=0&&slots<=2,"experiments.slotTextures");s.exp.slotTextures=int(slots);}
  return s;
@@ -166,10 +168,10 @@ struct Runtime::Impl {
  struct Owned {std::vector<Ptr> objects;std::vector<uint32_t> handles;};
  struct RestoreBackup:Owned {struct User{Ptr native;uint32_t handle;};Ptr mesh=0,materials=0;std::map<Ptr,User> users;std::set<Ptr> handed;};
  struct MatTex {bool original=true;Ptr main=0,light=0,normal=0;};
- struct BuiltPart {std::string name,avatar;Ptr mesh=0;Fingerprint target;std::vector<std::string> bones;Bytes indices;std::vector<DrawSpec> draws;std::vector<Submesh> subs;std::vector<Material> rows;  // all draws; those in effect
+ struct BuiltPart {std::string name,avatar;Ptr mesh=0;Fingerprint target;std::vector<std::string> bones;Bytes indices;std::vector<DrawSpec> draws;std::vector<MergedDraw> subs;std::vector<Material> rows;  // all draws; the submeshes in effect, and the material row of each
   Ptr originMesh=0,originMaterials=0;RestoreBackup* backup=nullptr;
   int bindable=-1;};  // last incoming bone-name hash count compatibility, for log suppression; origin pair pinned by the set
- struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
+ struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false,mergeDraws=true;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
  // source: for a renderer the game created from one of ours (adopted), the renderer whose material clones it shows.
  struct Attachment:Owned {Ptr renderer=0,native=0,original=0,originalMaterials=0,source=0;Set* set=nullptr;RestoreBackup* backup=nullptr;size_t part=0;bool adopted=false;std::map<std::string,Ptr> clones;std::string restoreError;
    uint64_t refreshAt=0,materialTraceStart=0,materialTraceAt=0,materialCheckAt=0,materialCheckUntil=0;unsigned refreshes=0,materialTraceSamples=0,materialRepairs=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;  // clone -> canonical game material; retained across refreshes
@@ -772,8 +774,16 @@ struct Runtime::Impl {
  // A set's draws for an assignment, as material names.
  std::set<std::string> drawnBy(const Set& s,const Assignment& a){if(s.data)return materialsDrawn(s.data->parts,a);std::set<std::string> out;std::vector<Submesh> subs;std::vector<Material> rows;
   for(auto& bp:s.parts){activeDraws(bp.draws,a,subs,rows);for(auto& r:rows)out.insert(r.name);}return out;}
- void setSubmeshes(Set& s,BuiltPart& bp){activeDraws(bp.draws,s.assignment,bp.subs,bp.rows);Owned tmp;try{auto& subs=bp.subs;e.op(abi::setSubmeshCount,bp.mesh,int(subs.size()));
-   for(size_t i=0;i<subs.size();i++){Ptr a=arrayOf(tmp,arrayClasses.i32,bp.indices.data()+subs[i].start*4ull,subs[i].count,4);e.call<void>(abi::setSubmeshTriangles,bp.mesh,a,int(i),Ptr(0));}}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}
+ // The draws in effect become the mesh's submeshes (merged per mergeDraws) and bp.rows the material row of each, which
+ // applyMaterials puts on the renderer slot by slot. bp.indices stays the model's buffer for the next assignment. Not
+ // merged with flags.originalMaterials: the game's palette goes on as it is, submesh i drawing with its material i.
+ void setSubmeshes(Set& s,BuiltPart& bp){std::vector<Submesh> drawn;std::vector<Material> rows;activeDraws(bp.draws,s.assignment,drawn,rows);
+  auto subs=mergeDraws(drawn,rows,s.mergeDraws);Owned tmp;
+  try{e.op(abi::setSubmeshCount,bp.mesh,int(subs.size()));
+   for(size_t i=0;i<subs.size();i++){Bytes joined;const uint8_t* src=bp.indices.data()+4ull*subs[i].ranges[0].start;if(subs[i].ranges.size()>1){joined=joinedIndices(bp.indices,subs[i]);src=joined.data();}
+    Ptr a=arrayOf(tmp,arrayClasses.i32,src,subs[i].count,4);e.call<void>(abi::setSubmeshTriangles,bp.mesh,a,int(i),Ptr(0));}}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);
+  bp.rows.clear();for(auto& d:subs)bp.rows.push_back(d.row);bp.subs=std::move(subs);
+  log("submeshes",s.name+"/"+bp.name+": "+std::to_string(drawn.size())+" draws in effect, "+std::to_string(bp.subs.size())+" submeshes"+(s.mergeDraws?"":s.originalMaterials?" (not merged: original materials by position)":" (not merged: experiments.separateDraws)"));}
  // The most common vertex colour of the game's mesh (per channel); the mobile default seen on readable meshes when the
  // game's mesh cannot be read.
  std::array<uint8_t,4> usualColor(Ptr mesh,const std::string& model){std::array<uint8_t,4> out{255,128,128,51};Owned tmp;
@@ -839,7 +849,7 @@ struct Runtime::Impl {
   auto s=std::make_unique<Set>();s->name=m.name;s->path=m.path;s->generation=m.generation;s->id=m.id;s->data=res.data;s->targets=targets;s->variants=res.data->variants;s->originalMaterials=res.data->originalMaterials;
   // Estimated memory once built: vertex arrays and the clone's skin, indices (ours and the engine's), RGBA textures.
   for(auto& p:res.data->parts){s->bytes+=uint64_t(p.geo.n)*(12+12+8+32+32);for(auto& c:p.channels)s->bytes+=c.second.size();s->bytes+=uint64_t(p.geo.ni)*8;}
-  s->meshKey=ctl.exp.meshKey();s->mats=std::move(res.data->materials);res.data->materials.clear();s->blobSize=res.data->blobSize;s->fileGeneration=res.data->generation;
+  s->meshKey=ctl.exp.meshKey();s->mergeDraws=!ctl.exp.separateDraws&&!s->originalMaterials;s->mats=std::move(res.data->materials);res.data->materials.clear();s->blobSize=res.data->blobSize;s->fileGeneration=res.data->generation;
   auto v=ctl.variables.find(s->name);s->assignment=pick(s->variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second);s->used=now;Set* cur=s.get();sets.push_back(std::move(s));log("loading",m.name+" "+m.generation);return cur;}
 
  // ---------------------------------------------------------------- attachments

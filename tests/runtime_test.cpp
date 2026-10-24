@@ -18,7 +18,7 @@ struct Fake {
  unsigned clones=0,meshClones=0,textures=0,weightAllocs=0,typeLookups=0,findCalls=0,findAllCalls=0,childCalls=0,bindposeReads=0;std::map<Ptr,Ptr> goOfRenderer;std::map<Ptr,std::vector<Ptr>> goChildren;Ptr lastWeights=0;std::map<Ptr,std::string> strings;std::string lightProperty;bool failMaterials=false,failFind=false;
  std::map<Ptr,Ptr> diffuse;std::map<Ptr,float> glow;std::map<Ptr,std::map<int32_t,std::array<float,4>>> props;std::map<Ptr,std::vector<std::string>> keywords; // material properties copied by Instantiate, including copies made by the game
  std::map<Ptr,unsigned> nameReads,boneReads; // actual engine getter counts, used to check binding hot-path work
- std::vector<Ptr> scene,assets;/* assets: only in the everything-loaded search (prefabs, inactive pooled instances) */std::vector<std::pair<Ptr,unsigned>> triangles;Ptr skeletonRoot=0,kavehRoot=0;std::map<std::string,Ptr> kinds;
+ std::vector<Ptr> scene,assets;/* assets: only in the everything-loaded search (prefabs, inactive pooled instances) */std::vector<std::pair<Ptr,unsigned>> triangles;std::map<std::pair<Ptr,int>,std::vector<uint32_t>> submeshIndices;Ptr skeletonRoot=0,kavehRoot=0;std::map<std::string,Ptr> kinds;
  // Il2CppClass per object kind, laid out unlike stock il2cpp: byval_arg at +0x98 with a type enum that is not the stock
  // 0x12, this_arg (byref bit 0x20) at +0x40, not next to it. Decoys: a pair whose data is the same in every class, and
  // a pair present only in the renderer class.
@@ -60,7 +60,8 @@ uint32_t pin(Ptr p,int,Ptr){auto h=f->nextHandle++;f->handles[h]=p;return h;}voi
 void setMesh(Ptr p,Ptr m,Ptr){f->obj.at(p).mesh=m;}void setMaterials(Ptr p,Ptr m,Ptr){if(f->failMaterials){f->failMaterials=false;throw std::runtime_error("fake-material-failure");}f->obj.at(p).materials=m;}
 Ptr newArray(Ptr cls,uint64_t count){return f->array(load<uint16_t>(cls+0xba),count);}void op(Ptr,int,Ptr){}void action(Ptr,Ptr){}
 void submeshCount(Ptr m,int n,Ptr){assert(n>=1);store<uint32_t>(f->obj.at(m).shared+0xc0,n);}
-void sub(Ptr m,Ptr a,int i,Ptr){assert(i>=0&&unsigned(i)<load<uint32_t>(f->obj.at(m).shared+0xc0));f->triangles.push_back({m,unsigned(load<uint64_t>(a+0x18))});}
+void sub(Ptr m,Ptr a,int i,Ptr){assert(i>=0&&unsigned(i)<load<uint32_t>(f->obj.at(m).shared+0xc0));unsigned n=unsigned(load<uint64_t>(a+0x18));f->triangles.push_back({m,n});
+ auto& v=f->submeshIndices[{m,i}];v.assign(n,0);if(n)std::memcpy(v.data(),reinterpret_cast<const void*>(a+0x20),4ull*n);}
 Ptr getPos(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getPositions);}Ptr getNorm(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getNormals);}Ptr getUV(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getUV);}Ptr getIdx(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getTriangles);}Ptr getBinds(Ptr p,Ptr){f->bindposeReads++;return f->obj.at(p).arrays.at(abi::getBindposes);}Ptr getColors(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getColors);}Ptr getTangents(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getTangents);}
 // Like il2cpp object_new: the managed shell has no native object until the constructor runs.
 Ptr texType(){Ptr d=f->alloc(8);store<Ptr>(d,f->alloc(0x100));return d;}Ptr objectNew(Ptr cls){assert(cls);Ptr p=f->alloc(0x20);f->obj[p]=Obj{"texture","",0,0,0,0,0,0,{}};return p;}
@@ -340,19 +341,21 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   for(auto& d:std::filesystem::directory_iterator(bones8))assert(d.path().filename()=="10000107");
   assert(f->handles.empty());}
  // 20. A version 2 model: draws carry their conditions. The default shows one draw; $halo=3 (with $legs at its default 1)
- //     adds the second in place; a value the model does not list keeps the default.
+ //     adds the second in place; a value the model does not list keeps the default. Both draws use Material0 in slot 0,
+ //     so the second joins the first's submesh (3 indices -> 6) instead of adding one.
  {std::string media9=root+"/media9",shared9=media9+"/"+pkg+"/GIBox",models9=shared9+"/models";
   {Spec w;w.version=2;w.withTarget(fixture::target("Body"));w.variants="{\"vars\":[{\"name\":\"$halo\",\"values\":[0,1,3]},{\"name\":\"$legs\",\"values\":[0,1]}],\"default\":{\"$halo\":0,\"$legs\":1}}";
    w.draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0},{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0,\"when\":{\"vars\":[\"$halo\",\"$legs\"],\"allow\":[[3,1]]}}]"};writeModel(models9+"/W",w);}
   std::filesystem::create_directories(shared9);auto ctl9=[&](const char* vars){write(shared9+"/control.json.tmp",std::string("{\"enabled\":true,\"selected\":[\"W\"],\"variables\":")+vars+"}");std::filesystem::rename(shared9+"/control.json.tmp",shared9+"/control.json");};
   ctl9("{}");Ptr w9=f->renderer(original);f->world(w9);f->scene={w9};
   Runtime v2(e,pkg,root+"/private9",media9,false);v2.tick(900000);v2.tick(900600);Ptr ours=meshOf(w9);auto subs=[&]{return load<uint32_t>(f->obj[ours].shared+0xc0);};
-  assert(ours!=original&&subs()==1);
-  ctl9("{\"W\":{\"$halo\":3}}");v2.tick(901200);v2.tick(901800);assert(meshOf(w9)==ours&&subs()==2);
-  ctl9("{\"W\":{\"$halo\":7}}");v2.tick(902400);v2.tick(903000);assert(meshOf(w9)==ours&&subs()==1);
+  auto drawn=[&]{return f->submeshIndices.at({ours,0}).size();};
+  assert(ours!=original&&subs()==1&&drawn()==3);
+  ctl9("{\"W\":{\"$halo\":3}}");v2.tick(901200);v2.tick(901800);assert(meshOf(w9)==ours&&subs()==1&&drawn()==6);
+  ctl9("{\"W\":{\"$halo\":7}}");v2.tick(902400);v2.tick(903000);assert(meshOf(w9)==ours&&subs()==1&&drawn()==3);
   // A renderer refusing the new materials puts the whole switch back (the next try goes through).
   f->failMaterials=true;ctl9("{\"W\":{\"$halo\":3}}");for(uint64_t t=903600;f->failMaterials&&t<910000;t+=600)v2.tick(t);
-  assert(!f->failMaterials&&subs()==1&&meshOf(w9)==ours);v2.tick(911000);assert(subs()==2);
+  assert(!f->failMaterials&&subs()==1&&drawn()==3&&meshOf(w9)==ours);v2.tick(911000);assert(subs()==1&&drawn()==6);
   v2.shutdown();assert(meshOf(w9)==original&&f->handles.empty());}
  // 21. A set nobody wants any more stays built for a quick switch back, and is released after a minute unused.
  {std::string media10=root+"/media10",shared10=media10+"/"+pkg+"/GIBox",models10=shared10+"/models",logFile=shared10+"/GIBox Log.txt";writeModel(models10+"/A",Spec().withTarget(fixture::target("Body")));
@@ -514,8 +517,9 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   trace.shutdown();assert(meshOf(w)==originalMesh&&f->obj[w].materials==saved&&f->handles.empty());}
  // 34. Party hand-off instantiates each draw's material (two draws sharing one base slot become two instances).
  //     Repair that recognized palette early, cap early attempts, retain the delayed recovery and original palette.
+ //     The two draws are neighbours with the same material, which would share one submesh: separateDraws keeps two.
  {std::string mediaCopy=root+"/mediaCopy",sharedCopy=mediaCopy+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));s.indices={0,1,2,2,1,0};s.draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0},{\"start\":3,\"count\":3,\"material\":\"Material0\",\"slot\":0}]"};writeModel(sharedCopy+"/models/Copy",s);
-  Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh),saved=f->obj[w].materials,baseMat=load<Ptr>(saved+0x20);f->obj[baseMat].name="Avatar_Mat_Body";f->glow[baseMat]=0;f->world(w);f->scene={w};write(sharedCopy+"/control.json","{\"enabled\":true,\"selected\":[\"Copy\"]}");
+  Ptr originalMesh=f->mesh(),w=f->renderer(originalMesh),saved=f->obj[w].materials,baseMat=load<Ptr>(saved+0x20);f->obj[baseMat].name="Avatar_Mat_Body";f->glow[baseMat]=0;f->world(w);f->scene={w};write(sharedCopy+"/control.json","{\"enabled\":true,\"selected\":[\"Copy\"],\"experiments\":{\"separateDraws\":true}}");
   Runtime copy(e,pkg,root+"/privateCopy",mediaCopy,false);copy.tick(2300000);assert(load<uint64_t>(f->obj[w].materials+0x18)==2);Ptr ourMesh=meshOf(w),texture=f->diffuse[load<Ptr>(f->obj[w].materials+0x20)];std::vector<Ptr> gameCopies;
   auto instantiatePalette=[&]{Ptr list[2];for(unsigned i=0;i<2;i++){list[i]=clone(load<Ptr>(f->obj[w].materials+0x20+8*i),0);f->obj[list[i]].name="Avatar_Mat_Body(Clone) (Instance) #"+std::to_string(i);f->glow[list[i]]=1;gameCopies.push_back(list[i]);}Ptr arr=f->array(8,2,list);f->obj[w].materials=arr;return arr;};
   for(uint64_t now:{2300050ull,2300100ull}){Ptr gameArray=instantiatePalette();copy.tick(now);assert(f->obj[w].materials!=gameArray&&meshOf(w)==ourMesh);for(Ptr m:{load<Ptr>(f->obj[w].materials+0x20),load<Ptr>(f->obj[w].materials+0x28)}){assert(f->glow[m]==0&&f->diffuse[m]==texture);}}
@@ -822,6 +826,39 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   control(1);sr.tick(4006600);assert(shown()==gameMat&&slotFake.slots.at({w,0}).at(5)==main&&slotFake.allow[w]==1);
   sr.shutdown();                                                                                    // restore: no block left, flag back off
   assert(meshOf(w)==original&&f->obj[w].materials==gameArray&&!slotFake.slots.count({w,0})&&slotFake.allow[w]==0&&f->handles.empty());}
+ // 50. Merged draws: neighbours with the same material row share a submesh, their index ranges joined in draw order.
+ //     A draw hidden by the variant between two of them is not drawn, ranges that continue each other become one, a
+ //     neighbour with another material keeps its own submesh and slot, and switching back reads the model's indices
+ //     again. experiments.separateDraws rebuilds the model with one submesh per draw, for comparison.
+ {std::string mediaMerge=root+"/mediaMerge",sharedMerge=mediaMerge+"/"+pkg+"/GIBox";Spec s;s.version=2;s.textures=true;s.extraMaterials=1;s.withTarget(fixture::target("Body"));
+  s.variants="{\"vars\":[{\"name\":\"$mid\",\"values\":[0,1]}],\"default\":{\"$mid\":0}}";s.indices={0,1,2,2,1,0,1,2,0,0,2,1};
+  s.draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0},{\"start\":3,\"count\":3,\"material\":\"Material0\",\"slot\":0,\"when\":{\"vars\":[\"$mid\"],\"allow\":[[1]]}},"
+   "{\"start\":6,\"count\":3,\"material\":\"Material0\",\"slot\":0},{\"start\":9,\"count\":3,\"material\":\"Material1\",\"slot\":0}]"};writeModel(sharedMerge+"/models/Merge",s);
+  Ptr original=f->mesh(),w=f->renderer(original);f->world(w);f->scene={w};
+  auto control=[&](int mid,bool separate){write(sharedMerge+"/control.json.tmp","{\"enabled\":true,\"logLevel\":\"debug\",\"selected\":[\"Merge\"],\"variables\":{\"Merge\":{\"$mid\":"+std::to_string(mid)+"}}"
+   +(separate?",\"experiments\":{\"separateDraws\":true}":"")+"}");std::filesystem::rename(sharedMerge+"/control.json.tmp",sharedMerge+"/control.json");};
+  auto subs=[&]{return load<uint32_t>(f->obj[meshOf(w)].shared+0xc0);};auto indices=[&](int i){return f->submeshIndices.at({meshOf(w),i});};
+  auto slots=[&]{return load<uint64_t>(f->obj[w].materials+0x18);};auto has=[&](const std::string& x){return text(sharedMerge+"/GIBox Log.txt").find(x)!=std::string::npos;};
+  using V=std::vector<uint32_t>;control(0,false);Runtime mr(e,pkg,root+"/privateMerge",mediaMerge,false);mr.tick(4100000);mr.tick(4100600);Ptr ours=meshOf(w);
+  assert(ours!=original&&subs()==2&&slots()==2&&indices(0)==(V{0,1,2,1,2,0})&&indices(1)==(V{0,2,1}));      // hidden middle draw skipped
+  auto texture=[&](int i){return f->diffuse[load<Ptr>(f->obj[w].materials+0x20+8*i)];};Ptr tex0=texture(0),tex1=texture(1);assert(alive(tex0)&&alive(tex1)&&tex0!=tex1);
+  assert(has("submeshes Merge/Part0: 3 draws in effect, 2 submeshes"));
+  control(1,false);mr.tick(4101200);mr.tick(4101800);                                               // three neighbours, one range
+  assert(meshOf(w)==ours&&subs()==2&&slots()==2&&indices(0)==(V{0,1,2,2,1,0,1,2,0})&&indices(1)==(V{0,2,1})&&has("submeshes Merge/Part0: 4 draws in effect, 2 submeshes"));
+  control(0,false);mr.tick(4102400);mr.tick(4103000);
+  assert(meshOf(w)==ours&&subs()==2&&slots()==2&&indices(0)==(V{0,1,2,1,2,0})&&texture(0)==tex0&&texture(1)==tex1);   // re-copies keep each slot's texture
+  control(0,true);for(uint64_t t=4103600;t<4110000&&!(meshOf(w)!=original&&meshOf(w)!=ours&&subs()==3);t+=600)mr.tick(t);   // one submesh per draw
+  assert(has("experiment-rebuild Merge")&&subs()==3&&slots()==3&&indices(0)==(V{0,1,2})&&indices(1)==(V{1,2,0})&&indices(2)==(V{0,2,1}));
+  assert(f->diffuse[load<Ptr>(f->obj[w].materials+0x20)]==f->diffuse[load<Ptr>(f->obj[w].materials+0x28)]&&f->diffuse[load<Ptr>(f->obj[w].materials+0x30)]!=f->diffuse[load<Ptr>(f->obj[w].materials+0x20)]);
+  assert(has("submeshes Merge/Part0: 3 draws in effect, 3 submeshes (not merged: experiments.separateDraws)"));
+  mr.shutdown();assert(meshOf(w)==original&&f->handles.empty());
+  // flags.originalMaterials puts the game's palette on by position (submesh i, material i): its draws stay apart.
+  Spec o;o.version=2;o.withTarget(fixture::target("Body"));o.indices={0,1,2,2,1,0};o.draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0},{\"start\":3,\"count\":3,\"material\":\"Material0\",\"slot\":0}]"};
+  o.edit=[](std::string& j){fixture::replaceIn(j,"\"parts\":[","\"flags\":{\"originalMaterials\":true},\"parts\":[");};writeModel(sharedMerge+"/models/Orig",o);
+  Ptr ow=f->renderer(original);f->world(ow);f->scene={ow};write(sharedMerge+"/control.json","{\"enabled\":true,\"selected\":[\"Orig\"]}");
+  Runtime orr(e,pkg,root+"/privateOrig",mediaMerge,false);orr.tick(4200000);orr.tick(4200600);
+  assert(meshOf(ow)!=original&&load<uint32_t>(f->obj[meshOf(ow)].shared+0xc0)==2&&has("submeshes Orig/Part0: 2 draws in effect, 2 submeshes (not merged: original materials by position)"));
+  orr.shutdown();assert(meshOf(ow)==original&&f->handles.empty());}
  std::filesystem::remove_all(root);
- std::cout<<"Native runtime: PASS (slot textures by property block and custom texture, effect mirror, glow trace windows and read-back, structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, glow experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
+ std::cout<<"Native runtime: PASS (merged draws: hidden and non-contiguous ranges, variant switches, separateDraws rebuild; slot textures by property block and custom texture, effect mirror, glow trace windows and read-back, structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, glow experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }

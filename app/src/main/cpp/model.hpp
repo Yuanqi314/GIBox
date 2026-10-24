@@ -91,6 +91,24 @@ inline void activeDraws(const std::vector<DrawSpec>& draws,const Assignment& a,s
  for(auto& d:draws)if(drawn(d.when,a)){subs.push_back(d.sub);rows.push_back(d.row);}
  if(subs.empty()&&!draws.empty()){subs.push_back({0,0});rows.push_back({draws[0].row.name,0});}
  require(subs.size()<=64,"More than 64 draws at once");}
+// One submesh of a part: the index ranges it draws, in draw order, and the material row of the renderer slot it uses.
+struct MergedDraw {Material row;std::vector<Submesh> ranges;unsigned count=0;};
+// The draws in effect as submeshes. merge: neighbours with the same row (material name and slot, so the same Material on
+// the renderer) share one submesh, their ranges kept in draw order; draws hidden by the assignment are not in `subs`, so
+// what lay between two merged ranges is never drawn. Only neighbours merge (A B A stays three submeshes), so no draw
+// moves past another. Ranges that continue each other in the index buffer become one range.
+inline std::vector<MergedDraw> mergeDraws(const std::vector<Submesh>& subs,const std::vector<Material>& rows,bool merge){require(subs.size()==rows.size(),"Draws and material rows differ");
+ std::vector<MergedDraw> out;
+ for(size_t i=0;i<subs.size();i++){
+  if(!merge||out.empty()||out.back().row.name!=rows[i].name||out.back().row.slot!=rows[i].slot){out.push_back({rows[i],{subs[i]},subs[i].count});continue;}
+  auto& d=out.back();if(!subs[i].count)continue;auto& last=d.ranges.back();
+  if(!last.count)last=subs[i];else if(last.start+last.count==subs[i].start)last.count+=subs[i].count;else d.ranges.push_back(subs[i]);
+  d.count+=subs[i].count;}
+ return out;}
+// A submesh's indices (4 bytes each), its ranges joined in order.
+inline Bytes joinedIndices(const Bytes& indices,const MergedDraw& d){Bytes out;out.reserve(4ull*d.count);
+ for(auto& r:d.ranges){require(4ull*(uint64_t(r.start)+r.count)<=indices.size(),"Draw outside the index buffer");out.insert(out.end(),indices.begin()+4ull*r.start,indices.begin()+4ull*(uint64_t(r.start)+r.count));}
+ return out;}
 struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;std::vector<DrawSpec> draws;std::vector<std::pair<std::string,Bytes>> channels;std::vector<std::string> sourceBones;std::vector<int> sourceParents;Bytes sourceBinds;};
 // Where a texture sits in model.bin (checked against the file when the manifest is read); its pixels are read only for
 // the materials an assignment draws (readTextures), so a model with many variants does not hold every texture at once.

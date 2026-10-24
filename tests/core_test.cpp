@@ -140,6 +140,21 @@ int main(int argc,char**argv){
   auto again=loadModelFile(root+"/lazy",false);fixture::writeModel(root+"/lazy",lz.gen("2"));bool refused=false;
   try{readTextures(root+"/lazy",again->generation,again->blobSize,again->materials,{"Material1"});}catch(const std::exception& ex){refused=std::string(ex.what()).find("model.json changed")!=std::string::npos;}assert(refused);
   Assignment a;std::vector<PartFile> none;assert(materialsDrawn(m->parts,a)==std::set<std::string>{"Material0"}&&materialsDrawn(none,a).empty());}
+ // Submeshes from the draws in effect (mergeDraws): neighbours with the same row share one, their ranges joined in draw
+ // order; a draw the assignment hides between them is not drawn; ranges continuing each other become one range.
+ {Material a{"A",0},a1{"A",1},b{"B",0};Bytes idx=fixture::words32({0,1,2,3,4,5,6,7,8,9,10,11});
+  When mid;mid.vars={"$mid"};mid.allow={{1}};std::vector<DrawSpec> ds={{{0,3},a,{}},{{3,3},a,mid},{{6,6},a,{}}};std::vector<Submesh> subs;std::vector<Material> rows;
+  activeDraws(ds,Assignment{{"$mid",0}},subs,rows);auto m=mergeDraws(subs,rows,true);
+  assert(m.size()==1&&m[0].row.name=="A"&&m[0].ranges.size()==2&&m[0].count==9&&joinedIndices(idx,m[0])==fixture::words32({0,1,2,6,7,8,9,10,11}));
+  activeDraws(ds,Assignment{{"$mid",1}},subs,rows);m=mergeDraws(subs,rows,true);
+  assert(m.size()==1&&m[0].ranges.size()==1&&m[0].ranges[0].start==0&&m[0].ranges[0].count==12&&joinedIndices(idx,m[0])==idx);
+  m=mergeDraws(subs,rows,false);assert(m.size()==3&&m[1].ranges[0].start==3&&m[1].count==3);           // not merged: every draw
+  assert(mergeDraws({{0,3},{3,3},{6,3}},{a,b,a},true).size()==3);                                      // A B A: no draw moves
+  assert(mergeDraws({{0,3},{3,3}},{a,a1},true).size()==2);                                             // another slot
+  m=mergeDraws({{6,3},{0,3}},{a,a},true);assert(m.size()==1&&joinedIndices(idx,m[0])==fixture::words32({6,7,8,0,1,2}));   // draw order, not buffer order
+  m=mergeDraws({{0,0},{3,3}},{a,a},true);assert(m.size()==1&&m[0].ranges.size()==1&&m[0].ranges[0].start==3&&m[0].count==3);
+  activeDraws({{{0,3},a,mid}},Assignment{{"$mid",0}},subs,rows);m=mergeDraws(subs,rows,true);assert(m.size()==1&&m[0].count==0&&joinedIndices(idx,m[0]).empty());   // nothing drawn
+  rejects([&]{joinedIndices(idx,MergedDraw{a,{{9,6}},6});});rejects([&]{mergeDraws({{0,3}},{},true);});}
  std::filesystem::remove_all(root);
  std::cout<<"Native core: PASS (GIBox model format: manifest, model.bin views, CRC-32, value/range/reference checks, variants, on-demand textures, learned.json, skeleton.json; bones, JSON, ELF notes, DDS, targets)\n";
 }
