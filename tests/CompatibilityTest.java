@@ -96,6 +96,7 @@ public final class CompatibilityTest {
         StringBuilder log=new StringBuilder();ModelConverter.convert(src,null,out,10000107,new ModelConverter.Options().variants(true),DECODE,log);
         Map<String,Object> manifest=Json.obj(Json.read(new File(out,"model.json"),4L<<20),"model");List<Object> frames=Json.arr(Json.obj(manifest.get("animation"),"animation").get("frames"),"frames",3,3);
         ok(ModelManifest.read(out).version==4&&ModelManifest.read(out).vars.isEmpty()&&log.toString().contains("完整转换"),"animation must not become a variant union");
+        ok(log.toString().contains("动画骨骼要求：Part0 / Body，无骨骼名映射，按索引绑定至少 ")&&log.toString().contains("转换成功不代表已通过游戏骨骼匹配"),"conversion must disclose the indexed skeleton requirement before device playback");
         Map<String,Object> part=Json.obj(Json.arr(Json.obj(frames.get(1),"frame").get("parts"),"parts",1,64).get(0),"part");
         ok(Fixtures.number(part,"vertices")==6&&Fixtures.view(out,Json.obj(part.get("data"),"data").get("positions")).getFloat(0)==99,"frame-local geometry is preserved");
         ok(Boolean.TRUE.equals(Json.obj(manifest.get("animation"),"animation").get("stableWeights")),"the dynamic mode must have an explicit immutable-weight guarantee");
