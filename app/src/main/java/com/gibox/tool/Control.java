@@ -55,7 +55,7 @@ public final class Control {
     public static synchronized void setLogLevel(String pkg, String level) throws Exception { JSONObject j = load(pkg); j.put("logLevel", level); save(pkg, j); }
     /** A monotonically increasing marker; game retains the preceding 30 seconds only while logLevel=debug. */
     /** Material experiments (control.json "experiments"; read by the game, debug only): glowTrace, gameMaterials,
-     *  neutralColors, noUv2, separateDraws, directTextures (booleans), firstRefreshMs (0 = default 1.5 s) and slotTextures (0 off,
+     *  neutralColors, noUv2, separateDraws (booleans), firstRefreshMs (0 = default 1.5 s) and slotTextures (0 off,
      *  1 per-material property block, 2 per-material custom texture). */
     public static boolean experiment(String pkg, String key) { JSONObject x = load(pkg).optJSONObject("experiments"); return x != null && x.optBoolean(key, false); }
     public static int experimentMs(String pkg) { return experimentInt(pkg, "firstRefreshMs"); }
@@ -68,6 +68,10 @@ public final class Control {
      *  "effectMirror", read by the game; on unless set to false). */
     public static boolean effectMirror(String pkg) { return load(pkg).optBoolean("effectMirror", true); }
     public static synchronized void setEffectMirror(String pkg, boolean on) throws Exception { JSONObject j = load(pkg); j.put("effectMirror", on); save(pkg, j); }
+    /** The mod's textures written into the game's own material of a slot where it is evidently that renderer's alone,
+     *  instead of into a copy (control.json "directTextures", read by the game; on unless set to false). */
+    public static boolean directTextures(String pkg) { return load(pkg).optBoolean("directTextures", true); }
+    public static synchronized void setDirectTextures(String pkg, boolean on) throws Exception { JSONObject j = load(pkg); j.put("directTextures", on); save(pkg, j); }
     public static synchronized void requestRenderMark(String pkg) throws Exception {
         JSONObject j = load(pkg);
         if (!"debug".equals(j.optString("logLevel", "info"))) throw new IllegalStateException("请先把日志等级设为调试，再复现异常");

@@ -37,15 +37,15 @@ std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static
 //                  property block (1) or per-material custom texture (2); no copies, refreshes or mirroring
 //   separateDraws  every draw in effect its own submesh, as before 0.7.23 (mergeDraws, model.hpp): for comparing the
 //                  picture and the draw count (rebuilds the model)
-//   directTextures the mod's textures go into the game's own material of a slot when that material is evidently this
-//                  renderer's alone, instead of into a copy (Runtime::directPlan); other slots are copied as before
-struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false,separateDraws=false,directTextures=false;int firstRefreshMs=0,slotTextures=0;
+struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false,separateDraws=false;int firstRefreshMs=0,slotTextures=0;
  std::string meshKey()const{return std::string(neutralColors?"c":"-")+(noUv2?"u":"-")+(separateDraws?"s":"-");}
- bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&separateDraws==o.separateDraws&&directTextures==o.directTextures&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures;}
- bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||separateDraws||directTextures||firstRefreshMs||slotTextures;}
- std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off")+" directTextures="+(directTextures?"on":"off");}};
+ bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&separateDraws==o.separateDraws&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures;}
+ bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||separateDraws||firstRefreshMs||slotTextures;}
+ std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off");}};
 // effectMirror (control.json, default true): the game's material effects are repeated on GIBox's copies (glow_trace.hpp).
-struct ControlState {Experiments exp;bool enabled=false,effectMirror=true;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
+// directTextures (control.json, default true): the mod's textures go into the game's own material of a slot when that
+// material is evidently this renderer's alone, instead of into a copy (Runtime::directPlan); other slots are copied.
+struct ControlState {Experiments exp;bool enabled=false,effectMirror=true,directTextures=true;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"Control JSON object");ControlState s;
  const auto& a=c.at("selected");require(a.type==Json::Array&&a.array.size()<=128,"Selected list");
@@ -59,8 +59,9 @@ ControlState parseControl(const std::string& raw){
  const auto& vars=c.at("variables");require(vars.type==Json::Object||vars.type==Json::Null,"Variables object");
  for(auto& model:vars.object){require(model.second.type==Json::Object,"Variables object");for(auto& kv:model.second.object){require(kv.first.size()>1&&kv.first[0]=='$',"Variable name");auto n=integerOf(kv.second);require(std::abs(n)<=1000000,"Variable value");s.variables[model.first][kv.first]=int(n);}}
  s.logLevel=logThreshold(c);s.effectMirror=c.at("effectMirror").type!=Json::Bool||c.at("effectMirror").boolean;
+ s.directTextures=c.at("directTextures").type!=Json::Bool||c.at("directTextures").boolean;
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
-  s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");s.exp.directTextures=flag("directTextures");
+  s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");
   auto ms=integerOf(x.at("firstRefreshMs"));require(ms>=0&&ms<=10000,"experiments.firstRefreshMs");s.exp.firstRefreshMs=int(ms);
   auto slots=integerOf(x.at("slotTextures"));require(slots>=0&&slots<=2,"experiments.slotTextures");s.exp.slotTextures=int(slots);}
  return s;
@@ -515,7 +516,7 @@ struct Runtime::Impl {
     if(a.slotLost<=10||a.slotLost%30==0)log("slot-textures-lost",where+": "+std::to_string(total-found)+" of "+std::to_string(total)+" textures were gone from the blocks, written again ("+std::to_string(a.slotLost)+" times so far)");}
    catch(const std::exception& ex){log("slot-textures","check "+where+": "+ex.what());}}}
 
- // ---------------------------------------------------------------- direct textures (debug experiment, experiments.directTextures)
+ // ---------------------------------------------------------------- direct textures (control.json "directTextures", default on)
  // The mod's textures go into the game's own material of a slot, not into a copy of it, when that material is evidently
  // this renderer's alone: made at runtime (negative instance id; a loaded asset is shared by everything made from it),
  // not carrying a GIBox texture (a game copy of one of our materials), in no other attachment's original palette, and on
@@ -558,7 +559,7 @@ struct Runtime::Impl {
  // Every material written gets its own textures back (a dead one is skipped); the ledger is emptied.
  void directRestore(Attachment& a,const char* why){if(a.direct.empty())return;unsigned n=0,copies=0;
   for(auto& kv:a.direct){Ptr m=kv.first;auto& d=kv.second;if(!alive(m)||load<Ptr>(m+0x10)!=d.native)continue;for(auto& b:d.before)putTexture(m,b.first,b.second);n++;if(d.copy)copies++;}
-  a.direct.clear();if(why)log("direct-textures",a.set->name+"/"+a.set->parts[a.part].name+" ("+why+"): own textures written back into "+std::to_string(n)+" game materials"+(copies?" ("+std::to_string(copies)+" of them game copies)":""));}
+  a.direct.clear();if(why&&n)log("direct-textures",a.set->name+"/"+a.set->parts[a.part].name+" ("+why+"): own textures written back into "+std::to_string(n)+" game materials"+(copies?" ("+std::to_string(copies)+" of them game copies)":""));}
  // A material on the renderer that the game copied from one we wrote into (same stem, our main texture) joins that
  // material's ledger. rewrite (each scan): a written one whose main texture the game replaced gets ours again (logged).
  void directTrack(Attachment& a,bool rewrite){bool any=false;for(auto& kv:attachments)any=any||!kv.second->direct.empty();if(!any||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return;
@@ -984,7 +985,8 @@ struct Runtime::Impl {
    for(auto& row:bp.rows){Ptr src=row.slot<originals.size()?originals[row.slot]:0;if(!alive(src))for(size_t k=originals.size();k-->0;)if(alive(originals[k])){src=originals[k];break;}require(alive(src),"Original material missing");mats.push_back(src);}
    Owned tmp;try{e.set(abi::setMaterials,a.renderer,array(tmp,a.originalMaterials,mats.data(),mats.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);return;}if(!s.originalMaterials){std::set<std::string> names;for(auto& r:bp.rows)names.insert(r.name);ensureTextures(s,names,true);}if(s.originalMaterials){e.set(abi::setMaterials,a.renderer,a.originalMaterials);return;}
   auto originals=pointers(a.originalMaterials,64);std::vector<Ptr> mats;std::map<unsigned,Ptr> direct;
-  if(ctl.exp.directTextures){std::string report;direct=directPlan(a,originals,report);if(report!=a.directReport){a.directReport=report;log("direct-textures",s.name+"/"+bp.name+" on "+rendererName(a.renderer)+": "+report);}}
+  // A decision that writes nothing (every slot copied, as for the party screen's loaded assets) is a debug line.
+  if(ctl.directTextures){std::string report;direct=directPlan(a,originals,report);if(report!=a.directReport){a.directReport=report;log(direct.empty()?"direct-textures-copied":"direct-textures",s.name+"/"+bp.name+" on "+rendererName(a.renderer)+": "+report);}}
   else a.directReport.clear();
   for(auto& row:bp.rows){auto key=row.name+"#"+std::to_string(row.slot);auto it=a.clones.find(key);
    // A slot that takes the mod's textures in the game's material: its old copy is retired (an adopted renderer may show it).
@@ -1554,7 +1556,8 @@ struct Runtime::Impl {
   if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel);
    if(!renderControlSeen){renderControlSeen=true;renderMarkSeen=c->renderMark;}
    if(c->logLevel!=int(Level::Debug))renderMarkSeen=c->renderMark;
-   bool expMaterials=c->exp.gameMaterials!=ctl.exp.gameMaterials||c->exp.slotTextures!=ctl.exp.slotTextures||c->exp.directTextures!=ctl.exp.directTextures;if(!(c->exp==ctl.exp))log("experiments",c->exp.text());
+   bool expMaterials=c->exp.gameMaterials!=ctl.exp.gameMaterials||c->exp.slotTextures!=ctl.exp.slotTextures||c->directTextures!=ctl.directTextures;
+   if(c->directTextures!=ctl.directTextures){log("direct-textures",c->directTextures?"on: the mod's textures go into the game's own materials where they can":"off: every slot gets a copy of the game's material");}if(!(c->exp==ctl.exp))log("experiments",c->exp.text());
    ctl=*c;handoff::publishControl(ctl.enabled);
    // gameMaterials, slotTextures or directTextures switched: every attached renderer gets the other kind of materials now (adopted copies
    // only for slotTextures, whose overrides are their own).
