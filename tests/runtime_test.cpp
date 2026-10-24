@@ -16,6 +16,7 @@ struct Fake {
  Ptr stringBase=0x7020000000ull,base=0,manager=0,owner=0,klass=0,typeObj=0;std::map<Ptr,Obj> obj;std::vector<void*> allocated;std::map<unsigned,Ptr> handles;unsigned nextHandle=1,nextId=1;
  // Each built part now clones one restoration snapshot and one mod mesh; count both engine allocations.
  unsigned clones=0,meshClones=0,textures=0,weightAllocs=0,typeLookups=0,findCalls=0,findAllCalls=0,childCalls=0,bindposeReads=0;std::map<Ptr,Ptr> goOfRenderer;std::map<Ptr,std::vector<Ptr>> goChildren;Ptr lastWeights=0;std::map<Ptr,std::string> strings;std::string lightProperty;bool failMaterials=false,failFind=false,failPosition=false;
+ unsigned expectedVertices=3;std::map<Ptr,unsigned> textureBytes;
  std::map<Ptr,Ptr> diffuse;std::map<Ptr,std::map<int32_t,Ptr>> named;std::map<Ptr,float> glow;std::map<Ptr,std::map<int32_t,std::array<float,4>>> props;std::map<Ptr,std::vector<std::string>> keywords; // material properties copied by Instantiate, including copies made by the game
  std::map<Ptr,unsigned> nameReads,boneReads; // actual engine getter counts, used to check binding hot-path work
  std::vector<Ptr> scene,assets;/* assets: only in the everything-loaded search (prefabs, inactive pooled instances) */std::vector<std::pair<Ptr,unsigned>> triangles;std::map<std::pair<Ptr,int>,std::vector<uint32_t>> submeshIndices;Ptr skeletonRoot=0,kavehRoot=0;std::map<std::string,Ptr> kinds;
@@ -65,18 +66,18 @@ void sub(Ptr m,Ptr a,int i,Ptr){assert(i>=0&&unsigned(i)<load<uint32_t>(f->obj.a
 Ptr getPos(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getPositions);}Ptr getNorm(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getNormals);}Ptr getUV(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getUV);}Ptr getIdx(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getTriangles);}Ptr getBinds(Ptr p,Ptr){f->bindposeReads++;return f->obj.at(p).arrays.at(abi::getBindposes);}Ptr getColors(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getColors);}Ptr getTangents(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getTangents);}
 // Like il2cpp object_new: the managed shell has no native object until the constructor runs.
 Ptr texType(){Ptr d=f->alloc(8);store<Ptr>(d,f->alloc(0x100));return d;}Ptr objectNew(Ptr cls){assert(cls);Ptr p=f->alloc(0x20);f->obj[p]=Obj{"texture","",0,0,0,0,0,0,{}};return p;}
-void texInit(Ptr o,int w,int h,int fmt,int mip,int linear,Ptr){assert(w>0&&h>0&&fmt==4&&mip==0&&(linear==0||linear==1)&&load<Ptr>(o+0x10)==0);Ptr n=f->alloc(0x80);store<Ptr>(o+0x10,n);f->obj[o].native=n;f->textures++;}
-void texPixels(Ptr o,Ptr data,int n,Ptr){assert(load<Ptr>(o+0x10)&&data&&n==4);}
+void texInit(Ptr o,int w,int h,int fmt,int mip,int linear,Ptr){assert(w>0&&h>0&&fmt==4&&mip==0&&(linear==0||linear==1)&&load<Ptr>(o+0x10)==0);Ptr n=f->alloc(0x80);store<Ptr>(o+0x10,n);f->obj[o].native=n;f->textures++;f->textureBytes[o]=unsigned(w*h*4);}
+void texPixels(Ptr o,Ptr data,int n,Ptr){assert(load<Ptr>(o+0x10)&&data&&n>0&&unsigned(n)==f->textureBytes.at(o));}
 // Managed strings live above 4 GiB in the game; a 32-bit truncation must not survive the round trip.
 Ptr newString(Ptr self,const char* s){assert(self==0&&s);Ptr p=(f->stringBase+=0x40);f->strings[p]=s;return p;}
 uint32_t hasProp(Ptr mat,Ptr name,Ptr){assert(mat&&f->strings.count(name));return f->strings[name]=="_LightMapTex"?0xffffff01u:0xffffff00u;}
-Ptr nativeAlloc(Ptr allocator,Ptr old,uint64_t size,int align,int label,int options,const char* name,int line){assert(allocator==load<Ptr>(f->base+abi::nativeAllocator)&&old==0&&size==32*3&&align==16&&label==15&&options==0&&name&&line==1);f->weightAllocs++;return f->lastWeights=f->alloc(size);}
+Ptr nativeAlloc(Ptr allocator,Ptr old,uint64_t size,int align,int label,int options,const char* name,int line){assert(allocator==load<Ptr>(f->base+abi::nativeAllocator)&&old==0&&size==32ull*f->expectedVertices&&align==16&&label==15&&options==0&&name&&line==1);f->weightAllocs++;return f->lastWeights=f->alloc(size);}
 int32_t glowPropertyId(Ptr name,Ptr);
 // A texture by property name; null puts a property back to empty (direct textures restore what a material held).
 void setTex(Ptr mat,Ptr name,Ptr tex,Ptr){assert(mat&&(!tex||load<Ptr>(tex+0x10))&&f->strings.count(name));f->lightProperty=f->strings[name];f->named[mat][glowPropertyId(name,0)]=tex;}
 void setMainTexture(Ptr mat,Ptr tex,Ptr){assert(mat);f->diffuse[mat]=tex;}
-unsigned channelSets=0;std::vector<Bytes> channelData;void setChannel(Ptr,Ptr a,Ptr){assert(load<uint64_t>(a+0x18)==3);channelSets++;
- unsigned stride=load<uint16_t>(load<Ptr>(a)+0xba);channelData.emplace_back(reinterpret_cast<const uint8_t*>(a+0x20),reinterpret_cast<const uint8_t*>(a+0x20)+3*stride);}void setPos(Ptr p,Ptr a,Ptr){if(f->failPosition){f->failPosition=false;throw std::runtime_error("fake-animation-channel-error");}store<uint32_t>(f->obj.at(p).shared+0x74,load<uint64_t>(a+0x18));}void setAny(Ptr,Ptr,Ptr){}
+unsigned channelSets=0;std::vector<Bytes> channelData;void setChannel(Ptr,Ptr a,Ptr){assert(load<uint64_t>(a+0x18)==f->expectedVertices);channelSets++;
+ unsigned stride=load<uint16_t>(load<Ptr>(a)+0xba);channelData.emplace_back(reinterpret_cast<const uint8_t*>(a+0x20),reinterpret_cast<const uint8_t*>(a+0x20)+size_t(f->expectedVertices)*stride);}void setPos(Ptr p,Ptr a,Ptr){if(f->failPosition){f->failPosition=false;throw std::runtime_error("fake-animation-channel-error");}store<uint32_t>(f->obj.at(p).shared+0x74,load<uint64_t>(a+0x18));}void setAny(Ptr,Ptr,Ptr){}
 Ptr classFromType(Ptr t,int init){assert(init==1&&load<uint8_t>(t+0xa)!=0);f->typeLookups++;for(auto& kv:f->kinds)if(t==kv.second+0x98)return kv.second;return f->alloc(0x10);}
 Ptr typeObject(Ptr t){assert(t==f->klass+0x98);if(!f->typeObj){f->typeObj=f->alloc(0x20);store<Ptr>(f->typeObj+0x10,t);}return f->typeObj;}
 Ptr goOf(Ptr r,Ptr){assert(f->obj.at(r).kind=="renderer"||f->obj.at(r).kind=="transform");auto it=f->goOfRenderer.find(r);if(it!=f->goOfRenderer.end())return it->second;Ptr g=f->object("gameobject","GO");f->goOfRenderer[r]=g;return g;}
@@ -124,7 +125,7 @@ Ptr resolve(abi::Offset o){if(Ptr g=resolveGlow(o))return g;switch(o){
  default:throw std::runtime_error("Unexpected fake engine call: "+std::to_string(o));}}
 bool alive(Ptr p){return p&&load<Ptr>(p+0x10);}
 }
-int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdtemp(temp));std::string root=temp,pkg="com.miHoYo.Yuanshen",media=root+"/media",shared=media+"/"+pkg+"/GIBox",models=shared+"/models",boneRoot=shared+"/skeletons";
+int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdtemp(temp));std::string root=temp,pkg="com.miHoYo.Yuanshen",media=root+"/media",shared=media+"/"+pkg+"/GIBox",models=shared+"/models",boneRoot=shared+"/skeletons";
  writeModel(models+"/A");writeModel(models+"/B");
  // Model B carries a real 1x1 diffuse and a LightMap, so its material builds two textures.
  {Spec b;b.textures=true;b.channels=true;writeModel(models+"/B",b);}
@@ -139,6 +140,23 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
  Ptr other=f->renderer(f->mesh("OtherBody"),"BoneA","Body",f->kavehRoot);Ptr otherMesh=f->obj[other].mesh;  // another character (model C, U)
  f->scene={world,ui,npc,odd,other};
  Engine e(f->base);e.resolver=resolve;Runtime runtime(e,pkg,root+"/private",media,false);store<Ptr>(f->base+abi::nativeAllocator,f->alloc(0x10));
+ // Optional, local-only integration input: a real exported index-only model, never bundled into the test suite.
+ if(argc>=2){bool expectWait=argc==3&&std::string(argv[2])=="--expect-wait";assert(argc==2||expectWait);runtime.shutdown();std::string dest=models+"/Actual";std::filesystem::copy(argv[1],dest,std::filesystem::copy_options::recursive);auto data=loadModelFile(dest,false,true);assert(data->id==10000007&&data->parts.size()==1&&data->parts[0].sourceBones.empty());auto& part=data->parts[0];auto old=readLearned(dest).targets.at(part.spec.name);auto names=readLegacyBoneNames(dest+"/bonemap-"+part.spec.name+".tsv",part.spec.bones);
+  assert(part.geo.n==20757&&part.used.size()==101&&old.bones==114);f->expectedVertices=part.geo.n;f->obj[f->skeletonRoot].name="Avatar_Girl_Sword_PlayerGirl";
+  Ptr entity=load<Ptr>(load<Ptr>(load<Ptr>(f->manager+0x10)+0x10)+0x20);store<uint32_t>(entity+0x3a4,10000007);
+  Ptr low=f->mesh("Body_LOD1",6594),r=f->renderer(low);store<uint32_t>(f->obj[low].shared+0xc0,3);store<uint64_t>(f->obj[low].shared+0xe0,114);std::vector<Ptr> bones;Bytes binds(114*64);
+  for(unsigned i=0;i<114;i++){Ptr bone=f->object("bone",names[i].empty()?"Unused"+std::to_string(i):names[i]);f->obj[bone].parent=f->skeletonRoot;bones.push_back(bone);for(unsigned n=0;n<4;n++)store<float>(reinterpret_cast<Ptr>(binds.data())+i*64+n*20,1.f);}
+  f->obj[r].bones=f->array(8,114,bones.data());f->obj[low].arrays[abi::getBindposes]=f->array(64,114,binds.data());f->world(r);f->scene={r};write(shared+"/control.json","{\"enabled\":true,\"selected\":[\"Actual\"],\"logLevel\":\"debug\"}");
+  {Runtime actual(e,pkg,root+"/actual-private",media,false);for(uint64_t now=1000000;now<=1004000;now+=200)actual.tick(now);Ptr mod=f->obj[r].mesh;auto log=text(shared+"/GIBox Log.txt");
+   if(expectWait){assert(mod==low&&f->meshClones==0&&JsonParser(text(shared+"/status.json")).parse().at("state").string=="waiting");actual.shutdown();assert(f->handles.empty());std::filesystem::remove_all(root);std::cout<<"Prior runtime: reproduced waiting on the real export with no skeleton library\n";return 0;}
+   assert(mod!=low&&log.find("matched-used=101")!=std::string::npos&&load<uint32_t>(f->obj[mod].shared+0x74)==20757&&!exists(boneRoot+"/10000007/skeleton.json"));
+   Ptr skin=load<Ptr>(f->obj[mod].shared+0xf0);for(unsigned v=0;v<part.geo.n;v++){std::map<unsigned,float> expected,observed;for(unsigned k=0;k<4;k++){auto p=part.weights.data()+32ull*v;float w=f32(p+4*k);if(w>0)expected[u32(p+16+4*k)]+=w;auto q=reinterpret_cast<const uint8_t*>(skin)+32ull*v;w=f32(q+4*k);if(w>0)observed[u32(q+16+4*k)]+=w;}assert(expected.size()==observed.size());for(auto& pair:expected)assert(observed.count(pair.first)&&std::abs(pair.second-observed[pair.first])<2e-6);}
+   auto recorded=readLegacyBoneNames(dest+"/bonemap-"+part.spec.name+".tsv",part.spec.bones);for(unsigned i=0;i<part.spec.bones;i++)if(!part.used.count(i))assert(recorded[i].empty());
+   unsigned clones=f->meshClones;uint64_t switchAt=1005000;for(unsigned mode:{1u,2u,0u}){write(shared+"/control.json","{\"enabled\":true,\"selected\":[\"Actual\"],\"logLevel\":\"debug\",\"experiments\":{\"animationMode\":"+std::to_string(mode)+"}}");actual.tick(switchAt);switchAt+=1000;assert(f->obj[r].mesh==mod&&f->meshClones==clones);}
+   actual.shutdown();assert(f->obj[r].mesh==low&&f->handles.empty());}
+  unsigned clones=f->meshClones;f->obj[bones[*part.used.begin()]].name="WrongUsedBone";
+  {Runtime rejected(e,pkg,root+"/actual-wrong-palette",media,false);for(uint64_t now=1010000;now<=1012000;now+=200)rejected.tick(now);assert(f->obj[r].mesh==low&&f->meshClones==clones);rejected.shutdown();assert(f->handles.empty());}
+  std::filesystem::remove_all(root);std::cout<<"Real legacy export: PASS (101 used names checked, 114-bone LOD1, all 20757 vertex influences preserved, wrong palette rejected, original restored)\n";return 0;}
  // rev only makes control.json differ (a control change clears latched failures)
  auto control=[&](bool enabled,int rev,int exportBones,std::vector<std::string> selected,std::string vars="{}"){std::string list="[";for(size_t i=0;i<selected.size();i++)list+=(i?",":"")+quote(selected[i]);list+="]";
   write(shared+"/control.json.tmp","{\"enabled\":"+std::string(enabled?"true":"false")+",\"selected\":"+list+",\"revision\":"+std::to_string(rev)+",\"exportBones\":"+std::to_string(exportBones)+",\"variables\":"+vars+"}");std::filesystem::rename(shared+"/control.json.tmp",shared+"/control.json");};
@@ -481,6 +499,21 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   {Runtime rejected(e,pkg,root+"/embedded-lod-wrong-name",mediaE,false);for(uint64_t t=1730000;t<=1732000;t+=500)rejected.tick(t);assert(meshOf(wrong)==wrongMesh&&f->meshClones==clones);rejected.shutdown();}
   Ptr movedMesh=f->mesh("Body_LOD1",2),moved=f->renderer(movedMesh);auto bind=f->obj[movedMesh].arrays[abi::getBindposes];store<float>(bind+0x20,2.f);f->world(moved);f->scene={moved};
   {Runtime rejected(e,pkg,root+"/embedded-lod-wrong-binds",mediaE,false);for(uint64_t t=1740000;t<=1742000;t+=500)rejected.tick(t);assert(meshOf(moved)==movedMesh&&f->meshClones==clones);rejected.shutdown();}assert(f->handles.empty());}
+ // Historical index-only builds left a partial successful bonemap, not an embedded skeleton. Check all USED rows,
+ // allow unmapped UNUSED rows, wait for a stable live palette, and never apply this recovery to an animation.
+ {auto mediaL=root+"/legacy-map-media",sharedL=mediaL+"/"+pkg+"/GIBox",dir=sharedL+"/models/Legacy";Spec source;source.noSkeleton().character(10000107,{"citlali"});auto target=fixture::target("Body");fixture::replaceIn(target,"\"bones\":1","\"bones\":2");source.withTarget(target);
+  source.edit=[](std::string& j){fixture::replaceIn(j,"\"bones\":1,\"vertices\"","\"bones\":2,\"vertices\"");};writeModel(dir,source);auto file=dir+"/bonemap-Part0.tsv";
+  std::string header="source_index\ttarget_index\tsource_name\ttarget_name\n",good=header+"0\t0\t#0\tBoneA\n1\t-1\t#1\t\n";write(file,good);auto names=readLegacyBoneNames(file,2);assert(names.size()==2&&names[0]=="BoneA"&&names[1].empty());
+  Ptr low=f->mesh("Body_LOD1",2),r=f->renderer(low),bone0=load<Ptr>(f->obj[r].bones+0x20),unused=f->object("bone","UnusedBone");f->obj[unused].parent=f->skeletonRoot;Ptr bones[]={bone0,unused};f->obj[r].bones=f->array(8,2,bones);Bytes matrices(128);for(unsigned n=0;n<2;n++)for(unsigned k=0;k<4;k++)store<float>(reinterpret_cast<Ptr>(matrices.data())+n*64+k*20,1.f);
+  auto binds=f->array(64,2,matrices.data());f->obj[low].arrays[abi::getBindposes]=binds;store<uint64_t>(f->obj[low].shared+0xe0,2);f->world(r);f->scene={r};write(sharedL+"/control.json","{\"enabled\":true,\"selected\":[\"Legacy\"]}");
+  {Runtime recovered(e,pkg,root+"/legacy-map-private",mediaL,false);recovered.tick(1800000);recovered.tick(1800200);assert(meshOf(r)==low);store<float>(binds+0x20,2.f);recovered.tick(1800400);recovered.tick(1800600);assert(meshOf(r)==low);recovered.tick(1801000);
+   assert(meshOf(r)!=low&&text(sharedL+"/GIBox Log.txt").find("matched-used=1")!=std::string::npos&&!exists(sharedL+"/skeletons/10000107/skeleton.json"));recovered.shutdown();assert(meshOf(r)==low&&f->handles.empty());}
+  auto rejects=[&](const std::string& priv){unsigned clones=f->meshClones;Runtime rejected(e,pkg,root+priv,mediaL,false);for(uint64_t now=1810000;now<=1812000;now+=200)rejected.tick(now);assert(meshOf(r)==low&&f->meshClones==clones);rejected.shutdown();assert(f->handles.empty());};
+  f->obj[bone0].name="WrongUsedBone";rejects("/legacy-map-name-mismatch");f->obj[bone0].name="BoneA";
+  write(file,header+"0\t-1\t#0\t\n1\t-1\t#1\t\n");rejects("/legacy-map-used-missing");
+  write(file,header+"0\t1\t#0\tBoneA\n1\t-1\t#1\t\n");rejects("/legacy-map-reindexed");
+  write(file,good+"0\t0\t#0\tBoneA\n");rejects("/legacy-map-duplicate");
+  auto anim=sharedL+"/models/Animated";writeModel(anim,fixture::animated(source));write(anim+"/bonemap-Part0.tsv",good);write(sharedL+"/control.json","{\"enabled\":true,\"selected\":[\"Animated\"]}");rejects("/legacy-map-animation");}
  // 29. A preview's game code instantiates our materials (new pointers, same mod texture). Every kind of off switch
  //     must restore the saved original mesh AND texture. A reclaim must not overwrite the clean material backup.
  for(int mode=0;mode<3;mode++){

@@ -101,6 +101,9 @@ std::vector<ModelInfo> scanModels(const std::string& root,std::map<std::string,M
 std::shared_ptr<ModelFile> loadModel(const ModelInfo& info,const std::map<std::string,int>& chosen,bool verify=true){
  auto m=loadModelFile(info.path,false,verify);require("g:"+m->generation==info.generation,"model.json changed while loading");
  m->name=info.name;m->id=info.id;require(m->parts.size()==info.parts.size(),"model.json changed while loading");
+ // The worker reads the old sidecar alongside the verified model. Hooks never open a bonemap file.
+ if(!info.animated)for(size_t i=0;i<m->parts.size();i++){auto& part=m->parts[i];if(!info.parts[i].hasTarget||!part.sourceBones.empty())continue;
+  try{part.legacyBoneNames=readLegacyBoneNames(info.path+"/bonemap-"+part.spec.name+".tsv",part.spec.bones);}catch(const std::exception& ex){part.legacyBoneError=ex.what();}}
  readTextures(info.path,m->generation,m->blobSize,m->materials,materialsDrawn(m->parts,pick(m->variants,chosen)));return m;
 }
 // Memory a loaded, not yet built model holds: geometry and the textures read for it.
@@ -214,6 +217,7 @@ struct Runtime::Impl {
  // out because an attach failed on them; scanCount numbers the scans. Per model: scan number, reason, details logged, time.
  int scanWorld=0,scanAll=-1;unsigned scanSkipped=0;uint64_t scanCount=0;unsigned shownCharacter=~0u;uint64_t idleMs=60000,idleBudget=256ull<<20;bool controlSeen=false;std::string exportWait;
  struct WaitWhy {uint64_t scan=~0ull;std::string reason,context;bool plain=false;std::string logged;uint64_t loggedAt=0;};std::map<std::string,WaitWhy> waitWhy,targetWaitWhy;
+ struct LegacyLodProbe {std::string stamp,note;uint64_t at=0;};std::map<std::string,LegacyLodProbe> legacyLodProbes;
  std::unique_ptr<renderprobe::UnityReader> renderReader;std::unique_ptr<renderprobe::Recorder> renderRecorder;
  long long renderMarkSeen=0;bool renderControlSeen=false;uint64_t renderIdentityAt=0,renderFollowEndAt=0;
  struct RenderBones {std::vector<std::pair<Ptr,uint32_t>> bones;std::string error;};
@@ -769,6 +773,33 @@ struct Runtime::Impl {
   while(end>0){auto slash=root.rfind('/',end-1);size_t start=slash==std::string::npos?0:slash+1;auto n=meshName(root.substr(start,end-start));
    if(n.compare(0,7,"avatar_")==0){return n.substr(0,n.find("_manekin"));}if(slash==std::string::npos){break;}end=slash;}
   return "";}
+ // Old index-only models may have no embedded skeleton and no separate library, but still carry a mapping recorded
+ // during an earlier build. Check EVERY currently used index against it. Unused -1 rows prove nothing and are
+ // never filled in. This path does not claim to recover historical bindposes: it validates the live ones and waits
+ // for two identical captures, then uses that renderer's own palette, just like an index-only full-mesh build.
+ std::optional<Seen> legacyLodTemplate(const ModelInfo& m,const Fingerprint& target,const ModelFile& saved){
+  if(m.animated||!ch.entity||m.id!=ch.config){return std::nullopt;}std::set<Ptr> world;for(Ptr r:worldRenderers())world.insert(r);
+  for(size_t i=0;i<m.parts.size()&&i<saved.parts.size();i++){const auto& info=m.parts[i];const auto& part=saved.parts[i];
+   if(!info.hasTarget||!matches(target,info.target)||!part.sourceBones.empty()){continue;}auto key=m.path+"|"+info.name;auto& probe=legacyLodProbes[key];
+   auto report=[&](const std::string& why){if(probe.note!=why){probe.note=why;log("legacy-lod-wait",m.name+"/"+info.name+": "+why);}};
+   if(part.legacyBoneNames.size()!=part.spec.bones||part.used.empty()){report(part.legacyBoneError.empty()?"no complete historical index bonemap; waiting for a full mesh or skeleton library":part.legacyBoneError);continue;}
+   bool covered=true;for(unsigned index:part.used)covered=covered&&index<part.legacyBoneNames.size()&&!part.legacyBoneNames[index].empty();
+   if(!covered){probe.stamp.clear();report("the historical bonemap does not name every bone used by this conversion");continue;}
+   for(const auto& candidate:seen){if(!world.count(candidate.renderer)||!alive(candidate.renderer)||!alive(candidate.mesh)||!lowerLod(candidate.fp.mesh)||meshName(candidate.fp.mesh)!=meshName(target.mesh)||candidate.fp.bones!=target.bones||candidate.fp.submeshes!=target.submeshes||normalize(rendererName(candidate.renderer))!=normalize(target.renderer))continue;
+    if(attachments.count(candidate.renderer)||skipped.count({candidate.renderer,load<Ptr>(candidate.renderer+0x10)})||e.get(abi::getMesh,candidate.renderer)!=candidate.mesh)continue;
+    Owned roots;try{auto current=fingerprint(candidate.mesh,true);require(lowerLod(current.mesh)&&meshName(current.mesh)==meshName(target.mesh)&&current.bones==target.bones&&current.submeshes==target.submeshes,"candidate mesh layout changed");
+     if(!m.names.empty()){auto tokens=chain(candidate.renderer,true);require(namesMatch(m.names,tokens)&&std::find(tokens.begin(),tokens.end(),"avatar")!=tokens.end(),"candidate avatar identity differs");}
+     Ptr array=e.get(abi::getBones,candidate.renderer);pin(roots,array);auto bones=pointers(array,512);require(bones.size()==target.bones&&bones.size()>=info.minBones,"live bone count differs from the learned full target");
+     std::string stamp=m.generation+":"+hex(candidate.renderer)+":"+std::to_string(instanceId(candidate.renderer))+":"+hex(candidate.mesh)+":"+std::to_string(instanceId(candidate.mesh))+":"+describe(current);
+     for(size_t n=0;n<bones.size();n++){require(alive(bones[n]),"live bone is missing");auto label=name(bones[n]);require(!label.empty()&&label.size()<=256&&label.find_first_of("\t\r\n")==label.npos,"live bone name is invalid");
+      if(part.used.count(unsigned(n)))require(label==part.legacyBoneNames[n],"used bone "+std::to_string(n)+" differs: saved "+part.legacyBoneNames[n]+", live "+label);
+      stamp+='\n'+hex(load<Ptr>(bones[n]+0x10))+":"+std::to_string(instanceId(bones[n]))+":"+label;}
+     Ptr binds=e.get(abi::getBindposes,candidate.mesh);pin(roots,binds);require(length(binds,512)==bones.size(),"live bone/bindpose count differs");auto matrices=arrayBytes(binds,64,512);detail::finite(matrices,"Legacy LOD live bindposes");stamp.append(reinterpret_cast<const char*>(matrices.data()),matrices.size());freeOwned(roots);
+     if(probe.stamp!=stamp){probe.stamp=std::move(stamp);probe.at=bindingNow;report("used bone names match; waiting for a second stable live palette capture");return std::nullopt;}
+     if(bindingNow<probe.at+500){return std::nullopt;}auto logKey="legacy|"+m.path+"|"+m.generation+"|"+info.name;
+     if(lodLogged.insert(logKey).second){log("legacy-lod",m.name+"/"+info.name+": "+current.mesh+", palette="+std::to_string(bones.size())+", matched-used="+std::to_string(part.used.size())+", source=historical-bonemap, live-bindposes=stable (historical bindposes not recorded)");}probe.note.clear();return Seen{candidate.renderer,candidate.mesh,current};
+    }catch(const std::exception& ex){freeOwned(roots);probe.stamp.clear();report(ex.what());}}
+  }return std::nullopt;}
  // No full mesh in sight, but the controlled character shows a lower LOD of it whose bones (names, order) and bindposes
  // are exactly those the bone library recorded from the full mesh: the skinning is the same, so it can be the template.
  std::optional<Seen> lodTemplate(const ModelInfo& m,const Fingerprint& t,unsigned minBones){
@@ -783,7 +814,7 @@ struct Runtime::Impl {
   if(!rec&&saved)for(size_t i=0;i<m.parts.size()&&i<saved->parts.size();i++){auto& part=m.parts[i];auto& data=saved->parts[i];
    if(!part.hasTarget||!matches(t,part.target)||data.sourceBones.size()!=t.bones||data.sourceBinds.size()!=64ull*t.bones)continue;
    embedded.name=t.renderer;embedded.target=t;embedded.bones=data.sourceBones;embedded.parents=data.sourceParents;embedded.bindposes=data.sourceBinds;rec=&embedded;break;}
-  if(!rec){return std::nullopt;}std::set<Ptr> world;try{for(Ptr r:worldRenderers())world.insert(r);}catch(const std::exception&){return std::nullopt;}
+  if(!rec){return !lib&&saved?legacyLodTemplate(m,t,*saved):std::nullopt;}std::set<Ptr> world;try{for(Ptr r:worldRenderers())world.insert(r);}catch(const std::exception&){return std::nullopt;}
   for(auto& s:seen){if(!world.count(s.renderer)||!alive(s.renderer)||!alive(s.mesh)||!lowerLod(s.fp.mesh)||meshName(s.fp.mesh)!=meshName(t.mesh)||s.fp.bones!=rec->bones.size()||normalize(rendererName(s.renderer))!=normalize(t.renderer))continue;
    if(attachments.count(s.renderer)||skipped.count({s.renderer,load<Ptr>(s.renderer+0x10)})||e.get(abi::getMesh,s.renderer)!=s.mesh||!sameBones(s.renderer,rec->bones))continue;
    Owned tmp;bool same=false;try{Ptr binds=e.get(abi::getBindposes,s.mesh);if(binds){pin(tmp,binds);auto b=arrayBytes(binds,64,512);same=b.size()==rec->bindposes.size()&&std::memcmp(b.data(),rec->bindposes.data(),b.size())==0;}}catch(const std::exception&){same=false;}freeOwned(tmp);
@@ -855,7 +886,9 @@ struct Runtime::Impl {
    remap(weights,mapping);BuiltPart bp;bp.animationOwner=owner;bp.boneMapping=mapping;bp.targetBinds=arrayBytes(binds,64,512);
    if(!pf.sourceBones.empty())for(Ptr bone:bones){Ptr up=e.get(abi::getParent,bone);auto at=std::find(bones.begin(),bones.end(),up);bp.targetParents.push_back(at==bones.end()?-1:int(at-bones.begin()));}
    if(s.parts.empty())ensureTextures(s,drawnBy(s,s.assignment),true);
-   if(!animationFrame){std::string report="source_index\ttarget_index\tsource_name\ttarget_name\n";for(size_t i=0;i<mapping.size();i++)report+=std::to_string(i)+'\t'+std::to_string(mapping[i])+'\t'+(pf.sourceBones.empty()?"#"+std::to_string(i):pf.sourceBones[i])+'\t'+(mapping[i]>=0?target[mapping[i]]:"")+"\n";writeLater(s.path+"/bonemap-"+pf.spec.name+".tsv",report);}
+   if(!animationFrame){std::string report="source_index\ttarget_index\tsource_name\ttarget_name\n";for(size_t i=0;i<mapping.size();i++){
+     int observed=pf.sourceBones.empty()&&!pf.used.count(unsigned(i))?-1:mapping[i];report+=std::to_string(i)+'\t'+std::to_string(observed)+'\t'+(pf.sourceBones.empty()?"#"+std::to_string(i):pf.sourceBones[i])+'\t'+(observed>=0?target[size_t(observed)]:"")+"\n";}
+    writeLater(s.path+"/bonemap-"+pf.spec.name+".tsv",report);}
    bp.name=pf.spec.name;bp.avatar=avatarIdentity(owner);bp.target=s.targets[partIndex];bp.bones=target;bp.draws=pf.draws;bp.indices.assign(pf.geo.idx(),pf.geo.idx()+4ull*pf.geo.ni);
    // A GC pin protects the managed wrapper, not the native Mesh against Unity Destroy. Keep an independent,
    // unmodified engine clone before replacing anything. It is owned separately from the mod set so a restored

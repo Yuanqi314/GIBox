@@ -133,7 +133,21 @@ inline std::vector<MergedDraw> mergeDraws(const std::vector<Submesh>& subs,const
 inline Bytes joinedIndices(const Bytes& indices,const MergedDraw& d){Bytes out;out.reserve(4ull*d.count);
  for(auto& r:d.ranges){require(4ull*(uint64_t(r.start)+r.count)<=indices.size(),"Draw outside the index buffer");out.insert(out.end(),indices.begin()+4ull*r.start,indices.begin()+4ull*(uint64_t(r.start)+r.count));}
  return out;}
-struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;std::vector<DrawSpec> draws;std::vector<std::pair<std::string,Bytes>> channels;std::vector<std::string> sourceBones;std::vector<int> sourceParents;Bytes sourceBinds;};
+// Historical index-only builds recorded names only for the indices they used. Unused rows are deliberately empty.
+// This is an observation of a successful mapping, not a complete skeleton or a bindpose backup.
+inline std::vector<std::string> readLegacyBoneNames(const std::string& file,unsigned palette){
+ require(palette>0&&palette<=model::maxBones,"Legacy bone palette size");auto bytes=read(file,model::maxBones*320);std::istringstream input(std::string(bytes.begin(),bytes.end()));std::string row;
+ require(bool(std::getline(input,row)),"Legacy bonemap header missing");if(!row.empty()&&row.back()=='\r')row.pop_back();require(row=="source_index\ttarget_index\tsource_name\ttarget_name","Legacy bonemap header");
+ std::vector<std::string> names(palette);std::vector<bool> seen(palette);unsigned count=0;
+ while(std::getline(input,row)){if(!row.empty()&&row.back()=='\r')row.pop_back();if(row.empty())continue;std::array<std::string,4> fields;size_t start=0;
+  for(unsigned c=0;c<3;c++){auto at=row.find('\t',start);require(at!=row.npos,"Legacy bonemap columns");fields[c]=row.substr(start,at-start);start=at+1;}fields[3]=row.substr(start);require(fields[3].find('\t')==row.npos,"Legacy bonemap extra column");
+  auto index=decimal(fields[0]);require(index<palette&&!seen[index]&&fields[2]=="#"+std::to_string(index),"Legacy bonemap source index");seen[index]=true;count++;
+  if(fields[1]=="-1"){require(fields[3].empty(),"Legacy unmapped bone name");continue;}
+  require(decimal(fields[1])==index&&!trim(fields[3]).empty()&&fields[3].size()<=256&&fields[3].find('\0')==row.npos,"Legacy bonemap target");names[index]=fields[3];
+ }
+ require(count==palette,"Legacy bonemap incomplete palette");return names;}
+struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;std::vector<DrawSpec> draws;std::vector<std::pair<std::string,Bytes>> channels;std::vector<std::string> sourceBones;std::vector<int> sourceParents;Bytes sourceBinds;
+ std::vector<std::string> legacyBoneNames;std::string legacyBoneError;};
 // Where a texture sits in model.bin (checked against the file when the manifest is read); its pixels are read only for
 // the materials an assignment draws (readTextures), so a model with many variants does not hold every texture at once.
 struct TexRef {unsigned w=0,h=0;uint64_t off=0,len=0;bool present()const{return len>0;}};
