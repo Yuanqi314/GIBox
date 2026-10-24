@@ -210,12 +210,6 @@ class AppState(private val activity: Activity) {
         Control.setEffectMirror(game, on)
         AppLog.info(game, LOGGER, "MOD 跟随游戏的材质特效 = $on")
     }
-    /** MOD 贴图写进游戏材质 (control.json "directTextures"), read back through `revision` like effectMirror. */
-    fun directTextures(): Boolean = Control.directTextures(game)
-    fun setDirectTextures(on: Boolean) = save("保存") {
-        Control.setDirectTextures(game, on)
-        AppLog.info(game, LOGGER, "MOD 贴图写进游戏材质 = $on")
-    }
     /** 显示替换 开/关 for a model with its own on/off switch (model.json "replaceWhen"). */
     fun setReplacing(mod: Importer.Mod, variants: Variants, on: Boolean) = save("保存") {
         val change = variants.switchTo(on, variants.current(game, mod.name))

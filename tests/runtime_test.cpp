@@ -72,7 +72,7 @@ Ptr newString(Ptr self,const char* s){assert(self==0&&s);Ptr p=(f->stringBase+=0
 uint32_t hasProp(Ptr mat,Ptr name,Ptr){assert(mat&&f->strings.count(name));return f->strings[name]=="_LightMapTex"?0xffffff01u:0xffffff00u;}
 Ptr nativeAlloc(Ptr allocator,Ptr old,uint64_t size,int align,int label,int options,const char* name,int line){assert(allocator==load<Ptr>(f->base+abi::nativeAllocator)&&old==0&&size==32*3&&align==16&&label==15&&options==0&&name&&line==1);f->weightAllocs++;return f->lastWeights=f->alloc(size);}
 int32_t glowPropertyId(Ptr name,Ptr);
-// A texture by property name; null puts a property back to empty (directTextures restores what a material held).
+// A texture by property name; null puts a property back to empty (direct textures restore what a material held).
 void setTex(Ptr mat,Ptr name,Ptr tex,Ptr){assert(mat&&(!tex||load<Ptr>(tex+0x10))&&f->strings.count(name));f->lightProperty=f->strings[name];f->named[mat][glowPropertyId(name,0)]=tex;}
 void setMainTexture(Ptr mat,Ptr tex,Ptr){assert(mat);f->diffuse[mat]=tex;}
 unsigned channelSets=0;std::vector<Bytes> channelData;void setChannel(Ptr,Ptr a,Ptr){assert(load<uint64_t>(a+0x18)==3);channelSets++;
@@ -861,34 +861,34 @@ int main(){Fake fake;f=&fake;char temp[]="/tmp/model-runtime-XXXXXX";assert(mkdt
   Runtime orr(e,pkg,root+"/privateOrig",mediaMerge,false);orr.tick(4200000);orr.tick(4200600);
   assert(meshOf(ow)!=original&&load<uint32_t>(f->obj[meshOf(ow)].shared+0xc0)==2&&has("submeshes Orig/Part0: 2 draws in effect, 2 submeshes (not merged: original materials by position)"));
   orr.shutdown();assert(meshOf(ow)==original&&f->handles.empty());}
- // 51. Direct textures (control.json "directTextures", default on): the mod's textures go into the game's own material of a slot when it was made
- //     at runtime and no other renderer shows it; what it held goes back when the experiment or the model is switched
- //     off, the renderer dies or attaching fails. A main texture the game puts back is replaced again; a game copy of the
+ // 51. Direct textures: the mod's textures go into the game's own material of a slot when it was made at runtime and no
+ //     other renderer shows it; what it held goes back on every re-apply (here: the gameMaterials experiment), when the
+ //     model is switched off, the renderer dies or attaching fails. A main texture the game puts back is replaced again; a game copy of the
  //     written material is tracked and gets its own textures back too. A loaded asset, or a runtime material another
  //     renderer shows, is copied as before.
  {std::string mediaDirect=root+"/mediaDirect",sharedDirect=mediaDirect+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));writeModel(sharedDirect+"/models/Direct",s);
-  auto control=[&](bool enabled,bool direct){write(sharedDirect+"/control.json.tmp",std::string("{\"enabled\":")+(enabled?"true":"false")+",\"logLevel\":\"debug\",\"selected\":[\"Direct\"]"+(direct?"":",\"directTextures\":false")+"}");
+  auto control=[&](bool enabled,bool games=false){write(sharedDirect+"/control.json.tmp",std::string("{\"enabled\":")+(enabled?"true":"false")+",\"logLevel\":\"debug\",\"selected\":[\"Direct\"]"+(games?",\"experiments\":{\"gameMaterials\":true}":"")+"}");
    std::filesystem::rename(sharedDirect+"/control.json.tmp",sharedDirect+"/control.json");};
   auto has=[&](const std::string& x){return text(sharedDirect+"/GIBox Log.txt").find(x)!=std::string::npos;};int32_t lightId=100+int32_t(std::hash<std::string>()("_LightMapTex")%1000);
   auto runtimeMade=[&](Ptr m){store<uint32_t>(load<Ptr>(m+0x10)+8,uint32_t(-7));};
   Ptr original=f->mesh(),w=f->renderer(original),gameArray=f->obj[w].materials,gameMat=load<Ptr>(gameArray+0x20),gameTex=f->object("texture","Original diffuse");
   f->diffuse[gameMat]=gameTex;runtimeMade(gameMat);f->world(w);f->scene={w};auto shown=[&]{return load<Ptr>(f->obj[w].materials+0x20);};
-  control(true,true);Runtime dr(e,pkg,root+"/privateDirect",mediaDirect,false);dr.tick(4300000);dr.tick(4300600);
+  control(true);Runtime dr(e,pkg,root+"/privateDirect",mediaDirect,false);dr.tick(4300000);dr.tick(4300600);
   Ptr ours=f->diffuse[gameMat],light=f->named[gameMat][lightId];
   assert(meshOf(w)!=original&&shown()==gameMat&&alive(ours)&&ours!=gameTex&&alive(light));                   // no copy: the game's material, our textures
-  assert(has("direct-textures Direct/Part0 on Body: slot 0 Material: written (instance id -7; ")&&!has("direct-textures on"));   // on without being asked
+  assert(has("direct-textures Direct/Part0 on Body: slot 0 Material: written (instance id -7; "));
   f->diffuse[gameMat]=gameTex;dr.tick(4301200);dr.tick(4301800);                                              // the game puts its own back
   assert(f->diffuse[gameMat]==ours&&has("direct-textures-lost Direct/Part0: the game put its own main texture on Material, ours written again (1 times so far)"));
   Ptr copy=clone(gameMat,0);f->obj[copy].name="Material (Instance)";f->obj[w].materials=f->typed("material",copy);dr.tick(4302400);dr.tick(4303000);   // the game's own instance
   assert(shown()==copy&&f->diffuse[copy]==ours&&has("direct-textures Direct/Part0: the game's copy Material (Instance) of Material carries our textures"));
-  control(true,false);dr.tick(4303600);Ptr cloned=shown();assert(has("direct-textures off: every slot gets a copy"));   // switched off: copies, own textures back
-  assert(cloned!=gameMat&&cloned!=copy&&f->diffuse[cloned]==ours&&f->diffuse[gameMat]==gameTex&&f->named[gameMat][lightId]==0&&f->diffuse[copy]==gameTex&&f->named[copy][lightId]==0);
-  control(true,true);dr.tick(4304200);assert(shown()==gameMat&&f->diffuse[gameMat]==ours&&has("direct-textures on: "));   // and on again
-  control(false,true);dr.tick(4304800);dr.tick(4305400);                                                       // the model off
+  control(true,true);dr.tick(4303600);                                                                         // re-applied as the game's own materials
+  assert(shown()==gameMat&&f->diffuse[gameMat]==gameTex&&f->named[gameMat][lightId]==0&&f->diffuse[copy]==gameTex&&f->named[copy][lightId]==0);
+  control(true);dr.tick(4304200);assert(shown()==gameMat&&f->diffuse[gameMat]==ours&&f->named[gameMat][lightId]==light);   // and back
+  control(false);dr.tick(4304800);dr.tick(4305400);                                                            // the model off
   assert(meshOf(w)==original&&f->obj[w].materials==gameArray&&f->diffuse[gameMat]==gameTex&&f->named[gameMat][lightId]==0);
   assert(has("direct-textures Direct/Part0 (restore): own textures written back into 1 game materials"));dr.shutdown();assert(f->handles.empty());
   // A loaded asset (positive instance id) and a runtime material on another renderer as well: copied, the game's untouched.
-  Ptr w2=f->renderer(original),asset=load<Ptr>(f->obj[w2].materials+0x20);f->diffuse[asset]=gameTex;f->world(w2);f->scene={w2};control(true,true);
+  Ptr w2=f->renderer(original),asset=load<Ptr>(f->obj[w2].materials+0x20);f->diffuse[asset]=gameTex;f->world(w2);f->scene={w2};control(true);
   {Runtime d2(e,pkg,root+"/privateDirect2",mediaDirect,false);d2.tick(4400000);d2.tick(4400600);Ptr on=load<Ptr>(f->obj[w2].materials+0x20);
    assert(meshOf(w2)!=original&&on!=asset&&f->diffuse[on]!=gameTex&&f->diffuse[asset]==gameTex&&has("direct-textures-copied Direct/Part0 on Body: slot 0 Material: a loaded asset (instance id "));d2.shutdown();assert(f->handles.empty());}
   Ptr w3=f->renderer(original),sharedMat=load<Ptr>(f->obj[w3].materials+0x20),npc=f->renderer(f->mesh("Other"));runtimeMade(sharedMat);f->diffuse[sharedMat]=gameTex;

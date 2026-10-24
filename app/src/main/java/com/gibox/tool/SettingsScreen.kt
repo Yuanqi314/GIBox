@@ -156,35 +156,27 @@ fun SettingsScreen(state: AppState) {
                 }
             }
             item {
-                val direct = remember(state.revision) { state.directTextures() }
                 val mirror = remember(state.revision) { state.effectMirror() }
                 SettingsGroup(title = { SectionTitle("高级") }, verticalArrangement = gap) {
-                    SettingsSwitch(
-                        state = direct,
-                        title = { Text("MOD 贴图写进游戏材质") },
-                        subtitle = { Text("游戏给这个角色单独创建的材质，直接换上 MOD 贴图，不复制材质，出场等特效不用跟随也能恢复；原贴图记下，关闭时写回。共用的材质照旧复制。关掉后全部复制，用来对照") },
-                        shapes = ListItemDefaults.segmentedShapes(0, 4),
-                        onCheckedChange = { state.setDirectTextures(it) },
-                    )
                     SettingsSwitch(
                         state = mirror,
                         title = { Text("MOD 跟随游戏的材质特效") },
                         subtitle = { Text("出场溶解等特效在复制出来的 MOD 材质上同样播放并恢复；关掉后，复制材质的部分刚换上模型时可能残留元素色光（写进游戏材质的部分不受影响）") },
-                        shapes = ListItemDefaults.segmentedShapes(1, 4),
+                        shapes = ListItemDefaults.segmentedShapes(0, 3),
                         onCheckedChange = { state.setEffectMirror(it) },
                     )
                     SettingsMenuLink(
                         title = { Text("导出当前角色骨骼") },
                         subtitle = { Text("游戏里有角色在场时，导出一份带时间的骨骼目录，供手动转换用") },
                         icon = { Icon(Icons.Filled.Person, contentDescription = null) },
-                        shapes = ListItemDefaults.segmentedShapes(2, 4),
+                        shapes = ListItemDefaults.segmentedShapes(1, 3),
                         onClick = { state.exportBones() },
                     )
                     SettingsMenuLink(
                         title = { Text("手动转换（旧流程）") },
                         subtitle = { Text("直接指定骨骼文件夹、角色 ID 和部件映射，不经过 Mods 列表") },
                         icon = { Icon(Icons.Filled.Build, contentDescription = null) },
-                        shapes = ListItemDefaults.segmentedShapes(3, 4),
+                        shapes = ListItemDefaults.segmentedShapes(2, 3),
                         onClick = { state.open(Screen.Manual) },
                     )
                 }
