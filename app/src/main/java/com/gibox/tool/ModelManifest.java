@@ -1,0 +1,103 @@
+package com.gibox.tool;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * What the app needs from a GIBox model folder's model.json (format "gibox-model", versions 1–4; the full check of the
+ * data is the runtime's, model.hpp): the character, the variants, where it was converted from. learned.json adds the
+ * character ID the runtime found for a model converted by name.
+ */
+public final class ModelManifest {
+    public int id;
+    /** Character ID found in game for a model converted by name (learned.json), else 0. */
+    public int learnedId;
+    public final List<String> names = new ArrayList<>();
+    public String name = "", generation = "", sourcePath = "", sourceSignature = "";
+    public final Map<String, List<Integer>> vars = new LinkedHashMap<>();
+    public final List<Map<String, Integer>> combos = new ArrayList<>();
+    public int defaultCombo;
+    /** The value each variable starts with (version 2 "variants.default"; version 1: the default combination's). */
+    public final Map<String, Integer> defaults = new LinkedHashMap<>();
+    public int version;
+    /** Version 3 "replaceWhen": the variables that switch the whole replacement on, and the values it is on for. Empty: always on. */
+    public final List<String> replaceVars = new ArrayList<>();
+    public final List<List<Integer>> replaceAllow = new ArrayList<>();
+    /** A part's target is a lower level of detail (converted against a skeleton library recorded while the character was
+     *  still loading, before 0.6.5): the bone indices do not fit the full model, it has to be converted again. Else "". */
+    public String lodMesh = "";
+
+    /** A lower level of detail by mesh name (Body_LOD1, Body_LOD3 …); the plain name and _LOD0 are the full mesh (core.hpp lowerLod). */
+    public static boolean lowerLod(String mesh) {
+        if (mesh == null) return false;
+        String o = mesh.toLowerCase(java.util.Locale.ROOT).replace("(clone)", "").replace(" instance", "").trim();
+        int p = o.lastIndexOf("_lod"); if (p < 0 || p + 4 >= o.length()) return false;
+        String d = o.substring(p + 4); return d.matches("[0-9]+") && !d.matches("0+");
+    }
+
+    public static boolean exists(File dir) { return new File(dir, "model.json").isFile(); }
+
+    public static ModelManifest read(File dir) throws Exception {
+        Map<String, Object> m = Json.obj(Json.read(new File(dir, "model.json"), 4L << 20), "model.json");
+        Json.check("gibox-model".equals(m.get("format")), "不是 GIBox 模型：" + dir.getName());
+        long version = Json.integer(m.get("version"), "version", 1, 1000000); Json.check(version >= 1 && version <= 4, "模型格式版本 " + version + " 不支持（新版 GIBox 转换的？）：" + dir.getName());
+        ModelManifest r = new ModelManifest(); r.version = (int) version;
+        r.name = Json.str(m.get("name"), "name", 512); r.generation = Json.str(m.get("generation"), "generation", 64);
+        Map<String, Object> c = Json.obj(m.get("character"), "character");
+        r.id = (int) Json.integer(c.get("id"), "character.id", 0, 10001999); Json.check(r.id == 0 || r.id >= 10000000, "角色 ID 越界");
+        if (c.get("names") != null) for (Object n : Json.arr(c.get("names"), "character.names", 0, 16)) { String s = Json.str(n, "character.names", 40); Json.check(s.matches("[a-z0-9]{3,40}"), "角色名格式：" + s); r.names.add(s); }
+        Json.check(r.id != 0 || !r.names.isEmpty(), "模型没有角色 ID 也没有角色名");
+        if (version == 4) Json.check(m.get("animation") instanceof Map, "动画格式缺少 animation");
+        Object v = m.get("variants");
+        if (v != null) {
+            Map<String, Object> vo = Json.obj(v, "variants");
+            for (Object x : Json.arr(vo.get("vars"), "variants.vars", 0, 16)) {
+                Map<String, Object> e = Json.obj(x, "variants.vars"); String n = Json.str(e.get("name"), "variants.vars.name", 64); Json.check(n.length() > 1 && n.startsWith("$") && !r.vars.containsKey(n), "款式变量：" + n);
+                List<Integer> values = new ArrayList<>(); for (Object k : Json.arr(e.get("values"), n, 1, 64)) values.add((int) Json.integer(k, n, -1000000, 1000000)); r.vars.put(n, values);
+            }
+            if (version >= 2) {
+                Map<String, Object> d = Json.obj(vo.get("default"), "variants.default");
+                for (String n : r.vars.keySet()) { int x = (int) Json.integer(d.get(n), "variants.default." + n, -1000000, 1000000); Json.check(r.vars.get(n).contains(x), "默认值不在可选值里：" + n); r.defaults.put(n, x); }
+                Json.check(d.size() == r.vars.size(), "variants.default 里有未声明的变量");
+            } else {
+            for (Object x : Json.arr(vo.get("combos"), "variants.combos", 1, 32)) {
+                Map<String, Integer> combo = new LinkedHashMap<>();
+                for (Map.Entry<String, Object> e : Json.obj(x, "variants.combos").entrySet()) { Json.check(r.vars.containsKey(e.getKey()), "款式组合里有未声明的变量：" + e.getKey()); combo.put(e.getKey(), (int) Json.integer(e.getValue(), e.getKey(), -1000000, 1000000)); }
+                Json.check(combo.size() == r.vars.size(), "款式组合必须给每个变量赋值"); r.combos.add(combo);
+            }
+            r.defaultCombo = (int) Json.integer(vo.get("default"), "variants.default", 0, r.combos.size() - 1);
+            r.defaults.putAll(r.combos.get(r.defaultCombo));
+            }
+        }
+        Object gate = m.get("replaceWhen");
+        if (gate != null) {
+            Json.check(version >= 3, "replaceWhen 需要模型格式版本 3");
+            Map<String, Object> g = Json.obj(gate, "replaceWhen");
+            for (Object x : Json.arr(g.get("vars"), "replaceWhen.vars", 1, 16)) { String n = Json.str(x, "replaceWhen.vars", 64); Json.check(r.vars.containsKey(n) && !r.replaceVars.contains(n), "replaceWhen 变量：" + n); r.replaceVars.add(n); }
+            for (Object x : Json.arr(g.get("allow"), "replaceWhen.allow", 1, 4096)) {
+                List<Integer> row = new ArrayList<>(); List<?> a = Json.arr(x, "replaceWhen.allow", r.replaceVars.size(), r.replaceVars.size());
+                for (int i = 0; i < a.size(); i++) { int value = (int) Json.integer(a.get(i), "replaceWhen.allow", -1000000, 1000000); Json.check(r.vars.get(r.replaceVars.get(i)).contains(value), "replaceWhen 取值不在可选值里：" + r.replaceVars.get(i)); row.add(value); }
+                r.replaceAllow.add(row);
+            }
+        }
+        if (m.get("parts") instanceof List) for (Object p : (List<?>) m.get("parts")) {
+            if (!(p instanceof Map) || !(((Map<?, ?>) p).get("target") instanceof Map)) continue;
+            Object mesh = ((Map<?, ?>) ((Map<?, ?>) p).get("target")).get("mesh");
+            if (mesh instanceof String && lowerLod((String) mesh)) { r.lodMesh = (String) mesh; break; }
+        }
+        Object s = m.get("source");
+        if (s != null) { Map<String, Object> so = Json.obj(s, "source"); if (so.get("path") instanceof String) r.sourcePath = (String) so.get("path"); if (so.get("signature") instanceof String) r.sourceSignature = (String) so.get("signature"); }
+        File learned = new File(dir, "learned.json");
+        if (learned.isFile()) try {
+            Map<String, Object> l = Json.obj(Json.read(learned, 1L << 20), "learned.json");
+            if ("gibox-learned".equals(l.get("format")) && l.get("id") != null) { int id = (int) Json.integer(l.get("id"), "learned.id", 0, 10001999); if (id == 0 || id >= 10000000) r.learnedId = id; }
+        } catch (Exception ignored) {}
+        return r;
+    }
+
+    /** The character this model is for: its own ID, else the one the runtime learned. */
+    public int character() { return id != 0 ? id : learnedId; }
+}
