@@ -140,7 +140,8 @@ class AppState(private val activity: Activity) {
             "complete" -> "骨骼已重新采集，可重新转换对应 MOD。"
             "waiting-character" -> "请在大世界切换到${Characters.nameOf(id)}，会自动开始采集。"
             "saving" -> "骨骼已通过校验，正在保存…"
-            else -> "正在重新采集并检查骨骼，未完整时会自动重试…"
+            "waiting-full-mesh" -> status.boneRefreshDetail.ifBlank { "当前只有低精度模型。请打开该角色详情或队伍预览并停留，完整模型出现后会自动采集；原骨骼库保留。" }
+            else -> status.boneRefreshDetail.ifBlank { "正在重新采集并检查骨骼，未完整时会自动重试…" }
         }
     }
 
@@ -227,7 +228,7 @@ class AppState(private val activity: Activity) {
             "当前还有${Characters.nameOf(boneRefreshCharacter)}的采集请求，确定后将改为采集本页角色。\n\n" else ""
         prompt = Prompt(
             title = "重新采集骨骼？",
-            text = other + "将重新获取${Characters.nameOf(id)}的骨骼。请在大世界切换到该角色；未在场时会等待，骨骼未完整时会自动重试，校验通过后保存。\n\n采集完成后，请重新转换需要使用新骨骼的 MOD。",
+            text = other + "将重新获取${Characters.nameOf(id)}的骨骼。请先在大世界切换到该角色；若提示只有低精度模型，再打开该角色详情或队伍预览并停留。完整模型校验通过后保存，等待期间保留原骨骼库。\n\n采集完成后，请重新转换需要使用新骨骼的 MOD。",
             confirm = "确定", dismiss = "取消",
             onConfirm = { save("重新采集骨骼") {
                 Control.requestBoneRefresh(pkg, id)

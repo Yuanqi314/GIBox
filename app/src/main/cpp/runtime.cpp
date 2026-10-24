@@ -200,6 +200,7 @@ struct Runtime::Impl {
  std::map<std::string,std::string> staleNote,materialWait;
  std::set<unsigned> libraryPending;std::map<std::string,std::string> boneRefreshCause;
  std::string boneCandidate,manualWait,boneBadList;unsigned boneBadStreak=0;Ptr boneCandidateEntity=0;unsigned boneCandidateId=0;uint64_t boneCandidateAt=0,manualRetryAt=0;bool manualPending=false;
+ std::map<unsigned,std::pair<std::string,uint64_t>> libraryWait;uint64_t boneFullSearchAt=0;Ptr boneFullSearchEntity=0;bool exportLodWait=false;std::string boneSource;
  // Async hand-off: wanted models of the last tick (valid until the next tick's consume), GameObject class, Tick thread.
  std::vector<const ModelInfo*> wantedNow;std::vector<Ptr> spawnAttached;Ptr goClass=0;std::atomic<int> tickTid{0};std::atomic<uint64_t> offThread{0};uint64_t spawnOffThread=0,reclaims=0,guardAt=0,binds=0,passes=0;
  // Prepared on Tick, never by the binding hot path. Unknown targets and same-name LODs remain candidates.
@@ -683,10 +684,11 @@ struct Runtime::Impl {
   try{Ptr ba=e.get(abi::getBones,r);if(ba){pin(tmp,ba);auto bones=pointers(ba,512);Ptr t=bones.empty()?0:bones[0];for(int i=0;i<24&&t&&alive(t);i++){for(auto& x:nameTokens(name(t)))out.push_back(x);t=e.get(abi::getParent,t);}}}catch(...){freeOwned(tmp);throw;}
   freeOwned(tmp);chains.put(key,out);return out;}
  // Targets learned this session (also after a game update moved a part) take precedence over the folder's.
- std::string avatarIdentity(Ptr renderer){Owned tmp;std::string identity;
+ Ptr avatarRoot(Ptr renderer){Owned tmp;Ptr root=0;
   try{Ptr ba=e.get(abi::getBones,renderer);pin(tmp,ba);auto bones=pointers(ba,512);Ptr t=bones.empty()?0:bones[0];
-   for(unsigned i=0;i<24&&alive(t);i++){auto n=meshName(name(t));if(n.compare(0,7,"avatar_")==0){auto suffix=n.find("_manekin");identity=n.substr(0,suffix);break;}t=e.get(abi::getParent,t);}
-  }catch(...){freeOwned(tmp);throw;}freeOwned(tmp);return identity;}
+   for(unsigned i=0;i<24&&alive(t);i++){auto n=meshName(name(t));if(n.compare(0,7,"avatar_")==0){root=t;break;}t=e.get(abi::getParent,t);}
+  }catch(...){freeOwned(tmp);throw;}freeOwned(tmp);return root;}
+ std::string avatarIdentity(Ptr renderer){Ptr root=avatarRoot(renderer);if(!root)return {};auto n=meshName(name(root));return n.substr(0,n.find("_manekin"));}
  bool targetsFor(const ModelInfo& m,std::vector<Fingerprint>& out){out.clear();auto l=learned.find(m.path);
   for(auto& p:m.parts){if(l!=learned.end()&&l->second.count(p.name)&&l->second.at(p.name).bones>=p.minBones)out.push_back(l->second.at(p.name));else if(p.hasTarget&&p.target.bones>=p.minBones)out.push_back(p.target);else return false;}return true;}
  std::string rendererName(Ptr r){auto key=std::make_pair(r,load<Ptr>(r+0x10));if(auto* hit=rendererNames.find(key))return *hit;return rendererNames.put(key,name(r));}
@@ -1539,12 +1541,44 @@ struct Runtime::Impl {
   }catch(const std::exception& ex){log("bind-after-error",ex.what());}inTick=false;}
 
  // ---------------------------------------------------------------- bone library
+ // A phone may keep the world model at LOD1 indefinitely. Look for an ACTIVE full-model instance of that same
+ // avatar (e.g. its detail/party preview), rather than exporting the LOD palette or waiting on the world forever.
+ // A complete replacement group must come from ONE avatar root. Never join parts of different pooled instances,
+ // infer a full mesh from its bone count, or change the game's LOD setting. No loaded-asset/prefab search is used.
+ std::vector<Ptr> boneRenderers(uint64_t now){
+  auto world=worldRenderers();exportWait.clear();exportLodWait=false;std::string low;
+  for(Ptr r:world)if(alive(r)){Ptr m=originalMesh(r);if(alive(m)){auto fp=fingerprint(m,true);if(lowerLod(fp.mesh)&&low.empty())low=rendererName(r)+" / "+fp.mesh;}}
+  if(low.empty())return world;
+  exportLodWait=true;exportWait="大世界的 "+low+" 是低精度网格；尚未找到同角色的完整模型。请先在大世界切到该角色，再打开该角色详情或队伍预览并停留；完整模型出现后会自动采集。原骨骼库保留";
+  if(boneFullSearchEntity!=ch.entity){boneFullSearchEntity=ch.entity;boneFullSearchAt=0;boneCandidate.clear();}
+  if(now<boneFullSearchAt){return {};}boneFullSearchAt=now+2000;
+  Owned roots;std::vector<Ptr> result;
+  try{
+   std::string identity;std::vector<std::pair<std::string,std::string>> required;std::set<std::string> names;
+   for(Ptr r:world){if(!alive(r)){boneCandidate.clear();return {};}Ptr m=originalMesh(r);if(!alive(m)){boneCandidate.clear();return {};}
+    auto avatar=avatarIdentity(r);if(avatar.empty()||(!identity.empty()&&identity!=avatar)){boneCandidate.clear();return {};}identity=avatar;
+    auto key=std::make_pair(normalize(rendererName(r)),meshName(fingerprint(m,true).mesh));
+    if(std::find(required.begin(),required.end(),key)!=required.end()){boneCandidate.clear();return {};}required.push_back(key);names.insert(key.first);}
+   if(required.empty())return {};
+   Ptr found=e.call<Ptr>(abi::findObjectsOfType,rendererType(world.front()),Ptr(0));if(!found){boneCandidate.clear();return {};}pin(roots,found);
+   std::map<Ptr,std::vector<std::vector<Ptr>>> groups;
+   for(Ptr r:pointers(found,8192)){if(!alive(r))continue;auto rn=normalize(rendererName(r));if(!names.count(rn))continue;Ptr m=originalMesh(r);if(!alive(m))continue;auto fp=fingerprint(m,true);if(lowerLod(fp.mesh))continue;
+    auto key=std::make_pair(rn,meshName(fp.mesh));auto at=std::find(required.begin(),required.end(),key);if(at==required.end())continue;
+    Ptr root=avatarRoot(r);if(!root)continue;auto n=meshName(name(root));if(n.substr(0,n.find("_manekin"))!=identity)continue;
+    auto& group=groups[root];if(group.empty())group.resize(required.size());group[size_t(at-required.begin())].push_back(r);}
+   for(auto& kv:groups){bool complete=true;std::vector<Ptr> candidate;for(auto& part:kv.second){if(part.size()!=1){complete=false;break;}candidate.push_back(part[0]);}
+    if(complete){if(!result.empty()){result.clear();exportWait+="；发现多组完整实例，暂不选取";break;}result=std::move(candidate);}}
+   freeOwned(roots);
+  }catch(...){freeOwned(roots);boneCandidate.clear();throw;}
+  if(result.empty()){boneCandidate.clear();return {};}
+  std::string source=std::to_string(ch.config)+": active same-avatar full model instead of "+low;
+  for(Ptr r:result){auto fp=fingerprint(originalMesh(r),true);source+="; "+rendererName(r)+" / "+fp.mesh+" ("+std::to_string(fp.vertices)+" vertices, "+std::to_string(fp.bones)+" bones)";}
+  if(boneSource!=source){boneSource=source;log("bone-library-source",source);}exportLodWait=false;exportWait.clear();return result;
+ }
  // One complete capture of the world character. Every listed renderer must be usable; a partial capture is retried.
  // Two identical healthy captures are required before writing. Completion is acknowledged from the worker only.
  bool exportBones(uint64_t now,bool libraryDir){
-  // Right after loading, the character shows a lower level of detail (Body_LOD3: fewer vertices and a shorter bone
-  // list) for a moment. A record of that would not fit mods made for the full model: wait for the full meshes.
-  auto renderers=worldRenderers();exportWait.clear();for(Ptr r:renderers){if(!alive(r))continue;Ptr mesh=originalMesh(r);if(!alive(mesh))continue;auto fp=fingerprint(mesh,true);if(lowerLod(fp.mesh)){boneCandidate.clear();library.erase(ch.config);exportWait=rendererName(r)+" shows "+fp.mesh+" (a lower level of detail)";return false;}}
+  auto renderers=boneRenderers(now);if(exportLodWait){library.erase(ch.config);return false;}
   std::vector<SkeletonRenderer> records;std::set<std::string> used;std::string chain;Owned roots;unsigned seenCount=0,loading=0,mismatch=0,unnamed=0,badNames=0;std::string example,badList=std::to_string(ch.config)+":";
   try{for(Ptr r:renderers){seenCount++;if(!alive(r)){loading++;continue;}Ptr mesh=originalMesh(r);if(!alive(mesh)){loading++;continue;}Ptr ba=e.get(abi::getBones,r);if(!ba){loading++;continue;}pin(roots,ba);auto bones=pointers(ba,512);
     Ptr binds=e.get(abi::getBindposes,mesh);if(!binds||bones.empty()){loading++;continue;}pin(roots,binds);
@@ -1650,7 +1684,7 @@ struct Runtime::Impl {
    if(!boneRefreshPending()){refreshState="complete";refreshDetail="骨骼已重新采集";}
    else if(!ch.entity||ch.config!=ctl.refreshBonesCharacter){refreshState="waiting-character";refreshDetail="等待在大世界切换到角色 "+std::to_string(ctl.refreshBonesCharacter);}
    else if(libraryPending.count(ch.config)){refreshState="saving";refreshDetail="骨骼已通过校验，正在保存并回读检查";}
-   else{refreshState=libraryError.count(ch.config)?"retrying":"capturing";refreshDetail=exportWait;}
+   else{refreshState=exportLodWait?"waiting-full-mesh":libraryError.count(ch.config)?"retrying":"capturing";refreshDetail=exportWait;}
   }
   s.pop_back();s+=",\"boneRefreshRequest\":"+std::to_string(ctl.refreshBones)+",\"boneRefreshCharacter\":"+std::to_string(ctl.refreshBonesCharacter)+",\"boneRefreshState\":"+quote(refreshState)+",\"boneRefreshDetail\":"+quote(refreshDetail)+"}";
   if(s==lastStatus){return;}lastStatus=s;auto dir=shared;worker.post([dir,s]{write(dir+"/status.json.tmp",s);std::filesystem::rename(dir+"/status.json.tmp",dir+"/status.json");});log(state,detail);}
@@ -1681,7 +1715,7 @@ struct Runtime::Impl {
   if(c&&c->refreshBones&&(c->refreshBones!=ctl.refreshBones||c->refreshBonesCharacter!=ctl.refreshBonesCharacter)&&
      (c->refreshBones!=boneRefreshDone||c->refreshBonesCharacter!=boneRefreshDoneId)){
    auto id=c->refreshBonesCharacter;library.erase(id);libraryRead.erase(id);libraryRetry[id]=0;libraryError.erase(id);
-   boneCandidate.clear();boneBadList.clear();boneBadStreak=0;exportWait.clear();log("bone-refresh-request",std::to_string(id)+": request "+std::to_string(c->refreshBones));
+   boneCandidate.clear();boneBadList.clear();boneBadStreak=0;exportWait.clear();boneFullSearchAt=0;libraryWait.erase(id);log("bone-refresh-request",std::to_string(id)+": request "+std::to_string(c->refreshBones));
   }
   if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel);
    if(!renderControlSeen){renderControlSeen=true;renderMarkSeen=c->renderMark;}
@@ -1715,7 +1749,7 @@ struct Runtime::Impl {
    // after the worker confirms the write/read-back, stop scanning this character until a new capture is requested.
    if(ch.entity&&!library.count(ch.config)&&!libraryPending.count(ch.config)&&now>=libraryRetry[ch.config]){
     libraryRetry[ch.config]=now+500;
-    try{if(!exportBones(now,true)){libraryRetry[ch.config]=now+500;log("bone-library-wait",std::to_string(ch.config)+(exportWait.empty()?"":": "+exportWait));}}
+    try{if(!exportBones(now,true)){libraryRetry[ch.config]=now+500;auto& last=libraryWait[ch.config];if(last.first!=exportWait||now>=last.second+30000){last={exportWait,now};log("bone-library-wait",std::to_string(ch.config)+(exportWait.empty()?"":": "+exportWait));}}}
     catch(const std::exception& ex){libraryRetry[ch.config]=now+500;auto& last=libraryError[ch.config];if(last!=ex.what()){last=ex.what();log("bone-library-error",std::to_string(ch.config)+": "+ex.what()+"; retrying automatically");}}}
    if(now>=restorePruneAt){restorePruneAt=now+500;pruneRestoreBackups();}
    if(!ctl.enabled){bool done=true;if(!sets.empty()||!attachments.empty())done=releaseAll();status(done?"disabled":"waiting",done?"":"正在恢复原模型；暂时失败的渲染器会单独重试",{},{});inTick=false;return;}

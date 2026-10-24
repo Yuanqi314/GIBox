@@ -360,6 +360,29 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   {Runtime again(e,pkg,root+"/private8b",media8,false);again.tick(803000);again.tick(803600);again.shutdown();}
   for(auto& d:std::filesystem::directory_iterator(bones8))assert(d.path().filename()=="10000107");
   assert(f->handles.empty());}
+ // A world character can remain at LOD1. Its active full preview supplies the actual full mesh/palette, with every
+ // required part in one avatar instance. Wrong avatars, loaded assets, duplicate groups and split instances do not.
+ {auto mediaFull=root+"/full-capture-media",sharedFull=mediaFull+"/"+pkg+"/GIBox",file=sharedFull+"/skeletons/10000107/skeleton.json";
+  SkeletonRenderer saved;saved.name="Body";saved.target={"Body","Body",12022,1,1};saved.bones={"BoneA"};saved.parents={-1};saved.bindposes.resize(64);for(int i=0;i<4;i++){float one=1;std::memcpy(saved.bindposes.data()+i*20,&one,4);}auto old=skeletonJson(10000107,"OldCapture",{saved});std::filesystem::create_directories(std::filesystem::path(file).parent_path());write(file,old);
+  write(sharedFull+"/control.json","{\"enabled\":false,\"selected\":[],\"refreshBones\":1,\"refreshBonesCharacter\":10000107,\"logLevel\":\"debug\"}");
+  Ptr low=f->mesh("Body_LOD1",6594),body=f->renderer(low),face=f->renderer(f->mesh("Face_LOD1"),"BoneA","Face");Ptr worldParts[]={body,face};store<Ptr>(f->owner+0x68,f->array(8,2,worldParts));
+  Ptr full=f->mesh("Body",12022),fullFace=f->mesh("Face"),wrong=f->renderer(full,"BoneA","Body",f->kavehRoot);
+  Ptr previewRoot=f->object("transform","Avatar_Girl_Catalyst_Citlali_Manekin"),splitRoot=f->object("transform","Avatar_Girl_Catalyst_Citlali_Manekin");
+  Ptr previewBody=f->renderer(full,"BoneA","Body",previewRoot),previewFace=f->renderer(fullFace,"BoneA","Face",previewRoot),splitFace=f->renderer(fullFace,"BoneA","Face",splitRoot);
+  f->assets={previewBody,previewFace};f->scene={body,face,wrong};auto assetCalls=f->findAllCalls;
+  Runtime capture(e,pkg,root+"/privateFullCapture",mediaFull,false);auto st=[&]{return JsonParser(text(sharedFull+"/status.json")).parse();};
+  capture.tick(810000);capture.tick(810500);capture.tick(811000);assert(text(file)==old&&st().at("boneRefreshState").string=="waiting-full-mesh");
+  assert(st().at("boneRefreshDetail").string.find("Body_LOD1")!=std::string::npos&&st().at("boneRefreshDetail").string.find("详情")!=std::string::npos);
+  auto log=text(sharedFull+"/GIBox Log.txt");assert(log.find("bone-library-wait")==log.rfind("bone-library-wait"));
+  f->scene={body,face,wrong,previewBody,splitFace};capture.tick(812000);assert(text(file)==old); // no joining roots
+  f->scene={body,face,previewBody,previewFace,splitFace,f->renderer(full,"BoneA","Body",splitRoot)};capture.tick(814000);assert(text(file)==old); // ambiguous complete groups
+  f->scene={body,face,previewBody,previewFace};Ptr binds=f->obj[full].arrays[abi::getBindposes];float nan=std::numeric_limits<float>::quiet_NaN();store<float>(binds+0x20,nan);capture.tick(816000);assert(text(file)==old);
+  store<float>(binds+0x20,1.f);capture.tick(818000);capture.tick(818500);assert(text(file)==old); // two healthy full captures required
+  capture.tick(820000);assert(st().at("boneRefreshState").string=="saving"&&text(file)!=old);capture.tick(820100);assert(st().at("boneRefreshState").string=="complete");
+  auto records=readSkeleton(file);assert(records.size()==2&&records[0].target.mesh=="Body"&&records[0].target.vertices==12022&&records[1].target.mesh=="Face");
+  assert(text(file).find("LOD")==std::string::npos&&text(sharedFull+"/GIBox Log.txt").find("bone-library-source 10000107: active same-avatar full model instead of Body / Body_LOD1")!=std::string::npos);
+  auto searches=f->findCalls;capture.tick(822000);capture.tick(830000);assert(f->findCalls==searches&&f->findAllCalls==assetCalls&&meshOf(body)==low);
+  capture.shutdown();assert(f->handles.empty());f->assets.clear();f->world(world);f->scene={world};}
  // 20. A version 2 model: draws carry their conditions. The default shows one draw; $halo=3 (with $legs at its default 1)
  //     adds the second in place; a value the model does not list keeps the default. Both draws use Material0 in slot 0,
  //     so the second joins the first's submesh (3 indices -> 6) instead of adding one.
