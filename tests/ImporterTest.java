@@ -65,6 +65,8 @@ public class ImporterTest {
   ModelManifest pm=ModelManifest.read(pack);Map<String,Object> pp=Fixtures.part(pack,0);
   ok(r.library&&r.model.equals(pack.getCanonicalFile())&&pm.id==10000107&&pm.names.isEmpty()&&pp.get("target")!=null&&pp.get("skeleton")!=null&&pm.sourcePath.equals(staged.getAbsolutePath())&&pm.sourceSignature.length()==40,"library conversion");
   ok(ModLibrary.overrides(staged).get("id").equals("10000107")&&r.summary.startsWith("茜特菈莉（10000107）"),"choice remembered: "+r.summary);
+  r=Importer.convert(staged,10000107,models,new File(base,"missing-library"),dec,new StringBuilder());
+  ok(!r.library&&r.summary.contains("复用本 MOD 已有骨骼记录")&&Fixtures.part(pack,0).get("skeleton")!=null&&Fixtures.part(pack,0).get("target")!=null,"a missing library must not erase the previous conversion's complete skeleton");
   // 6. Not in the bone library: the game's bone order, the ID, and the model name for the party / detail pages.
   r=Importer.convert(hz,10000046,models,bones,dec,new StringBuilder());File hm=new File(models,"hutao_v1");
   ModelManifest hmm=ModelManifest.read(hm);
@@ -105,7 +107,7 @@ public class ImporterTest {
   File lodBones=new File(base,"骨骼LOD");Fixtures.skeleton(new File(lodBones,"10000107"),10000107,"Scene/Avatar_Girl_Catalyst_Citlali/Bip001",new String[]{"body","face"},new String[]{"Root","Spine"},Collections.singletonMap("body",Fixtures.target("Body_LOD3",5246,2,2)));
   ok(ModLibrary.recorded(lodBones,10000107).lodMesh.equals("Body_LOD3")&&ModLibrary.recorded(bones,10000107).lodMesh.isEmpty(),"LOD record found");
   StringBuilder lodLog=new StringBuilder();r=Importer.convert(staged,10000107,models,lodBones,dec,lodLog);
-  ok(!r.library&&Fixtures.part(pack,0).get("skeleton")==null&&lodLog.toString().contains("低精度模型 Body_LOD3"),"LOD library not used: "+lodLog);
+  ok(!r.library&&Fixtures.part(pack,0).get("skeleton")!=null&&Json.obj(Fixtures.part(pack,0).get("target"),"target").get("mesh").equals("Body")&&lodLog.toString().contains("低精度模型 Body_LOD3")&&r.summary.contains("复用本 MOD 已有骨骼记录"),"bad LOD library rejected while the existing complete palette survives: "+lodLog);
   try{ModelConverter.bones(new File(lodBones,"10000107"),10000107);ok(false,"LOD record accepted");}catch(IllegalArgumentException e){ok(e.getMessage().contains("低精度模型 Body_LOD3"),e.getMessage());}
   Importer.convert(staged,10000107,models,bones,dec,new StringBuilder());
   File packJson=new File(pack,"model.json");String full=read(packJson);ok(full.contains("\"mesh\":\"Body\""),"target mesh written");

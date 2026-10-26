@@ -8,12 +8,15 @@ enum Offset:uintptr_t {
  getMesh=0x8d9dc9c,setMesh=0x8d9de7c,getBones=0x8d9dbd4,getMaterials=0x8dc2ff4,setMaterials=0x8dc3050,
  clone=0x8bf6420,destroy=0x8bf5ca0,getName=0x8bf5d94,getParent=0x8bf7518,
  arrayNew=0x43252b8,objectNew=0xfa5e86c,pin=0xcb0c140,unpin=0xcb0c158,
+ // Historical enum name: 0x8bb769c is Mesh.set_isReadable(bool), not Mesh.Clear.
  clear=0x8bb769c,setIndexFormat=0x8bb7538,getBindposes=0x8bb7694,
  getPositions=0x8bb7adc,setPositions=0x8bb7aec,getNormals=0x8bb7afc,setNormals=0x8bb7b0c,
  getUV=0x8bb7b38,setUV=0x8bb7b48,setUV2=0x8bb7b68,setUV3=0x8bb7b88,setUV4=0x8bb7ba8,
  getColors=0x8bb7bd4,setColors=0x8bb7be8,getTangents=0x8bb7b1c,setTangents=0x8bb7b28,
  getTriangles=0x8bb7f08,setTriangles=0x8bb7fac,setSubmeshCount=0x8bb76ec,setSubmeshTriangles=0x8bb84b4,
  meshFinish=0x8bb8c28,meshUpload=0x8bb8e70,
+ // dump.cs: public Mesh.MarkDynamic(), static Time.get_frameCount().
+ meshDynamic=0x8bb8e38,frameCount=0x875eb9c,
  textureType=0x8fef0f4,textureInit=0x8fef020,texturePixels=0x8fef48c,textureApply=0x8fef5b0,
  mainTexture=0xc2c53c0,
  // newString(null, const char*) returns a managed System.String*; the two Material calls take that pointer (a property NAME), not an int ID.

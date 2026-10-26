@@ -52,4 +52,12 @@ inline void writeModel(const std::string& dir,const Spec& s=Spec()){
 }
 inline void replaceIn(std::string& s,const std::string& from,const std::string& to){auto p=s.find(from);if(p==std::string::npos)throw std::runtime_error("fixture: no "+from);s.replace(p,from.size(),to);}
 inline Learned learnedAt(const std::string& dir){return learnedOf(JsonParser(text(dir+"/learned.json")).parse());}
+// Test animation frames use real blob views; frame 1 deliberately reads positions from the normals view.
+inline std::string jsonText(const Json& j){switch(j.type){case Json::Null:return "null";case Json::Bool:return j.boolean?"true":"false";case Json::Number:{char number[64];std::snprintf(number,sizeof(number),"%.17g",j.number);return number;}case Json::String:return quote(j.string);case Json::Array:{std::string out="[";for(size_t i=0;i<j.array.size();i++)out+=(i?",":"")+jsonText(j.array[i]);return out+"]";}case Json::Object:{std::string out="{";bool first=true;for(auto& p:j.object){out+=(first?"":",")+quote(p.first)+":"+jsonText(p.second);first=false;}return out+"}";}}throw std::runtime_error("JSON type");}
+inline Spec animated(Spec s=Spec()){
+ s.version=4;s.variants="";auto previous=s.edit;s.edit=[previous](std::string& text){if(previous)previous(text);auto m=JsonParser(text).parse();auto animation=JsonParser("{\"kind\":\"present-loop\",\"stableWeights\":true,\"variable\":\"$frame\",\"first\":0,\"last\":2,\"step\":1,\"initial\":0,\"counter\":0,\"period\":0.5,\"counterStep\":1,\"frames\":[]}").parse();
+  for(int i=0;i<3;i++){Json frame;frame.type=Json::Object;Json value;value.type=Json::Number;value.number=i;frame.object["value"]=value;frame.object["parts"]=m.at("parts");if(i==1){auto& data=frame.object["parts"].array[0].object["data"];data.object["positions"]=data.at("weights");data.object["positions"].array[1].number=36;}animation.object["frames"].array.push_back(std::move(frame));}
+  m.object["animation"]=std::move(animation);text=jsonText(m);};return s;
+}
+
 }

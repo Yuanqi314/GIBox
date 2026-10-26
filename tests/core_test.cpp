@@ -24,6 +24,7 @@ int main(int argc,char**argv){
  // Converter output check (called by the Java tests): the folder must load exactly as the runtime will load it.
  if(argc==2){std::string p=argv[1];auto m=loadModelFile(p);auto s=readSummary(p);assert(m->parts.size()==s.parts.size()&&!m->parts.empty()&&m->variants.combos.empty());
   for(auto& part:m->parts){assert(!part.draws.empty());for(auto& d:part.draws)assert(m->materials.count(d.row.name));std::vector<Submesh> subs;std::vector<Material> rows;activeDraws(part.draws,m->variants.defaults,subs,rows);assert(!subs.empty());}
+  if(m->animation.present())for(size_t i=0;i<m->animation.frames.size();i++){auto frame=loadModelFile(p,false,false,int(i),m->generation);assert(frame->parts.size()==m->parts.size());}
   if(exists(p+"/learned.json"))learnedOf(JsonParser(text(p+"/learned.json")).parse());
   return 0;}
  char temp[]="/tmp/gibox-core-XXXXXX";assert(mkdtemp(temp));std::string root=temp;
@@ -42,10 +43,15 @@ int main(int argc,char**argv){
   // diffuseOnly drops the extra maps; a model by name needs names in the right shape
   {auto j=text(dir+"/model.json");replaceIn(j,"\"blob\"","\"flags\":{\"diffuseOnly\":true},\"blob\"");write(dir+"/model.json",j);assert(!loadModelFile(dir)->materials.at("Material0").light);}
   {Spec n;n.character(0,{"citlali"}).noSkeleton();fixture::writeModel(root+"/named",n);auto mn=loadModelFile(root+"/named");assert(mn->id==0&&mn->names==std::vector<std::string>{"citlali"}&&mn->parts[0].sourceBones.empty());}}
+ // Full animation: frame-local geometry, strict sequence, fractional Present period, one advance per engine frame.
+ {auto dir=root+"/animated";fixture::writeModel(dir,fixture::animated());auto m=loadModelFile(dir,false);assert(m->animation.frames.size()==3&&m->animation.bytes>0);
+  auto next=loadModelFile(dir,false,false,1,m->generation);assert(next->parts.size()==1&&!next->animation.present());
+  FrameLoop clock(m->animation);assert(!clock.tick(10)&&clock.current==0);assert(clock.tick(11)&&clock.current==1);assert(!clock.tick(11)&&clock.current==1);assert(clock.tick(12)&&clock.current==2);assert(clock.tick(13)&&clock.current==0);
+  assert(!clock.tick(1000)&&clock.gaps==1);rejects([&]{loadModelFile(dir,false,false,3,m->generation);});rejects([&]{loadModelFile(dir,false,false,1,"old-generation");});}
  // ---- the checks: every one names what is wrong
  auto bad=root+"/bad";
  refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"gibox-model","other-model");};},"not a GIBox model");
- refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"\"version\":1","\"version\":4");};},"unsupported version");
+ refused(bad,[](Spec& s){s.edit=[](std::string& j){replaceIn(j,"\"version\":1","\"version\":5");};},"unsupported version");
  refused(bad,[](Spec& s){s.character(9999);},"Character ID out of range");
  refused(bad,[](Spec& s){s.character(0);},"needs a character ID or names");
  refused(bad,[](Spec& s){s.character(0,{"Citlali"});},"Character name");

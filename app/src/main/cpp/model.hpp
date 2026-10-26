@@ -1,5 +1,5 @@
 #pragma once
-// GIBox model format, versions 1–3 — GIBox's own model folder, written by the converter (ModelConverter.java) and read here.
+// GIBox model format, versions 1–4 — GIBox's own model folder, written by the converter (ModelConverter.java) and read here.
 // Version 2 gives each draw the variable values it is drawn for ("when") instead of one draw list per combination.
 //
 //   models/<name>/model.json    manifest: character, parts, materials, variants, and where each array sits in model.bin
@@ -65,16 +65,40 @@ inline When whenOf(const Json& w,const Variants& v,const std::string& what){When
   out.allow.insert(tuple);}
  return out;}
 
+// A compiled Present loop and frame manifests. Geometry is read per frame, never as a vertex union.
+struct AnimationFrame {int value=0;Json parts;};
+struct AnimationSpec {bool stableWeights=false;std::string variable;int first=0,last=0,step=1,initial=0;float counter=0,period=1,counterStep=1;std::vector<AnimationFrame> frames;uint64_t bytes=0;
+ bool present()const{return !frames.empty();}size_t index(int value)const{for(size_t i=0;i<frames.size();i++)if(frames[i].value==value)return i;throw std::runtime_error("Animation frame value is not listed");}};
+inline AnimationSpec animationOf(const Json& m){AnimationSpec a;const auto& j=m.at("animation");auto version=juint(m,"version",1,4);
+ if(version<4){require(j.type==Json::Null,"Animation requires model version 4");return a;}
+ require(jstr(j,"kind",32)=="present-loop","Unsupported animation program");a.stableWeights=jbool(j,"stableWeights",false);a.variable=jstr(j,"variable",64);require(a.variable[0]=='$',"Animation variable");
+ a.first=jint(jfield(j,"first"),"animation first");a.last=jint(jfield(j,"last"),"animation last");a.step=jint(jfield(j,"step"),"animation step");a.initial=jint(jfield(j,"initial"),"animation initial");
+ auto number=[&](const char* key){const auto& n=jfield(j,key);require(n.type==Json::Number&&std::isfinite(n.number)&&std::abs(n.number)<=1000000,std::string("Animation ")+key);return float(n.number);};
+ a.counter=number("counter");a.period=number("period");a.counterStep=number("counterStep");require(a.first<=a.last&&a.step>0&&a.period>0&&a.counterStep>0,"Animation loop bounds/period");
+ const auto& variants=m.at("variants");if(variants.type!=Json::Null)require(jarr(variants,"vars",0,0).empty(),"Animation with independent variants is not supported");
+ const auto& root=jarr(m,"parts",1,model::maxParts);int expected=a.initial;
+ for(auto& f:jarr(j,"frames",1,64)){AnimationFrame frame;frame.value=jint(jfield(f,"value"),"animation frame value");require(frame.value==expected,"Animation frame sequence");frame.parts=jfield(f,"parts");require(frame.parts.type==Json::Array&&frame.parts.array.size()==root.size(),"Animation part count");
+  for(size_t i=0;i<root.size();i++){const auto& p=frame.parts.array[i];require(jstr(p,"name",64)==jstr(root[i],"name",64)&&jstr(p,"renderer",256)==jstr(root[i],"renderer",256),"Animation part identity");
+   auto n=juint(p,"vertices",1,model::maxVertices),ni=juint(p,"indices",3,model::maxIndices);require(n==juint(root[i],"vertices",1,model::maxVertices)&&juint(p,"bones",1,model::maxBones)==juint(root[i],"bones",1,model::maxBones),"Animation vertex/bone layout");
+   const auto& data=jfield(p,"data");uint64_t bytes=n*64+ni*4;for(auto ch:{std::pair<const char*,unsigned>{"uv2",8},{"uv3",8},{"uv4",8},{"colors",4},{"tangents",16}})if(data.at(ch.first).type!=Json::Null)bytes+=n*ch.second;
+   a.bytes+=bytes;require(a.bytes<=256ull*1024*1024,"Animation geometry exceeds 256 MiB budget");}
+  a.frames.push_back(std::move(frame));expected=expected<a.last?expected+a.step:a.first;}
+ require(expected==a.initial,"Animation frame sequence is not closed");return a;}
+struct FrameLoop {AnimationSpec spec;float counter=0;size_t current=0;uint32_t last=0;bool clock=false;uint64_t advances=0,gaps=0;
+ explicit FrameLoop(AnimationSpec a={}):spec(std::move(a)),counter(spec.counter){if(spec.present())current=spec.index(spec.initial);}
+ bool tick(uint32_t engineFrame){if(!clock){last=engineFrame;clock=true;return false;}uint32_t elapsed=engineFrame-last;if(!elapsed)return false;last=engineFrame;
+  if(elapsed>240){gaps++;return false;}bool changed=false;for(uint32_t n=0;n<elapsed;n++){if(std::fmod(counter,spec.period)==0){int value=spec.frames[current].value;value=value<spec.last?value+spec.step:spec.first;size_t next=spec.index(value);changed|=next!=current;current=next;advances++;}counter+=spec.counterStep;require(std::isfinite(counter),"Animation counter overflow");}return changed;}};
+
 // ---------------------------------------------------------------- manifest summary (what the runtime scans every second)
 struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false,indexedBones=false;Fingerprint target;};
-struct ModelSummary {std::string name,generation;unsigned id=0;std::vector<std::string> names;std::vector<PartSummary> parts;Variants variants;When replaceWhen;};
+struct ModelSummary {std::string name,generation;unsigned id=0;bool animated=false;std::vector<std::string> names;std::vector<PartSummary> parts;Variants variants;When replaceWhen;};
 inline void checkFormat(const Json& m){require(m.type==Json::Object,"model.json: not an object");require(m.at("format").type==Json::String&&m.at("format").string=="gibox-model","model.json: not a GIBox model");
- auto version=juint(m,"version",1,1000000);require(version>=1&&version<=3,"model.json: unsupported version "+std::to_string(version)+" (made by a newer GIBox?)");}
+ auto version=juint(m,"version",1,1000000);require(version>=1&&version<=4,"model.json: unsupported version "+std::to_string(version)+" (made by a newer GIBox?)");}
 inline void characterOf(const Json& m,unsigned& id,std::vector<std::string>& names){const auto& c=jfield(m,"character");id=unsigned(juint(c,"id",0,10001999));require(id==0||id>=10000000,"Character ID out of range");
  const auto& n=c.at("names");if(n.type!=Json::Null){require(n.type==Json::Array&&n.array.size()<=16,"Character names");for(auto& x:n.array){require(x.type==Json::String&&nameToken(x.string),"Character name");names.push_back(x.string);}}
  require(id!=0||!names.empty(),"A model needs a character ID or names");}
-inline ModelSummary summaryOf(const Json& m){checkFormat(m);ModelSummary s;s.name=jstr(m,"name",512);s.generation=jstr(m,"generation",64);characterOf(m,s.id,s.names);std::set<std::string> seen;
- auto version=unsigned(juint(m,"version",1,3));s.variants=variantsOf(m.at("variants"),version);require(version>=3||m.at("replaceWhen").type==Json::Null,"replaceWhen requires model version 3");s.replaceWhen=whenOf(m.at("replaceWhen"),s.variants,"replacement");
+inline ModelSummary summaryOf(const Json& m){checkFormat(m);ModelSummary s;s.animated=animationOf(m).present();s.name=jstr(m,"name",512);s.generation=jstr(m,"generation",64);characterOf(m,s.id,s.names);std::set<std::string> seen;
+ auto version=unsigned(juint(m,"version",1,4));s.variants=variantsOf(m.at("variants"),version);require(version>=3||m.at("replaceWhen").type==Json::Null,"replaceWhen requires model version 3");s.replaceWhen=whenOf(m.at("replaceWhen"),s.variants,"replacement");
  for(auto& p:jarr(m,"parts",1,model::maxParts)){PartSummary ps;ps.name=jstr(p,"name",64);require(safeName(ps.name)&&seen.insert(ps.name).second,"Part name: "+ps.name);ps.renderer=jstr(p,"renderer",256);
   ps.bones=unsigned(juint(p,"bones",1,model::maxBones));ps.indexedBones=p.at("skeleton").type==Json::Null;if(p.at("target").type!=Json::Null){ps.target=fingerprintOf(p.at("target"));ps.hasTarget=true;}s.parts.push_back(ps);}
  return s;}
@@ -109,13 +133,27 @@ inline std::vector<MergedDraw> mergeDraws(const std::vector<Submesh>& subs,const
 inline Bytes joinedIndices(const Bytes& indices,const MergedDraw& d){Bytes out;out.reserve(4ull*d.count);
  for(auto& r:d.ranges){require(4ull*(uint64_t(r.start)+r.count)<=indices.size(),"Draw outside the index buffer");out.insert(out.end(),indices.begin()+4ull*r.start,indices.begin()+4ull*(uint64_t(r.start)+r.count));}
  return out;}
-struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;std::vector<DrawSpec> draws;std::vector<std::pair<std::string,Bytes>> channels;std::vector<std::string> sourceBones;std::vector<int> sourceParents;Bytes sourceBinds;};
+// Historical index-only builds recorded names only for the indices they used. Unused rows are deliberately empty.
+// This is an observation of a successful mapping, not a complete skeleton or a bindpose backup.
+inline std::vector<std::string> readLegacyBoneNames(const std::string& file,unsigned palette){
+ require(palette>0&&palette<=model::maxBones,"Legacy bone palette size");auto bytes=read(file,model::maxBones*320);std::istringstream input(std::string(bytes.begin(),bytes.end()));std::string row;
+ require(bool(std::getline(input,row)),"Legacy bonemap header missing");if(!row.empty()&&row.back()=='\r')row.pop_back();require(row=="source_index\ttarget_index\tsource_name\ttarget_name","Legacy bonemap header");
+ std::vector<std::string> names(palette);std::vector<bool> seen(palette);unsigned count=0;
+ while(std::getline(input,row)){if(!row.empty()&&row.back()=='\r')row.pop_back();if(row.empty())continue;std::array<std::string,4> fields;size_t start=0;
+  for(unsigned c=0;c<3;c++){auto at=row.find('\t',start);require(at!=row.npos,"Legacy bonemap columns");fields[c]=row.substr(start,at-start);start=at+1;}fields[3]=row.substr(start);require(fields[3].find('\t')==row.npos,"Legacy bonemap extra column");
+  auto index=decimal(fields[0]);require(index<palette&&!seen[index]&&fields[2]=="#"+std::to_string(index),"Legacy bonemap source index");seen[index]=true;count++;
+  if(fields[1]=="-1"){require(fields[3].empty(),"Legacy unmapped bone name");continue;}
+  require(decimal(fields[1])==index&&!trim(fields[3]).empty()&&fields[3].size()<=256&&fields[3].find('\0')==row.npos,"Legacy bonemap target");names[index]=fields[3];
+ }
+ require(count==palette,"Legacy bonemap incomplete palette");return names;}
+struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;std::vector<DrawSpec> draws;std::vector<std::pair<std::string,Bytes>> channels;std::vector<std::string> sourceBones;std::vector<int> sourceParents;Bytes sourceBinds;
+ std::vector<std::string> legacyBoneNames;std::string legacyBoneError;};
 // Where a texture sits in model.bin (checked against the file when the manifest is read); its pixels are read only for
 // the materials an assignment draws (readTextures), so a model with many variants does not hold every texture at once.
 struct TexRef {unsigned w=0,h=0;uint64_t off=0,len=0;bool present()const{return len>0;}};
 struct MaterialFile {bool original=true;std::shared_ptr<Texture> main,light,normal;TexRef mainRef,lightRef,normalRef;
  bool loaded()const{return original||main!=nullptr;}};
-struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;uint64_t blobSize=0;uint32_t blobCrc=0;};
+struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;uint64_t blobSize=0;uint32_t blobCrc=0;AnimationSpec animation;};
 
 namespace detail {
 // model.bin, checked whole (size, CRC-32 streamed in 1 MiB steps) before any view is read from it; views are then read
@@ -145,11 +183,14 @@ inline std::shared_ptr<Texture> texture(const Json& t,Blob& blob,const std::stri
 
 /** Reads and checks a model folder. Nothing partially valid is returned: any problem throws with what and where. */
 // allTextures=false: geometry and texture positions only; readTextures() fetches the pixels that are needed.
-inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allTextures=true,bool verify=true){
- auto m=JsonParser(manifestText(dir)).parse();auto summary=summaryOf(m);
+inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allTextures=true,bool verify=true,int animationFrame=-1,const std::string& expectedGeneration=""){
+ auto m=JsonParser(manifestText(dir)).parse();checkFormat(m);
+ if(!expectedGeneration.empty())require(jstr(m,"generation",64)==expectedGeneration,"Animation conversion changed while loading");
+ auto animation=animationOf(m);if(animationFrame>=0){require(size_t(animationFrame)<animation.frames.size(),"Animation frame index");m.object["parts"]=animation.frames[size_t(animationFrame)].parts;}
+ auto summary=summaryOf(m);
  auto out=std::make_shared<ModelFile>();out->name=summary.name;out->path=dir;out->generation=summary.generation;out->id=summary.id;out->names=summary.names;
  const auto& flags=m.at("flags");if(flags.type!=Json::Null){out->originalMaterials=jbool(flags,"originalMaterials",false);out->diffuseOnly=jbool(flags,"diffuseOnly",false);}
- auto version=unsigned(juint(m,"version",1,3));out->variants=variantsOf(m.at("variants"),version);
+ auto version=unsigned(juint(m,"version",1,4));out->variants=variantsOf(m.at("variants"),version);
  // The data file: exact size and CRC-32 before any view is taken from it.
  const auto& blobInfo=jfield(m,"blob");require(jstr(blobInfo,"file",64)=="model.bin","blob.file must be model.bin");
  auto size=juint(blobInfo,"size",1,model::maxBlob);auto crc=uint32_t(juint(blobInfo,"crc32",0,0xffffffffull));
@@ -164,7 +205,7 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allT
     if(f.lightRef.present())f.light=std::make_shared<Texture>(Texture{f.lightRef.w,f.lightRef.h,blob.read(f.lightRef.off,f.lightRef.len)});
     if(f.normalRef.present())f.normal=std::make_shared<Texture>(Texture{f.normalRef.w,f.normalRef.h,blob.read(f.normalRef.off,f.normalRef.len)});}}
   out->materials[name]=f;}
- out->blobSize=size;out->blobCrc=crc;
+ out->blobSize=size;out->blobCrc=crc;if(animationFrame<0)out->animation=std::move(animation);
  const auto& parts=jarr(m,"parts",1,model::maxParts);
  for(size_t pi=0;pi<parts.size();pi++){const auto& p=parts[pi];const auto& ps=summary.parts[pi];PartFile f;
   unsigned n=unsigned(juint(p,"vertices",1,model::maxVertices)),ni=unsigned(juint(p,"indices",3,model::maxIndices));require(ni%3==0,ps.name+": index count not a multiple of 3");
@@ -197,6 +238,7 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allT
    for(auto& d:f.draws)if(d.when.allow.size()==out->variants.combos.size()){d.when.vars.clear();d.when.allow.clear();}}
   else for(auto& dr:jarr(p,"draws",1,model::maxPartDraws)){auto d=drawOf(dr);d.when=whenOf(dr.at("when"),out->variants,ps.name);f.draws.push_back(d);}
   out->parts.push_back(std::move(f));}
+ if(!expectedGeneration.empty())require(jstr(JsonParser(manifestText(dir)).parse(),"generation",64)==expectedGeneration,"Animation conversion changed during frame read");
  return out;}
 // Pixels for the named materials, read from model.bin later on (a variant switch, or a build whose variant changed after
 // the preload). The folder must still be the same conversion: same generation and the same model.bin size.

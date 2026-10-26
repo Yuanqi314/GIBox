@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * What the app needs from a GIBox model folder's model.json (format "gibox-model", versions 1–3; the full check of the
+ * What the app needs from a GIBox model folder's model.json (format "gibox-model", versions 1–4; the full check of the
  * data is the runtime's, model.hpp): the character, the variants, where it was converted from. learned.json adds the
  * character ID the runtime found for a model converted by name.
  */
@@ -43,13 +43,14 @@ public final class ModelManifest {
     public static ModelManifest read(File dir) throws Exception {
         Map<String, Object> m = Json.obj(Json.read(new File(dir, "model.json"), 4L << 20), "model.json");
         Json.check("gibox-model".equals(m.get("format")), "不是 GIBox 模型：" + dir.getName());
-        long version = Json.integer(m.get("version"), "version", 1, 1000000); Json.check(version >= 1 && version <= 3, "模型格式版本 " + version + " 不支持（新版 GIBox 转换的？）：" + dir.getName());
+        long version = Json.integer(m.get("version"), "version", 1, 1000000); Json.check(version >= 1 && version <= 4, "模型格式版本 " + version + " 不支持（新版 GIBox 转换的？）：" + dir.getName());
         ModelManifest r = new ModelManifest(); r.version = (int) version;
         r.name = Json.str(m.get("name"), "name", 512); r.generation = Json.str(m.get("generation"), "generation", 64);
         Map<String, Object> c = Json.obj(m.get("character"), "character");
         r.id = (int) Json.integer(c.get("id"), "character.id", 0, 10001999); Json.check(r.id == 0 || r.id >= 10000000, "角色 ID 越界");
         if (c.get("names") != null) for (Object n : Json.arr(c.get("names"), "character.names", 0, 16)) { String s = Json.str(n, "character.names", 40); Json.check(s.matches("[a-z0-9]{3,40}"), "角色名格式：" + s); r.names.add(s); }
         Json.check(r.id != 0 || !r.names.isEmpty(), "模型没有角色 ID 也没有角色名");
+        if (version == 4) Json.check(m.get("animation") instanceof Map, "动画格式缺少 animation");
         Object v = m.get("variants");
         if (v != null) {
             Map<String, Object> vo = Json.obj(v, "variants");

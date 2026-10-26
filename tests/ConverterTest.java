@@ -128,6 +128,11 @@ public final class ConverterTest {
   // One vertex's weights: a bone listed twice is added up, the largest comes first, the sum is 1.
   {float[] w={.1f,.4f,.2f,0};int[] ids={7,3,7,9};ByteBuffer o=b(32);ModelConverter.tidy(w,ids,o);
    ok(Math.abs(o.getFloat(0)-4/7f)<1e-6&&o.getInt(16)==3&&Math.abs(o.getFloat(4)-3/7f)<1e-6&&o.getInt(20)==7&&o.getFloat(8)==0&&o.getInt(24)==0,"weights tidied");}
+  // The opt-in animation fallback keeps the supported association ratios and still rejects malformed data.
+  {ModelConverter.ExtraBoneFallback fallback=new ModelConverter.ExtraBoneFallback();float[] w={1,.25f,.75f,0};int[] ids={119,2,4,0};fallback.apply(w,ids,114,"Blend.buf",1641);ByteBuffer out=b(32);ModelConverter.cleanWeights(w,ids,114);ModelConverter.tidy(w,ids,out);
+   ok(out.getFloat(0)==.75f&&out.getInt(16)==4&&out.getFloat(4)==.25f&&out.getInt(20)==2&&fallback.vertices==1&&fallback.associations==1,"experimental fallback preserves the relative supported associations");
+   for(float invalid:new float[]{-1,Float.NaN,Float.POSITIVE_INFINITY}){boolean refused=false;try{fallback.apply(new float[]{1,invalid,0,0},new int[]{0,119,0,0},114,"Blend.buf",1);}catch(IllegalArgumentException ex){refused=true;}ok(refused,"fallback still rejects malformed weights");}
+   boolean refused=false;try{fallback.apply(new float[]{1,1,0,0},new int[]{-1,119,0,0},114,"Blend.buf",1);}catch(IllegalArgumentException ex){refused=true;}ok(refused,"fallback must not hide negative indices");}
   // Lumine's Body contains 20 vertices with a fourth, tiny weight on index 114. Test the actual vertex-7891 values,
   // then both conversion paths: named skeleton index validation and synthetic minimum-bone count calculation.
   {float[] w={.5608007311820984f,.3355036675930023f,.1036955714225769f,5.960464477539063e-8f};int[] ids={1,0,2,114};ByteBuffer out=b(32);
@@ -231,6 +236,12 @@ public final class ConverterTest {
   String firstGeneration=ModelManifest.read(dest).generation;put(dest,"bonemap-Part0.tsv","kept");put(dest,"learned.json","{\"format\":\"gibox-learned\",\"version\":1,\"id\":0,\"targets\":{}}");put(src,"mod.ini",ini);
   ModelConverter.Options replace=new ModelConverter.Options().variants(true).replace(true).source("/mods/x","abc");ModelConverter.convert(src,bones2,dest,10000107,replace,dds->rgba,new StringBuilder());
   ModelManifest again=ModelManifest.read(dest);ok(!again.generation.equals(firstGeneration)&&new File(dest,"bonemap-Part0.tsv").isFile()&&new File(dest,"learned.json").isFile()&&again.sourceSignature.equals("abc")&&again.sourcePath.equals("/mods/x"),"replace: new generation, kept runtime files, source");
+  // The standalone library can disappear. Do not replace the same mod's checked named skeleton with index-only data,
+  // or discard its learned files just because the importer now supplies the character's model-name alias.
+  Object previousTarget=Fixtures.part(dest,0).get("target");ModelConverter.Options recovered=new ModelConverter.Options().variants(true).replace(true).names(Collections.singletonList("citlali"));StringBuilder recoveredLog=new StringBuilder();
+  ModelConverter.convert(src,null,dest,10000107,recovered,dds->rgba,recoveredLog);
+  ok(recovered.reusedSkeleton&&Fixtures.part(dest,0).get("skeleton")!=null&&Objects.equals(Fixtures.part(dest,0).get("target"),previousTarget)&&new File(dest,"learned.json").isFile()&&new File(dest,"bonemap-Part0.tsv").isFile()&&recoveredLog.toString().contains("骨骼复用"),"missing library: preserve the existing complete palette and identity across alias changes: "+recoveredLog);
+  byte[] savedBlob=Files.readAllBytes(new File(dest,"model.bin").toPath());byte[] damaged=savedBlob.clone();damaged[0]^=1;put(dest,"model.bin",damaged);bad=false;try{ModelConverter.previousBones(dest,10000107);}catch(IllegalArgumentException ex){bad=ex.getMessage().contains("校验失败");}ok(bad,"corrupt source data cannot prove a reusable skeleton");put(dest,"model.bin",savedBlob);
   // Converted again for another character (here: without the skeleton library), what was learned for the old one goes.
   File swapped=new File(root,"swapped");ModelConverter.convert(src,bones,swapped,10000107,new ModelConverter.Options(),dds->rgba,new StringBuilder());put(swapped,"learned.json","{}");put(swapped,"bonemap-Part0.tsv","x");
   ModelConverter.convert(src,null,swapped,10000046,new ModelConverter.Options().replace(true).names(Collections.singletonList("hutao")),dds->rgba,new StringBuilder());ok(!new File(swapped,"learned.json").exists()&&!new File(swapped,"bonemap-Part0.tsv").exists()&&ModelManifest.read(swapped).id==10000046,"another character: runtime files dropped");
@@ -248,7 +259,7 @@ public final class ConverterTest {
   put(named,"learned.json","{\"format\":\"gibox-learned\",\"version\":1,\"id\":10000107,\"targets\":{}}");ok(ModelManifest.read(named).character()==10000107,"learned character ID");
   Process np2=new ProcessBuilder(args[0],named.getAbsolutePath()).inheritIO().start();ok(np2.waitFor()==0,"native loader reads the by-name model");
   // model.json is checked when the app reads it, too.
-  put(named,"model.json",new String(Files.readAllBytes(new File(named,"model.json").toPath()),StandardCharsets.UTF_8).replace("\"version\": 2","\"version\": 4"));bad=false;try{ModelManifest.read(named);}catch(IllegalArgumentException e){bad=e.getMessage().contains("版本");}ok(bad,"newer format refused");
+  put(named,"model.json",new String(Files.readAllBytes(new File(named,"model.json").toPath()),StandardCharsets.UTF_8).replace("\"version\": 2","\"version\": 5"));bad=false;try{ModelManifest.read(named);}catch(IllegalArgumentException e){bad=e.getMessage().contains("版本");}ok(bad,"newer format refused");
   // Our JSON: strict like the native reader, exact float round trip.
   for(String j:new String[]{"{\"a\":1,\"a\":2}","[01]","[1,]","{\"a\":1} x","[\"\u0001\"]","[1e999]"}){bad=false;try{Json.parse(j);}catch(IllegalArgumentException e){bad=true;}ok(bad,"JSON accepted: "+j);}
   Object third=((List<?>)Json.parse(Json.write(Arrays.<Object>asList(1f/3,-2.5e-7f)))).get(0);ok(Json.finite(third,"f")==1f/3,"float round trip");

@@ -155,6 +155,23 @@ fun SettingsScreen(state: AppState) {
                     )
                 }
             }
+            if (state.logLevel == "debug") item {
+                val rev = state.revision
+                val animation = remember(rev) { state.experimentInt("animationMode") }
+                SettingsGroup(title = { SectionTitle("模型动画实验（调试）") }, verticalArrangement = gap) {
+                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(0, 1)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("动画播放方式", style = MaterialTheme.typography.titleSmall)
+                            Text("切换后自动重建动画模型。预热完成后开始播放；只影响带动画的 MOD。调试日志记录帧号、耗时和内存估算。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                for ((value, label) in listOf(0 to "缓存帧网格", 1 to "动态网格", 2 to "暂停（初始帧）")) {
+                                    FilterChip(selected = animation == value, onClick = { state.setExperiment("animationMode", value) }, label = { Text(label) })
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             item {
                 SettingsGroup(title = { SectionTitle("高级") }, verticalArrangement = gap) {
                     SettingsMenuLink(

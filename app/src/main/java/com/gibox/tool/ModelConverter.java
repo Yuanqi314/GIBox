@@ -9,7 +9,7 @@ import java.util.regex.*;
 
 /**
  * INI/vertex-buffer converter. Output: one GIBox model folder
- * (format versions 2/3, read by model.hpp): model.json (manifest) + model.bin (every array on a 16-byte boundary, CRC-32 in
+ * (format versions 2–4, read by model.hpp): model.json (manifest) + model.bin (every array on a 16-byte boundary, CRC-32 in
  * the manifest) + conversion.log. The runtime adds learned.json and bonemap-<part>.tsv.
  */
 public final class ModelConverter {
@@ -38,6 +38,7 @@ public final class ModelConverter {
     static final class Ini {
         final LinkedHashMap<String,Section> sections=new LinkedHashMap<>();
         final LinkedHashMap<String,Integer> vars=new LinkedHashMap<>();
+        final LinkedHashMap<String,Double> numbers=new LinkedHashMap<>();
         final LinkedHashMap<String,TreeSet<Integer>> choices=new LinkedHashMap<>();
         final LinkedHashMap<String,TreeSet<Integer>> excludedChoices=new LinkedHashMap<>();
         final LinkedHashSet<String> compatibility=new LinkedHashSet<>();
@@ -57,12 +58,16 @@ public final class ModelConverter {
                 else if(key.startsWith("key")&&previous.lines.equals(s.lines))compatibility.add("已忽略完全相同的重复按键段："+s.name);
                 else check(false,"重复 INI 段："+s.name);
             }
-            Pattern decl=Pattern.compile("(?i)^(?:global\\s+)?(?:persist\\s+)?(\\$[a-z_][a-z0-9_]*)(?:\\s*=\\s*(-?\\d+))?\\s*$");
+            Pattern decl=Pattern.compile("(?i)^(?:global\\s+)?(?:persist\\s+)?(\\$[a-z_][a-z0-9_]*)(?:\\s*=\\s*([+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?))?\\s*$");
             Pattern cmp=Pattern.compile("(\\$[A-Za-z_][A-Za-z0-9_]*)\\s*(?:===|!==|==|!=|<=|>=|<|>)\\s*(-?\\d+)");
-            for(Section s:sections.values())for(String l:s.lines){Matcher m=decl.matcher(l);if(m.matches()&&(lower(s.name).equals("constants")||lower(s.name).equals("persist"))){String v=lower(m.group(1));int n=m.group(2)==null?0:Integer.parseInt(m.group(2));vars.put(v,n);choices.computeIfAbsent(v,k->new TreeSet<>()).add(n);}Matcher c=cmp.matcher(l);while(c.find())choices.computeIfAbsent(lower(c.group(1)),k->new TreeSet<>()).add(Integer.parseInt(c.group(2)));
-                if(lower(s.name).startsWith("key")){int eq=l.indexOf('=');if(eq>0&&l.substring(0,eq).trim().startsWith("$")){String v=lower(l.substring(0,eq).trim());for(String a:l.substring(eq+1).split(","))if(a.trim().matches("-?\\d+"))choices.computeIfAbsent(v,k->new TreeSet<>()).add(Integer.parseInt(a.trim()));}}
+            for(Section section:sections.values())for(String l:section.lines){Matcher m=decl.matcher(l);
+                if(m.matches()&&(lower(section.name).equals("constants")||lower(section.name).equals("persist"))){String v=lower(m.group(1));double n=m.group(2)==null?0:Double.parseDouble(m.group(2));check(Double.isFinite(n),"变量初始值无效："+v);numbers.put(v,n);
+                    if(n==Math.rint(n)&&n>=Integer.MIN_VALUE&&n<=Integer.MAX_VALUE){vars.put(v,(int)n);choices.computeIfAbsent(v,k->new TreeSet<>()).add((int)n);}}
+                // Present counters and fractional periods are not model variants.
+                if(!lower(section.name).equals("present")){Matcher c=cmp.matcher(l);while(c.find())choices.computeIfAbsent(lower(c.group(1)),k->new TreeSet<>()).add(Integer.parseInt(c.group(2)));}
+                if(lower(section.name).startsWith("key")){int eq=l.indexOf('=');if(eq>0&&l.substring(0,eq).trim().startsWith("$")){String v=lower(l.substring(0,eq).trim());for(String v0:l.substring(eq+1).split(","))if(v0.trim().matches("-?\\d+"))choices.computeIfAbsent(v,k->new TreeSet<>()).add(Integer.parseInt(v0.trim()));}}
             }
-            for(String v:choices.keySet())check(vars.containsKey(v),"条件变量缺少初始值："+v);
+            for(String v:choices.keySet()){check(!numbers.containsKey(v)||vars.containsKey(v),"模型款式使用非整数变量："+v);check(vars.containsKey(v),"条件变量缺少初始值："+v);}
             // A variable a key sets can only take the values the keys list (cycle, toggle, hold or activate), the value it
             // starts with, and literal values other sections assign to it. Constants that only appear in comparisons may
             // be old, disabled states or bounds; they must not add variants (Ayaka's key cycles $dress = 0,1,2, while old
@@ -379,6 +384,24 @@ public final class ModelConverter {
             Bones b=new Bones(n,names,binds.array(),target);b.parents=parents;out.add(b);
         }
         return out;}
+    /** A re-conversion can reuse this model's complete source palette when the separate library is unavailable. */
+    static List<Bones> previousBones(File dir,int id)throws Exception {
+        if(!ModelManifest.exists(dir)||id==0)return null;ModelManifest summary=ModelManifest.read(dir);if(summary.id!=id)return null;
+        Map<String,Object> model=Json.obj(Json.read(new File(dir,"model.json"),4L<<20),"model.json");List<Object> parts=Json.arr(model.get("parts"),"parts",1,64);
+        for(Object raw:parts){Map<String,Object> p=Json.obj(raw,"part");if(!(p.get("skeleton") instanceof Map))return null;}
+        Map<String,Object> blob=Json.obj(model.get("blob"),"blob");check("model.bin".equals(blob.get("file")),"已有模型 blob.file 无效");long size=Json.integer(blob.get("size"),"blob.size",1,768L<<20),expected=Json.integer(blob.get("crc32"),"blob.crc32",0,0xffffffffL);
+        File file=new File(dir,"model.bin");java.util.zip.CRC32 crc=new java.util.zip.CRC32();
+        List<Bones> out=new ArrayList<>();Set<String> seen=new HashSet<>();
+        try(RandomAccessFile bin=new RandomAccessFile(file,"r")){check(bin.length()==size,"已有模型数据尺寸不符，不能复用骨骼");byte[] chunk=new byte[65536];for(long left=size;left>0;){int n=(int)Math.min(left,chunk.length);bin.readFully(chunk,0,n);crc.update(chunk,0,n);left-=n;}check(crc.getValue()==expected,"已有模型数据校验失败，不能复用骨骼");
+         for(Object raw:parts){Map<String,Object> p=Json.obj(raw,"part"),sk=Json.obj(p.get("skeleton"),"skeleton"),target=fingerprint(p.get("target"));
+            check(p.get("target")==null||target!=null,"已有模型目标记录无效");if(target!=null&&ModelManifest.lowerLod((String)target.get("mesh")))return null;String name=Json.str(p.get("renderer"),"renderer",256);if(!seen.add(lower(name)))return null;
+            int count=(int)Json.integer(p.get("bones"),"bones",1,512);if(target!=null){check(((Number)target.get("bones")).intValue()==count,"已有模型目标骨骼数不符");check(name.equalsIgnoreCase((String)target.get("renderer")),"已有模型目标渲染器不符");}
+            List<String> names=new ArrayList<>();for(Object value:Json.arr(sk.get("bones"),"skeleton.bones",count,count)){String n=Json.str(value,"bone",256);check(n.indexOf('\t')<0&&n.indexOf('\n')<0&&n.indexOf('\r')<0,"已有模型骨骼名无效");names.add(n);}
+            List<Object> view=Json.arr(sk.get("bindposes"),"bindposes",2,2);long offset=Json.integer(view.get(0),"bindposes offset",0,size),length=Json.integer(view.get(1),"bindposes size",64L*count,64L*count);check(offset<=size-length,"已有模型绑定矩阵越界");
+            byte[] bytes=new byte[(int)length];bin.seek(offset);bin.readFully(bytes);ByteBuffer values=buf(bytes);while(values.hasRemaining())check(Float.isFinite(values.getFloat()),"已有模型绑定矩阵含无效数值");
+            Bones b=new Bones(name,names,bytes,target);if(sk.get("parents")!=null){b.parents=new ArrayList<>();for(Object parent:Json.arr(sk.get("parents"),"parents",count,count))b.parents.add((int)Json.integer(parent,"parent",-1,count-1));}out.add(b);
+        }}return out;
+    }
     /** The original mesh's identity (model.hpp fingerprintOf); one that does not check out is left for the runtime to learn. */
     static Map<String,Object> fingerprint(Object v){
         if(!(v instanceof Map))return null;
@@ -387,13 +410,59 @@ public final class ModelConverter {
         catch(IllegalArgumentException e){return null;}
     }
     private static Bones target(String part,List<Bones> bones,Map<String,String> map){String manual=map.get(lower(part));if(manual!=null){for(Bones b:bones)if(b.name.equalsIgnoreCase(manual))return b;throw new IllegalArgumentException("映射目标不存在："+manual);}String a=lower(part).replaceFirst("[a-z]$","");Bones best=null;int score=0;boolean tie=false;for(Bones b:bones){String n=lower(b.name).replaceFirst("_lod[0-9]+$","");int k=lower(part).endsWith(n)||a.endsWith(n)?n.length():0;if(k>score){score=k;best=b;tie=false;}else if(k>0&&k==score)tie=true;}check(!tie,"渲染器映射有歧义："+part);if(best!=null)return best;if(bones.size()==1)return bones.get(0);throw new IllegalArgumentException("请手工映射部件："+part);}
+    static final class IntList {int[] data;int size;IntList(){this(1024);}IntList(int capacity){data=new int[capacity];}int size(){return size;}void add(int n){check(size<15000000,"索引数超限");if(size==data.length)data=Arrays.copyOf(data,Math.min(15000000,Math.max(size+1,size+size/2)));data[size++]=n;}}
     static final class Vertex {byte[] pos,norm,uv,tangent,color,weights;List<byte[]> extra=new ArrayList<>();boolean unweighted;int trimmedWeights;}
+    /** Packed records keep retained vertex data out of thousands of Java objects and tiny arrays. */
+    static final class PackedVertices {
+        static final int STRIDE=112,CHUNK=4096;final List<byte[]> chunks=new ArrayList<>();int count,trimmed,requiredBones=1,extras=3;
+        int size(){return count;}byte[] chunk(int i){return chunks.get(i/CHUNK);}int offset(int i){return i%CHUNK*STRIDE;}
+        void add(Vertex v){check(count<500000,"顶点数超限");if(count%CHUNK==0)chunks.add(new byte[CHUNK*STRIDE]);byte[] out=chunk(count);int p=offset(count);
+            System.arraycopy(v.pos,0,out,p,12);System.arraycopy(v.norm,0,out,p+12,12);System.arraycopy(v.uv,0,out,p+24,8);System.arraycopy(v.weights,0,out,p+32,32);System.arraycopy(v.color,0,out,p+64,4);System.arraycopy(v.tangent,0,out,p+68,16);
+            extras=Math.min(extras,v.extra.size());for(int k=0;k<v.extra.size();k++)System.arraycopy(v.extra.get(k),0,out,p+84+8*k,8);
+            out[p+108]=(byte)(v.unweighted?1:0);if(v.trimmedWeights>0)trimmed++;ByteBuffer skin=buf(v.weights);for(int k=0;k<4;k++)if(skin.getFloat(4*k)>0)requiredBones=Math.max(requiredBones,skin.getInt(16+4*k)+1);count++;}
+        boolean unweighted(int i){return chunk(i)[offset(i)+108]!=0;}
+        float position(int i,int axis){return buf(chunk(i)).getFloat(offset(i)+axis*4);}
+        void copyWeights(int to,int from){System.arraycopy(chunk(from),offset(from)+32,chunk(to),offset(to)+32,32);chunk(to)[offset(to)+108]=0;}
+        byte[] column(int stride,int field){byte[] out=new byte[count*stride];for(int i=0;i<count;i++)System.arraycopy(chunk(i),offset(i)+field,out,i*stride,stride);return out;}
+    }
+    /** A permutation is exact: move every attribute together and remap every index, without changing any triangle. */
+    static final class WeightOrder {
+        static final class Bucket {final IntList slots=new IntList(4);int cursor;}
+        final Map<ByteBuffer,Bucket> buckets=new HashMap<>();final int count;
+        WeightOrder(PackedVertices vertices){count=vertices.size();byte[] weights=vertices.column(32,32);for(int i=0;i<count;i++)buckets.computeIfAbsent(ByteBuffer.wrap(weights,32*i,32).slice(),k->new Bucket()).slots.add(i);}
+        boolean align(Group group){if(group.vertices.size()!=count)return false;for(Bucket b:buckets.values())b.cursor=0;
+            byte[] weights=group.vertices.column(32,32);int[] order=new int[count];for(int i=0;i<count;i++){Bucket b=buckets.get(ByteBuffer.wrap(weights,32*i,32).slice());if(b==null||b.cursor>=b.slots.size())return false;order[i]=b.slots.data[b.cursor++];}
+            PackedVertices old=group.vertices,sorted=new PackedVertices();sorted.count=count;sorted.trimmed=old.trimmed;sorted.requiredBones=old.requiredBones;sorted.extras=old.extras;
+            for(int i=0;i<count;i+=PackedVertices.CHUNK)sorted.chunks.add(new byte[PackedVertices.CHUNK*PackedVertices.STRIDE]);
+            for(int i=0;i<count;i++)System.arraycopy(old.chunk(i),old.offset(i),sorted.chunk(order[i]),sorted.offset(order[i]),PackedVertices.STRIDE);
+            for(int i=0;i<group.indices.size();i++)group.indices.data[i]=order[group.indices.data[i]];group.vertices=sorted;return true;}
+    }
+    static final class BufferCache extends LinkedHashMap<File,byte[]> {
+        long bytes;BufferCache(){super(16,.75f,true);}
+        @Override public byte[] put(File file,byte[] data){byte[] old=super.put(file,data);bytes+=data.length-(old==null?0:old.length);Iterator<Map.Entry<File,byte[]>> it=entrySet().iterator();while(bytes>16L*1024*1024&&it.hasNext()){bytes-=it.next().getValue().length;it.remove();}return old;}
+        @Override public void clear(){super.clear();bytes=0;}
+    }
     /** Submeshes and material rows of one renderer part in one variant combination. */
     static final class ComboRows {final List<int[]> subs=new ArrayList<>();final List<String[]> rows=new ArrayList<>();String key(){StringBuilder s=new StringBuilder();for(int i=0;i<subs.size();i++)s.append(subs.get(i)[0]).append(',').append(subs.get(i)[1]).append(':').append(rows.get(i)[0]).append('#').append(rows.get(i)[1]).append(';');return s.toString();}}
     /** One renderer: union of every combination's vertices and index ranges, plus per-combination submeshes. */
-    static final class Group {Bones bones;String name;List<Vertex> vertices=new ArrayList<>();List<Integer> indices=new ArrayList<>();Map<String,Integer> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();List<Object> draws;Group(Bones b,String n){bones=b;name=n;} }
+    static final class Group {Bones bones;String name;PackedVertices vertices=new PackedVertices();IntList indices=new IntList();Map<String,int[]> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();List<Object> draws;final ExtraBoneFallback extraBones=new ExtraBoneFallback();Group(Bones b,String n){bones=b;name=n;} }
     static final class MaterialDef {String name;Resource diffuse,light,normal;}
-    static final class Build {final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final Map<File,byte[]> cache=new HashMap<>();}
+    static final class Build {boolean animationBoneFallback=false;final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final BufferCache cache=new BufferCache();}
+    /** Explicit, lossy import experiment for baked geometry animation, never the default or a PC-equivalence claim.
+     * Keep each vertex's own supported associations; refuse a vertex with no supported association instead of
+     * inventing a bone, borrowing a neighbour, or dropping the vertex. tidy() then normalizes the retained weights. */
+    static final class ExtraBoneFallback {
+        int vertices,associations,min=Integer.MAX_VALUE,max=-1;float keptMin=Float.POSITIVE_INFINITY,keptMax;String first="";
+        void apply(float[] w,int[] ids,int count,String file,int vertex){
+            float total=0;for(float x:w){check(Float.isFinite(x)&&x>=0,"非法权重");total+=x;}check(Float.isFinite(total),"非法权重");if(total==0)return;
+            int bad=0;float kept=0;for(int k=0;k<4;k++)if(w[k]/total>WEIGHT_EPSILON){check(ids[k]>=0,"负骨骼索引："+ids[k]);if(ids[k]>=count)bad++;else kept+=w[k];}
+            if(bad==0)return;check(kept>0,"动画骨骼兼容失败："+file+" 顶点 "+vertex+" 的有效权重全部引用库外骨骼，不能确定如何绑定；未修改已有模型");
+            if(first.isEmpty())first=file+" vertex="+vertex+" rawWeights="+Arrays.toString(w)+" rawIndices="+Arrays.toString(ids);
+            vertices++;associations+=bad;keptMin=Math.min(keptMin,kept);keptMax=Math.max(keptMax,kept);
+            for(int k=0;k<4;k++)if(ids[k]>=count){if(w[k]/total>WEIGHT_EPSILON){min=Math.min(min,ids[k]);max=Math.max(max,ids[k]);}w[k]=0;ids[k]=0;}
+        }
+        String summary(){return vertices+" 个顶点，忽略 "+associations+" 条库外关联，编号 "+min+".."+max+"；保留权重原始总和 "+keptMin+".."+keptMax+"；"+first;}
+    }
     /** Relative to this vertex's total: a little above one float32 ULP at 1. Unused exporter slots can contain a tiny
      * positive residue and a sentinel bone index. Remove that residue before checking indices; real weights still fail. */
     static final float WEIGHT_EPSILON=2e-7f;
@@ -405,9 +474,11 @@ public final class ModelConverter {
         }
         return trimmed;
     }
-    private static Vertex vertex(Resource position,Resource blend,Resource tex,byte[] p,byte[] b,byte[] t,int i,int boneCount){
+    private static Vertex vertex(Resource position,Resource blend,Resource tex,byte[] p,byte[] b,byte[] t,int i,int boneCount,ExtraBoneFallback fallback){
         check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);v.uv=uv(t,to+4);for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(t,to+k));v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);}
-        v.trimmedWeights=cleanWeights(w,ids,boneCount);boolean weighted=false;for(float x:w)weighted|=x>0;if(weighted)tidy(w,ids,wo);else v.unweighted=true;for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
+        if(fallback!=null)fallback.apply(w,ids,boneCount,blend.file.getName(),i);
+        try{v.trimmedWeights=cleanWeights(w,ids,boneCount);}catch(IllegalArgumentException ex){float[] originalWeights=new float[4];int[] originalIndices=new int[4];for(int k=0;k<4;k++){originalWeights[k]=bi.getFloat(bo+4*k);originalIndices[k]=bi.getInt(bo+16+4*k);}throw new IllegalArgumentException(ex.getMessage()+" ["+blend.file.getName()+" vertex="+i+" rawWeights="+Arrays.toString(originalWeights)+" rawIndices="+Arrays.toString(originalIndices)+"]",ex);}
+        boolean weighted=false;for(float x:w)weighted|=x>0;if(weighted)tidy(w,ids,wo);else v.unweighted=true;for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
     }
     /** One vertex's four weights: the same bone listed twice added together, largest first, summing to 1; empty slots 0 on bone 0. */
     static void tidy(float[] w,int[] ids,ByteBuffer out){
@@ -482,7 +553,7 @@ public final class ModelConverter {
             int stride=lower(indices.format).contains("r16_uint")?2:lower(indices.format).contains("r32_uint")?4:indices.stride;check(stride==2||stride==4,"索引格式必须为 R16_UINT 或 R32_UINT");check(ix.length%stride==0,"索引流长度");int count=d.count==-1?ix.length/stride-d.start:d.count;check(count>0&&count%3==0&&(long)d.start+count<=ix.length/stride,"drawindexed 范围");
             // The same draw in several combinations shares one index range.
             String rangeKey=pos.file.getPath()+"|"+blend.file+"|"+tex.file+"|"+indices.file+"|"+stride+"|"+d.start+"|"+count;int[] range=g.ranges.get(rangeKey);
-            if(range==null){int start=g.indices.size();ByteBuffer ib=buf(ix);for(int j=0;j<count;j++){int old=stride==2?(ib.getShort((d.start+j)*2)&65535):ib.getInt((d.start+j)*4);String key=pos.file.getPath()+"|"+blend.file+"|"+tex.file+"|"+old;Integer compact=g.compact.get(key);if(compact==null){compact=g.vertices.size();check(compact<500000,"顶点数超限");g.compact.put(key,compact);g.vertices.add(vertex(pos,blend,tex,p,bl,t,old,target.count));}g.indices.add(compact);}range=new int[]{start,count};g.ranges.put(rangeKey,range);}
+            if(range==null){String streamId=identity(pos)+"|"+identity(blend)+"|"+identity(tex);int[] remap=g.compact.get(streamId);if(remap==null){remap=new int[Math.min(p.length/pos.stride,Math.min(bl.length/32,t.length/tex.stride))];g.compact.put(streamId,remap);}int start=g.indices.size();ByteBuffer ib=buf(ix);for(int j=0;j<count;j++){int old=stride==2?(ib.getShort((d.start+j)*2)&65535):ib.getInt((d.start+j)*4);check(old>=0&&old<p.length/pos.stride&&old<bl.length/32&&old<t.length/tex.stride,"顶点索引越界");int compact=remap[old]-1;if(compact<0){compact=g.vertices.size();check(compact<500000,"顶点数超限");remap[old]=compact+1;g.vertices.add(vertex(pos,blend,tex,p,bl,t,old,target.count,b.animationBoneFallback?g.extraBones:null));}g.indices.add(compact);}range=new int[]{start,count};g.ranges.put(rangeKey,range);}
             ComboRows rows=g.combos.computeIfAbsent(combo,k->new ComboRows());Resource[] tx=textures(d,rs);String materialKey=path(tx[0])+"|"+path(tx[1])+"|"+path(tx[2]);
             if("8b268d05".equals(d.hash)&&!"nnfix".equals(d.bindings.get("texture-role:layout"))&&tx[0]!=null&&tx[1]!=null&&tx[2]!=null)
                 ini.compatibility.add("已按纳西妲 IB 8b268d05 识别贴图：ps-t0 为法线，ps-t1 为颜色，ps-t2 为光照遮罩（优先于文件名）");
@@ -496,14 +567,14 @@ public final class ModelConverter {
      * same part, which is where it was meant to move with. A part with no weighted vertex at all is refused.
      */
     static int fixUnweighted(Group g){
-        List<Integer> bad=new ArrayList<>(),good=new ArrayList<>();for(int i=0;i<g.vertices.size();i++)(g.vertices.get(i).unweighted?bad:good).add(i);
-        if(bad.isEmpty())return 0;
-        check(!good.isEmpty(),g.bones.name+"：所有顶点的权重都是 0（MOD 没有绑定骨骼），无法转换");
+        IntList bad=new IntList(),good=new IntList();for(int i=0;i<g.vertices.size();i++)(g.vertices.unweighted(i)?bad:good).add(i);
+        if(bad.size()==0)return 0;
+        check(good.size()>0,g.bones.name+"：所有顶点的权重都是 0（MOD 没有绑定骨骼），无法转换");
         check(bad.size()<=20000,g.bones.name+"：有 "+bad.size()+" 个顶点没有权重（MOD 本身的问题），太多了，无法自动修补");
-        float[] gp=new float[good.size()*3];for(int j=0;j<good.size();j++){ByteBuffer q=buf(g.vertices.get(good.get(j)).pos);for(int k=0;k<3;k++)gp[j*3+k]=q.getFloat(4*k);}
-        for(int i:bad){Vertex v=g.vertices.get(i);ByteBuffer q=buf(v.pos);float x=q.getFloat(0),y=q.getFloat(4),z=q.getFloat(8);int best=0;double bd=Double.MAX_VALUE;
-            for(int j=0;j<good.size();j++){double dx=gp[j*3]-x,dy=gp[j*3+1]-y,dz=gp[j*3+2]-z,d=dx*dx+dy*dy+dz*dz;if(d<bd){bd=d;best=j;}}
-            v.weights=g.vertices.get(good.get(best)).weights.clone();v.unweighted=false;}
+        float[] gp=new float[good.size()*3];for(int j=0;j<good.size();j++)for(int k=0;k<3;k++)gp[j*3+k]=g.vertices.position(good.data[j],k);
+        for(int j=0;j<bad.size();j++){int i=bad.data[j];float x=g.vertices.position(i,0),y=g.vertices.position(i,1),z=g.vertices.position(i,2);int best=0;double bd=Double.MAX_VALUE;
+            for(int k=0;k<good.size();k++){double dx=gp[k*3]-x,dy=gp[k*3+1]-y,dz=gp[k*3+2]-z,d=dx*dx+dy*dy+dz*dz;if(d<bd){bd=d;best=k;}}
+            g.vertices.copyWeights(i,good.data[best]);}
         return bad.size();}
     /** model.bin: written front to back with its CRC-32; put() returns the [offset, length] view of what it wrote. */
     static final class BlobWriter implements Closeable {
@@ -514,37 +585,122 @@ public final class ModelConverter {
         List<Object> put(byte[] b)throws IOException{int pad=(int)((16-size%16)%16);if(pad>0)raw(new byte[pad]);long at=size;raw(b);return Arrays.<Object>asList(at,(long)b.length);}
         @Override public void close()throws IOException{out.close();}
     }
-    private interface Field {byte[] of(Vertex v);}
-    private static byte[] column(List<Vertex> vs,int stride,Field f){ByteBuffer b=buf(new byte[vs.size()*stride]);for(Vertex v:vs)b.put(f.of(v));return b.array();}
-    /** Parts and materials into model.bin; returns the manifest's parts, materials and blob entries. */
-    private static Map<String,Object> emit(File out,Build b,int combos,TextureDecoder decode)throws Exception {
-        List<Object> parts=new ArrayList<>(),materials=new ArrayList<>();Map<File,Map<String,Object>> textures=new HashMap<>();
-        try(BlobWriter blob=new BlobWriter(new File(out,"model.bin"))){
+    private static List<Object> emitParts(Build b,BlobWriter blob)throws Exception {
+        List<Object> parts=new ArrayList<>();
             for(Group g:b.groups.values()){
                 int n=g.vertices.size(),ni=g.indices.size();
                 check(n>0&&n<=500000&&ni>0&&ni<=15000000&&ni%3==0,"部件尺寸越界");for(ComboRows c:g.combos.values())check(c.subs.size()<=64,"子网格超过 64");
-                int bones=g.bones.count;if(g.bones.synthetic){bones=1;for(Vertex v:g.vertices){ByteBuffer w=buf(v.weights);for(int k=0;k<4;k++)if(w.getFloat(4*k)>0)bones=Math.max(bones,w.getInt(16+4*k)+1);}}
+                int bones=g.bones.synthetic?g.vertices.requiredBones:g.bones.count;
                 Map<String,Object> data=new LinkedHashMap<>();
-                data.put("positions",blob.put(column(g.vertices,12,v->v.pos)));data.put("normals",blob.put(column(g.vertices,12,v->v.norm)));data.put("uv",blob.put(column(g.vertices,8,v->v.uv)));
-                ByteBuffer ix=buf(new byte[4*ni]);for(int i:g.indices)ix.putInt(i);data.put("indices",blob.put(ix.array()));
-                data.put("weights",blob.put(column(g.vertices,32,v->v.weights)));
-                data.put("colors",blob.put(column(g.vertices,4,v->v.color)));data.put("tangents",blob.put(column(g.vertices,16,v->v.tangent)));
-                for(int e=0;e<3;e++){final int extra=e;boolean present=true;for(Vertex v:g.vertices)present&=v.extra.size()>extra;if(present)data.put("uv"+(e+2),blob.put(column(g.vertices,8,v->v.extra.get(extra))));}
+                data.put("positions",blob.put(g.vertices.column(12,0)));data.put("normals",blob.put(g.vertices.column(12,12)));data.put("uv",blob.put(g.vertices.column(8,24)));
+                ByteBuffer ix=buf(new byte[4*ni]);for(int i=0;i<ni;i++)ix.putInt(g.indices.data[i]);data.put("indices",blob.put(ix.array()));
+                data.put("weights",blob.put(g.vertices.column(32,32)));
+                data.put("colors",blob.put(g.vertices.column(4,64)));data.put("tangents",blob.put(g.vertices.column(16,68)));
+                for(int e=0;e<g.vertices.extras;e++)data.put("uv"+(e+2),blob.put(g.vertices.column(8,84+8*e)));
                 Map<String,Object> part=Json.of("name",g.name,"renderer",g.bones.name,"bones",bones,"vertices",n,"indices",ni,"data",data);
                 if(!g.bones.synthetic){Map<String,Object> sk=Json.of("bones",g.bones.names,"bindposes",blob.put(g.bones.binds));if(g.bones.parents!=null)sk.put("parents",new ArrayList<Object>(g.bones.parents));part.put("skeleton",sk);}
                 if(g.bones.target!=null)part.put("target",g.bones.target);
                 // A part not drawn at all with the initial values (only possible after falling back to them) shows nothing.
                 part.put("draws",g.draws!=null?g.draws:Collections.singletonList(Json.of("start",0,"count",0,"material",b.materials.values().iterator().next().name,"slot",0)));parts.add(part);
             }
+        return parts;
+    }
+    private static List<Object> emitMaterials(Build b,TextureDecoder decode,BlobWriter blob)throws Exception {
+        List<Object> materials=new ArrayList<>();Map<File,Map<String,Object>> textures=new HashMap<>();
             for(MaterialDef m:b.materials.values()){Map<String,Object> e=Json.of("name",m.name);
                 if(m.diffuse==null)e.put("original",true);
                 else{e.put("main",texture(m.diffuse.file,decode,blob,textures));if(m.light!=null)e.put("lightmap",texture(m.light.file,decode,blob,textures));if(m.normal!=null)e.put("normalmap",texture(m.normal.file,decode,blob,textures));}
                 materials.add(e);}
-            blob.out.flush();
+        return materials;
+    }
+    /** Parts and textures share one blob. Source buffers/remaps are not needed during texture decoding. */
+    private static Map<String,Object> emit(File out,Build b,int combos,TextureDecoder decode)throws Exception {
+        b.cache.clear();for(Group g:b.groups.values()){g.compact.clear();g.ranges.clear();}
+        try(BlobWriter blob=new BlobWriter(new File(out,"model.bin"))){
+            List<Object> parts=emitParts(b,blob);b.groups.clear();
+            List<Object> materials=emitMaterials(b,decode,blob);blob.out.flush();
             return Json.of("blob",Json.of("file","model.bin","size",blob.size,"crc32",blob.crc.getValue()),"parts",parts,"materials",materials);
         }
     }
+    /** A bounded frame loop, compiled from Present. Other dynamic programs fail explicitly. */
+    static final class Animation {
+        boolean stableWeights=true;String variable;int first,last,step,initial;double counter,period,counterStep;final List<Integer> values=new ArrayList<>();
+        static double number(Ini ini,String expression){String x=lower(expression.trim());Double n=x.startsWith("$")?ini.numbers.get(x):Double.valueOf(x);check(n!=null&&Double.isFinite(n),"动画常量无效："+expression);return n;}
+        static int integer(Ini ini,String x){double n=number(ini,x);check(n==Math.rint(n)&&Math.abs(n)<=1000000,"动画帧号必须是整数："+x);return (int)n;}
+        static Animation parse(Ini ini){
+            Section present=ini.sections.get("present");if(present==null)return null;List<String> model=conditionVars(ini);boolean dynamic=false;
+            Set<Section> ticks=new LinkedHashSet<>();conversionSections(ini,present,ticks);
+            for(Section section:ticks)for(String l:section.lines){String x=lower(l).replaceAll("\\s+","").replaceFirst("^post","");int eq=x.indexOf('=');
+                if(eq>0&&model.contains(x.substring(0,eq))&&x.substring(eq+1).contains("$"))dynamic=true;}
+            if(!dynamic)return null;
+            List<String> lines=new ArrayList<>();for(String l:present.lines)lines.add(lower(l).replaceAll("\\s+",""));
+            String why="暂不支持这个 Present 动画程序；当前支持按计数器取余、递增帧号并循环的模型动画，不能当作普通款式合并";
+            check(lines.size()==8,why);
+            Matcher timing=Pattern.compile("if(\\$[a-z_][a-z0-9_]*)%(.+)==0").matcher(lines.get(0));
+            Matcher bound=Pattern.compile("if(\\$[a-z_][a-z0-9_]*)<(.+)").matcher(lines.get(1));
+            check(timing.matches()&&bound.matches(),why);Animation a=new Animation();a.variable=bound.group(1);
+            check(model.contains(a.variable),why);for(String v:model)check(v.equals(a.variable),"动画同时带其他绘制款式变量，暂不支持："+v);
+            String increment=a.variable+"="+a.variable+"+",clock=timing.group(1);
+            check(lines.get(2).startsWith(increment)&&lines.get(3).equals("else")&&lines.get(4).startsWith(a.variable+"=")&&lines.get(5).equals("endif")&&lines.get(6).equals("endif")&&lines.get(7).startsWith("post"+clock+"="+clock+"+"),why);
+            a.first=integer(ini,lines.get(4).substring(a.variable.length()+1));a.last=integer(ini,bound.group(2));a.step=integer(ini,lines.get(2).substring(increment.length()));
+            a.initial=integer(ini,a.variable);a.counter=number(ini,clock);a.period=number(ini,timing.group(2));a.counterStep=number(ini,lines.get(7).substring(("post"+clock+"="+clock+"+").length()));
+            check(a.first<=a.last&&a.step>0&&a.period>0&&a.counterStep>0&&a.period<=1000000&&a.counterStep<=1000000,"动画循环边界或周期无效");
+            int frame=a.initial;do{check(!a.values.contains(frame)&&a.values.size()<64,"动画超过 64 帧或帧序列不闭合");a.values.add(frame);frame=frame<a.last?frame+a.step:a.first;}while(frame!=a.initial);
+            return a;
+        }
+        Map<String,Object> json(List<Object> frames){return Json.of("kind","present-loop","stableWeights",stableWeights,"variable",variable,"first",first,"last",last,"step",step,"initial",initial,"counter",counter,"period",period,"counterStep",counterStep,"frames",frames);}
+    }
+    private static void memoryBudget(Ini ini,File src,List<Bones> bones,Map<String,String> map,List<Map<String,Integer>> assignments,String fallback,StringBuilder log)throws Exception {
+        Map<String,Long> streams=new HashMap<>();Set<String> ranges=new HashSet<>();long indices=0,input=0;
+        for(Map<String,Integer> vars:assignments){Map<String,Resource> rs=resources(ini,src,vars);for(Draw d:resolve(ini,src,bones,map,vars,rs,null,fallback).keySet()){
+            Resource p=stream(rs,d.bindings,0),b=stream(rs,d.bindings,1),t=stream(rs,d.bindings,2),ix=resource(rs,d.bindings.get("ib"));check(ix!=null&&p.stride>=40&&b.stride==32&&t.stride>=12,"顶点流或索引流无效");
+            int stride=lower(ix.format).contains("r16_uint")?2:lower(ix.format).contains("r32_uint")?4:ix.stride;check(stride==2||stride==4,"索引格式必须为 R16_UINT 或 R32_UINT");
+            long count=d.count<0?ix.file.length()/stride-d.start:d.count;check(count>0&&count<=15000000,"drawindexed 范围");String id=identity(p)+"|"+identity(b)+"|"+identity(t);
+            long vertices=Math.min(p.file.length()/p.stride,Math.min(b.file.length()/32,t.file.length()/t.stride));streams.put(id,vertices);
+            if(ranges.add(id+"|"+identity(ix)+"|"+d.start+"|"+count))indices+=count;
+            input=Math.max(input,p.file.length()+b.file.length()+t.file.length()+ix.file.length());}}
+        long vertices=0;for(long n:streams.values())vertices+=n;
+        long estimate=vertices*128+indices*6+input+16L*1024*1024,budget=Math.min(160L*1024*1024,Runtime.getRuntime().maxMemory()/2);
+        log.append("转换内存预算：几何估算 ").append(estimate/1024/1024).append(" MiB，预算 ").append(budget/1024/1024).append(" MiB\n");
+        check(estimate<=budget,"模型几何预计超出转换内存预算（"+estimate/1024/1024+" / "+budget/1024/1024+" MiB）；请减少同时转换的款式或拆分动画资源");
+    }
+    private static File convertAnimation(Ini ini,File src,List<Bones> bones,Map<String,String> mapping,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log,Animation animation)throws Exception {
+        if(o.animationBoneFallback){for(Bones bone:bones)check(!bone.synthetic,"动画骨骼兼容需要完整骨骼库或本 MOD 已保存的完整骨骼记录，不能用未知的索引上限判断哪些关联可忽略");
+            for(Section section:ini.sections.values()){String n=lower(section.name);check(!n.startsWith("customshader")&&!n.startsWith("shaderoverride"),"动画骨骼兼容暂不支持自定义着色器；需要先实现其矩阵资源和蒙皮规则");
+                for(String line:section.lines){String[] a=kv(line);if(a!=null)check(!a[0].startsWith("vs-t")&&!a[0].startsWith("vs-cb")&&!a[0].startsWith("cs-t")&&!a[0].startsWith("cs-u"),"动画骨骼兼容暂不支持自定义矩阵资源绑定："+a[0]);}}}
+        dest=dest.getCanonicalFile();File parent=dest.getParentFile();check(parent.isDirectory()||parent.mkdirs(),"无法创建输出根目录");check(o.replace||!dest.exists(),"输出目录已存在："+dest);
+        File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
+        log.append("模型动画：").append(animation.values.size()).append(" 帧，按 Present 次数推进；计数周期 ").append(animation.period).append("，完整转换，不合并为款式网格\n");
+        log.append("动画骨骼兼容：").append(o.animationBoneFallback?"开启（实验）：忽略库外关联，保留每个顶点自身的有效权重并重新归一化；可能改变运动，不保证与 PC 等价":"关闭：越界的有效权重仍会拒绝转换").append('\n');
+        try{
+            Build registry=new Build();Map<String,WeightOrder> weights=new HashMap<>();List<Object> frames=new ArrayList<>(),firstParts=null;String layout=null;
+            try(BlobWriter blob=new BlobWriter(new File(tmp,"model.bin"))){
+                for(int frame:animation.values){Map<String,Integer> vars=new LinkedHashMap<>(ini.vars);vars.put(animation.variable,frame);memoryBudget(ini,src,bones,mapping,Collections.singletonList(vars),o.fallback,log);
+                    Build b=new Build();b.animationBoneFallback=o.animationBoneFallback;b.materials.putAll(registry.materials);collect(ini,src,bones,mapping,vars,0,b,log,o.fallback);check(!b.groups.isEmpty(),"动画帧没有有效模型绘制："+frame);
+                    for(Group g:b.groups.values())if(g.extraBones.vertices>0)log.append("animation-bone-fallback frame=").append(frame).append(' ').append(g.name).append(": ").append(g.extraBones.summary()).append('\n');
+                    Variation one=new Variation(ini,new ArrayList<>(),new ArrayList<>());for(Group g:b.groups.values()){fixUnweighted(g);WeightOrder order=weights.get(g.name);if(order==null)weights.put(g.name,new WeightOrder(g.vertices));else if(!order.align(g))animation.stableWeights=false;g.draws=drawTable(g,one,new int[]{0},1,new HashSet<>());g.compact.clear();g.ranges.clear();}b.cache.clear();
+                    List<Object> parts=emitParts(b,blob);StringBuilder key=new StringBuilder();for(Object raw:parts){Map<String,Object> p=Json.obj(raw,"part");key.append(p.get("name")).append('|').append(p.get("renderer")).append('|').append(p.get("vertices")).append('|').append(p.get("bones")).append(Json.obj(p.get("data"),"data").keySet());
+                        for(Object dr:Json.arr(p.get("draws"),"draws",1,64)){Map<String,Object> d=Json.obj(dr,"draw");key.append('|').append(d.get("material")).append('#').append(d.get("slot"));}}
+                    if(layout==null){layout=key.toString();firstParts=parts;for(Group g:b.groups.values())log.append("动画骨骼要求：").append(g.name).append(" / ").append(g.bones.name).append(g.bones.synthetic?"，无骨骼名映射，按索引绑定至少 ":"，骨骼库 ").append(g.bones.synthetic?g.vertices.requiredBones:g.bones.count).append(" 根；转换成功不代表已通过游戏骨骼匹配\n");}else check(layout.equals(key.toString()),"动画各帧的顶点数、骨骼或材质槽布局不同；两个播放实验暂不支持此布局：帧 "+frame);
+                    registry.materials.putAll(b.materials);b.groups.clear();frames.add(Json.of("value",frame,"parts",parts));
+                    check(blob.size<=256L*1024*1024,"动画几何数据超过 256 MiB 预算");log.append("动画帧 ").append(frame).append("：写出完成，累计几何 ").append(blob.size/1024/1024).append(" MiB\n");
+                }
+                log.append("动画权重固定排列：").append(animation.stableWeights?"所有帧一致；动态模式不改写权重":"存在实际权重变化；请使用缓存帧网格模式").append('\n');
+                weights.clear();List<Object> materials=emitMaterials(registry,decoder,blob);blob.out.flush();String generation;synchronized(ModelConverter.class){generation=System.currentTimeMillis()+"-"+(++generationCounter);}
+                Map<String,Object> animationInfo=animation.json(frames);animationInfo.put("bonePolicy",o.animationBoneFallback?"retain-valid-experimental":"strict");
+                Map<String,Object> manifest=Json.of("format","gibox-model","version",4,"name",dest.getName(),"generation",generation,"character",Json.of("id",id,"names",new ArrayList<Object>(o.names)),"flags",Json.of("originalMaterials",false,"diffuseOnly",false),"animation",animationInfo,"parts",firstParts,"materials",materials,"blob",Json.of("file","model.bin","size",blob.size,"crc32",blob.crc.getValue()));
+                if(o.sourcePath!=null)manifest.put("source",Json.of("path",o.sourcePath,"signature",o.sourceSignature==null?"":o.sourceSignature));
+                write(tmp,"conversion.log",text(log.toString()));write(tmp,"model.json",text(Json.write(manifest)));
+            }
+            commit(tmp,dest,o.replace);log.append("完成：").append(dest).append('\n');return dest;
+        }finally{if(tmp.exists())remove(tmp);}
+    }
     public static final class Options {
+        /** Set by convert when the same model's checked, embedded source skeleton was reused. */
+        public boolean reusedSkeleton=false;
+        /** Lossy, opt-in experiment, applied only to present-loop geometry animation with a known skeleton. */
+        public boolean animationBoneFallback=false;
+        public Options animationBoneFallback(boolean value){animationBoneFallback=value;return this;}
         public String mapping="",fallback=null,sourcePath=null,sourceSignature=null;public File ini=null;
         /** The INI scheme to convert when the mod folder holds several model INIs. */
         public Options ini(File f){ini=f;return this;}public boolean variants=false;public boolean replace=false;public List<String> names=new ArrayList<>();
@@ -566,9 +722,13 @@ public final class ModelConverter {
         if(o.variants)for(Map.Entry<String,TreeSet<Integer>> e:ini.excludedChoices.entrySet())
             log.append("款式 ").append(e.getKey()).append(" 按按键列出的值和初始值取 ").append(ini.choices.get(e.getKey())).append("；仅在条件中出现的值不作为可选款式：").append(e.getValue()).append('\n');
         check(o.names.size()<=16,"角色名过多");for(String n:o.names)check(n.matches("[a-z0-9]{3,40}"),"角色名格式："+n);
-        if(boneDir==null){check((id==0&&!o.names.isEmpty())||(id>=10000000&&id<=10001999),"没有骨骼目录时需要角色 ID 或角色名");bones=new ArrayList<>();for(String r:DEFAULT_RENDERERS)bones.add(new Bones(r));if(o.fallback==null)o.fallback="Body";}
+        o.reusedSkeleton=false;List<Bones> saved=null;if(boneDir==null&&o.replace)try{saved=previousBones(dest,id);}catch(Exception ex){log.append("未复用已有骨骼记录：").append(ex.getMessage()).append('\n');}
+        if(saved!=null){bones=saved;o.reusedSkeleton=true;log.append("骨骼复用：独立骨骼库不可用，保留本 MOD 已有转换中的完整骨骼和目标网格记录\n");}
+        else if(boneDir==null){check((id==0&&!o.names.isEmpty())||(id>=10000000&&id<=10001999),"没有骨骼目录时需要角色 ID 或角色名");bones=new ArrayList<>();for(String r:DEFAULT_RENDERERS)bones.add(new Bones(r));if(o.fallback==null)o.fallback="Body";}
         else{check(id>=10000000&&id<=10001999,"角色 ID 越界");bones=bones(boneDir,id);}Map<String,String> map=new LinkedHashMap<>();
         if(!o.mapping.trim().isEmpty())for(String row:o.mapping.split(";")){String[] a=row.trim().split("=",-1);check(a.length==2&&!a[0].trim().isEmpty()&&!a[1].trim().isEmpty(),"映射格式：部件=渲染器;部件=skip");check(map.put(lower(a[0].trim()),a[1].trim())==null,"重复映射");}
+        Animation animation=Animation.parse(ini);
+        if(animation!=null)return convertAnimation(ini,src,bones,map,dest,id,o,decoder,log,animation);
         // Variants: every assignment of the variables that an if of a drawing section reads (not the ones only key or
         // Present sections use), one signature each; the distinct signatures are built, and each draw keeps the values of
         // the variables it depends on.
@@ -601,7 +761,7 @@ public final class ModelConverter {
         check(!dest.getName().isEmpty()&&dest.getName().getBytes(StandardCharsets.UTF_8).length<=255,"模型名过长："+dest.getName());
         File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
         try{
-            Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
+            memoryBudget(ini,src,bones,map,kept,o.fallback,log);Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
             check(!b.groups.isEmpty(),"所选 INI "+ini.file.getName()+" 没有可转换的模型绘制："+(o.variants?"已开启款式枚举；请检查是否为纯贴图配置、部件全部跳过或依赖未支持的外部绘制命令":"当前只转换默认款式；可在手动转换中开启‘转换全部款式’，并检查部件映射及外部绘制命令"));
             Set<String> shown=new LinkedHashSet<>();
             Object replaceWhen=null;
@@ -613,7 +773,7 @@ public final class ModelConverter {
                 check(sig[0].startsWith("replace\n"),"初始款式关闭替换，且其关联款式无法分组；不能把关闭状态转换成空模型");
                 Variation none=new Variation(ini,new ArrayList<>(),new ArrayList<>());int[] only={0};for(Group g:b.groups.values()){Map<Integer,ComboRows> c=new HashMap<>();if(g.combos.containsKey(sigOf[0]))c.put(0,g.combos.get(sigOf[0]));g.combos.clear();g.combos.putAll(c);}
                 for(Group g:b.groups.values())g.draws=g.combos.isEmpty()?null:drawTable(g,none,only,1,shown);}
-            for(Group g:b.groups.values()){int trimmed=0;for(Vertex v:g.vertices)if(v.trimmedWeights>0)trimmed++;if(trimmed>0)log.append(g.bones.name).append("：已清理 ").append(trimmed).append(" 个顶点中占比不超过 ").append(WEIGHT_EPSILON).append(" 的微小权重，并重新归一化\n");int fixed=fixUnweighted(g);if(fixed>0)log.append(g.bones.name).append("：").append(fixed).append(" 个顶点没有权重（MOD 本身的问题，PC 上这些点会被拉到原点），已沿用最近顶点的权重\n");}
+            for(Group g:b.groups.values()){int trimmed=g.vertices.trimmed;if(trimmed>0)log.append(g.bones.name).append("：已清理 ").append(trimmed).append(" 个顶点中占比不超过 ").append(WEIGHT_EPSILON).append(" 的微小权重，并重新归一化\n");int fixed=fixUnweighted(g);if(fixed>0)log.append(g.bones.name).append("：").append(fixed).append(" 个顶点没有权重（MOD 本身的问题，PC 上这些点会被拉到原点），已沿用最近顶点的权重\n");}
             for(Group g:b.groups.values())log.append(g.bones.name).append(": ").append(g.vertices.size()).append(" 顶点，").append(g.indices.size()).append(" 索引").append(g.bones.synthetic?"（骨骼取自游戏内角色）":g.bones.target==null?"（骨骼库没有网格特征，首次在场景中出现时识别）":"").append('\n');
             for(String x:ini.external){if(nnFix(x))log.append("已按 NNFix 识别贴图：ps-t0 为颜色图，ps-t1 为材质遮罩，不使用法线图\n");else if(!texFxComponent(x))log.append("已忽略外部 CommandList：").append(x).append('\n');}ini.external.clear();
             for(String note:ini.compatibility)log.append(note).append('\n');
@@ -651,7 +811,7 @@ public final class ModelConverter {
     }
     /** Same character before and after a re-conversion: same ID and names in model.json. */
     static boolean sameCharacter(File before,File after){
-        try{ModelManifest a=ModelManifest.read(before),b=ModelManifest.read(after);return a.id==b.id&&a.names.equals(b.names);}catch(Exception e){return false;}
+        try{ModelManifest a=ModelManifest.read(before),b=ModelManifest.read(after);return a.id==b.id&&(a.id!=0||a.names.equals(b.names));}catch(Exception e){return false;}
     }
     static void remove(File f)throws IOException {if(f.isDirectory()){File[] a=f.listFiles();if(a!=null)for(File c:a)remove(c);}Files.deleteIfExists(f.toPath());}
 }
