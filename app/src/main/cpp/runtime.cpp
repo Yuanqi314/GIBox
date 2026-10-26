@@ -104,7 +104,7 @@ std::shared_ptr<ModelFile> loadModel(const ModelInfo& info,const std::map<std::s
  // The worker reads the old sidecar alongside the verified model. Hooks never open a bonemap file.
  if(!info.animated)for(size_t i=0;i<m->parts.size();i++){auto& part=m->parts[i];if(!info.parts[i].hasTarget||!part.sourceBones.empty())continue;
   try{part.legacyBoneNames=readLegacyBoneNames(info.path+"/bonemap-"+part.spec.name+".tsv",part.spec.bones);}catch(const std::exception& ex){part.legacyBoneError=ex.what();}}
- readTextures(info.path,m->generation,m->blobSize,m->materials,materialsDrawn(m->parts,pick(m->variants,chosen)));return m;
+ readTextures(info.path,m->generation,m->blobSize,m->materials,materialsNeeded(*m,pick(m->variants,chosen)));return m;
 }
 // Memory a loaded, not yet built model holds: geometry and the textures read for it.
 uint64_t loadedBytes(const ModelFile& m){uint64_t n=0;for(auto& p:m.parts){n+=p.geo.positions.size()+p.geo.normals.size()+p.geo.uvs.size()+p.geo.indices.size()+p.weights.size();for(auto& c:p.channels)n+=c.second.size();}
@@ -179,7 +179,7 @@ struct Runtime::Impl {
   std::vector<std::shared_ptr<ModelFile>> cpu;std::vector<std::vector<Ptr>> meshes;std::vector<std::vector<Ptr>> owned;std::vector<Ptr> back;
  };
  uint64_t animationToken=0;
- struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;AnimationRun animation;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false,mergeDraws=true;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
+ struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;AnimationRun animation;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false,mergeDraws=true;std::vector<TextureSwap> swaps;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
  // source: for a renderer the game created from one of ours (adopted), the renderer whose material clones it shows.
  struct Attachment:Owned {Ptr renderer=0,native=0,original=0,originalMaterials=0,source=0;Set* set=nullptr;RestoreBackup* backup=nullptr;size_t part=0;bool adopted=false;std::map<std::string,Ptr> clones;std::string restoreError;
    uint64_t refreshAt=0,materialTraceStart=0,materialTraceAt=0,materialCheckAt=0,materialCheckUntil=0;unsigned refreshes=0,materialTraceSamples=0,materialRepairs=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;  // clone -> canonical game material; retained across refreshes
@@ -581,6 +581,67 @@ struct Runtime::Impl {
     if(!from){continue;}
     auto d=o.direct.at(from);d.native=load<Ptr>(m+0x10);d.copy=true;directPin(o,m);for(auto& b:d.before)directPin(o,b.second);o.direct[m]=d;
     log("direct-textures",where+": the game's copy "+name(m)+" of "+name(from)+" carries our textures; it gets its own back with "+name(from));break;}}}
+
+ // ---------------------------------------------------------------- texture swaps (model.json "textures": a mod's face texture)
+ // On PC a texture-only override (FaceHeadDiffuse) gives the game's own face the mod's texture. Here: the renderer of
+ // that name under the same character root as an attached part of the set keeps its mesh, and every slot of it showing
+ // the game's face texture (the main texture its first textured slot had) shows ours. A material made at runtime and on
+ // no other renderer found gets the texture written in, its own kept; any other one is replaced by a copy holding ours.
+ // Each scan repeats this, so a fresh material the game puts on is done again, and a game copy of ours (it carries our
+ // texture) is tracked to get the original back. Everything goes back when the set's parts under that root are gone,
+ // the model is switched off or released, or the renderer dies.
+ struct Swap:Owned {Ptr renderer=0,native=0,root=0,original=0;Set* set=nullptr;size_t index=0;
+  std::map<Ptr,std::pair<Ptr,Ptr>> before;std::map<Ptr,Ptr> copyOf;std::set<Ptr> pinned;};   // material -> (native, texture); our copy -> its source
+ std::map<Ptr,std::unique_ptr<Swap>> swapped;
+ void swapPin(Swap& w,Ptr p){if(alive(p)&&w.pinned.insert(p).second)pin(w,p);}
+ std::string swapName(const Swap& w){return w.set->name+"/"+w.set->swaps[w.index].renderer;}
+ void swapApply(Swap& w,const std::vector<Ptr>& others){Ptr ours=w.set->textures.at(w.set->swaps[w.index].material).main;
+  Ptr mats=e.get(abi::getMaterials,w.renderer);if(!mats)return;auto current=pointers(mats,64);auto next=current;bool changed=false;std::string report;
+  for(size_t i=0;i<current.size();i++){Ptr m=current[i];if(!alive(m))continue;Ptr tex=textureOf(m,"_MainTex");
+   if(tex==ours){if(!w.before.count(m)&&!w.copyOf.count(m)){swapPin(w,m);w.before[m]={load<Ptr>(m+0x10),w.original};
+     log("texture-swap",swapName(w)+": the game's copy "+name(m)+" carries our texture; it gets the original back with the rest");}continue;}
+   if(!w.original){if(!alive(tex))continue;w.original=tex;swapPin(w,tex);}
+   if(tex!=w.original)continue;
+   std::string why;int32_t id=instanceId(m);if(id>=0)why="a loaded asset (instance id "+std::to_string(id)+")";
+   else for(Ptr r:others){if(!why.empty())break;if(r==w.renderer||!alive(r))continue;Ptr om=e.get(abi::getMaterials,r);if(!om)continue;for(Ptr x:pointers(om,64))if(x==m){why="also on "+rendererName(r);break;}}
+   if(why.empty()){swapPin(w,m);w.before[m]={load<Ptr>(m+0x10),tex};putTexture(m,"_MainTex",ours);report+=(report.empty()?"":"; ")+std::string("slot ")+std::to_string(i)+" "+name(m)+": written (instance id "+std::to_string(id)+")";}
+   else{Ptr c=clone(w,m);putTexture(c,"_MainTex",ours);w.copyOf[c]=m;swapPin(w,m);next[i]=c;changed=true;report+=(report.empty()?"":"; ")+std::string("slot ")+std::to_string(i)+" "+name(m)+": copied ("+why+")";}}
+  if(changed){Owned tmp;try{e.set(abi::setMaterials,w.renderer,array(tmp,mats,next.data(),next.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}
+  if(!report.empty())log("texture-swap",swapName(w)+" on "+rendererName(w.renderer)+": "+report);}
+ // The sources back in place of our copies (while the renderer lives), the original texture back in every game material.
+ void swapRestore(Swap& w,const char* why){unsigned n=0,c=0;
+  if(alive(w.renderer)&&load<Ptr>(w.renderer+0x10)==w.native){Ptr mats=e.get(abi::getMaterials,w.renderer);if(mats){auto list=pointers(mats,64);bool changed=false;
+    for(auto& m:list){auto it=w.copyOf.find(m);if(it!=w.copyOf.end()&&alive(it->second)){m=it->second;changed=true;c++;}}
+    if(changed){Owned tmp;try{e.set(abi::setMaterials,w.renderer,array(tmp,mats,list.data(),list.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}}}
+  for(auto& b:w.before)if(alive(b.first)&&load<Ptr>(b.first+0x10)==b.second.first){putTexture(b.first,"_MainTex",b.second.second);n++;}
+  w.before.clear();if(n||c)log("texture-swap",swapName(w)+" ("+why+"): original texture back in "+std::to_string(n)+" game materials, "+std::to_string(c)+" copies taken off");}
+ // false: a restore failed; that swap stays (and keeps its set) for the next try.
+ template<class F>bool swapsEnd(F pick,const char* why){bool done=true;
+  for(auto it=swapped.begin();it!=swapped.end();){if(!pick(*it->second)){++it;continue;}
+   try{swapRestore(*it->second,why);freeOwned(*it->second);it=swapped.erase(it);}catch(const std::exception& ex){log("texture-swap-error",swapName(*it->second)+": "+ex.what());done=false;++it;}}
+  return done;}
+ // Each scan: the swaps made are kept up (or end), then the renderers of a swapped name under a root holding a part of
+ // a set that swaps textures are taken.
+ void swapTick(const std::vector<Ptr>& list){
+  std::map<Ptr,Set*> roots;for(auto& kv:attachments){auto& a=*kv.second;if(a.set->swaps.empty()||!alive(kv.first)||load<Ptr>(kv.first+0x10)!=a.native)continue;Ptr root=avatarRoot(kv.first);if(root)roots[root]=a.set;}
+  swapsEnd([&](Swap& w){bool lives=alive(w.renderer)&&load<Ptr>(w.renderer+0x10)==w.native;auto r=roots.find(w.root);
+   bool keep=lives&&!attachments.count(w.renderer)&&r!=roots.end()&&r->second==w.set;
+   if(keep){try{swapApply(w,list);}catch(const std::exception& ex){log("texture-swap-error",swapName(w)+": "+ex.what());}}
+   return !keep;},"its parts are gone");
+  if(roots.empty())return;
+  std::set<std::string> names;for(auto& kv:roots)for(auto& x:kv.second->swaps)names.insert(normalize(x.renderer));
+  for(Ptr r:list){if(!alive(r)||swapped.count(r)||attachments.count(r))continue;auto rn=normalize(rendererName(r));if(!names.count(rn))continue;
+   Ptr root=avatarRoot(r);auto hit=roots.find(root);if(!root||hit==roots.end())continue;Set& s=*hit->second;size_t k=s.swaps.size();
+   for(size_t i=0;i<s.swaps.size();i++)if(normalize(s.swaps[i].renderer)==rn){k=i;break;}
+   if(k==s.swaps.size())continue;
+   auto w=std::make_unique<Swap>();w->renderer=r;w->native=load<Ptr>(r+0x10);w->root=root;w->set=&s;w->index=k;
+   try{pin(*w,r);ensureTextures(s,{s.swaps[k].material},true);swapApply(*w,list);
+    if(!w->original)log("texture-swap",swapName(*w)+" on "+rendererName(r)+": no main texture on its materials; left alone");
+    else{std::string also;for(Ptr o:list){if(o==r||!alive(o))continue;Ptr om=e.get(abi::getMaterials,o);if(!om)continue;bool uses=false;for(Ptr x:pointers(om,64))uses=uses||(alive(x)&&textureOf(x,"_MainTex")==w->original);
+      if(uses&&avatarRoot(o)==root)also+=(also.empty()?"":", ")+rendererName(o);}
+     if(!also.empty())log("texture-swap",swapName(*w)+": the game's face texture is also the main texture on "+also+" (not swapped)");}}
+   catch(const std::exception& ex){log("texture-swap-error",s.name+": "+ex.what());try{swapRestore(*w,"failed");}catch(const std::exception&){}freeOwned(*w);continue;}
+   swapped[r]=std::move(w);}}
 
  // ---------------------------------------------------------------- engine helpers (game thread)
  std::string name(Ptr p){require(alive(p),"Destroyed Unity object");Ptr s=e.get(abi::getName,p);if(!s)return {};auto n=load<uint32_t>(s+0x10);require(n<=1024,"Unity name bound");std::string out;for(unsigned i=0;i<n;i++){unsigned a=load<uint16_t>(s+0x14+i*2);if(a>=0xd800&&a<=0xdbff){require(i+1<n,"UTF16 name");unsigned b=load<uint16_t>(s+0x14+(++i)*2);require(b>=0xdc00&&b<=0xdfff,"UTF16 name");a=0x10000+((a-0xd800)<<10)+(b-0xdc00);}utf8(out,a);}return out;}
@@ -1017,7 +1078,7 @@ struct Runtime::Impl {
   // Estimated memory once built: vertex arrays and the clone's skin, indices (ours and the engine's), RGBA textures.
   for(auto& p:res.data->parts){s->bytes+=uint64_t(p.geo.n)*(12+12+8+32+32);for(auto& c:p.channels)s->bytes+=c.second.size();s->bytes+=uint64_t(p.geo.ni)*8;}
   if(res.data->animation.present()){auto& a=s->animation;a.loop=FrameLoop(res.data->animation);a.mode=ctl.exp.animationMode;a.token=++animationToken;a.started=now;a.cpu.resize(a.loop.spec.frames.size());a.meshes.resize(a.cpu.size());a.owned.resize(res.data->parts.size());a.back.resize(res.data->parts.size());a.cpu[0]=res.data;}
-  s->meshKey=ctl.exp.meshKey(res.data->animation.present());s->mergeDraws=!ctl.exp.separateDraws&&!s->originalMaterials;s->mats=std::move(res.data->materials);res.data->materials.clear();s->blobSize=res.data->blobSize;s->fileGeneration=res.data->generation;
+  s->meshKey=ctl.exp.meshKey(res.data->animation.present());s->mergeDraws=!ctl.exp.separateDraws&&!s->originalMaterials;s->swaps=res.data->swaps;s->mats=std::move(res.data->materials);res.data->materials.clear();s->blobSize=res.data->blobSize;s->fileGeneration=res.data->generation;
   auto v=ctl.variables.find(s->name);s->assignment=pick(s->variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second);s->used=now;Set* cur=s.get();sets.push_back(std::move(s));log("loading",m.name+" "+m.generation);return cur;}
 
  // ---------------------------------------------------------------- attachments
@@ -1292,9 +1353,9 @@ struct Runtime::Impl {
   // A failed follower may still display its successful source's clones. Transfer ownership through detach(),
   // rather than destroying a source's materials while that follower is waiting to restore.
   for(Ptr k:done){detach(*attachments.at(k),false);attachments.erase(k);}return done.size()==keys.size();}
- bool detachSet(Set& s){return detachWhere([&](Attachment& a){return a.set==&s;});}
+ bool detachSet(Set& s){bool faces=swapsEnd([&](Swap& w){return w.set==&s;},"model off");return detachWhere([&](Attachment& a){return a.set==&s;})&&faces;}
  void releaseSet(Set* s){if(!detachSet(*s))return;freeAnimation(*s);freeOwned(*s);log("model-released",s->name+" "+s->generation);sets.erase(std::remove_if(sets.begin(),sets.end(),[&](auto& x){return x.get()==s;}),sets.end());pruneRestoreBackups();}
- bool releaseAll(){bool done=detachWhere([](Attachment&){return true;});for(auto it=sets.begin();it!=sets.end();){bool used=false;for(auto& a:attachments)used=used||a.second->set==it->get();
+ bool releaseAll(){bool done=swapsEnd([](Swap&){return true;},"released");done=detachWhere([](Attachment&){return true;})&&done;for(auto it=sets.begin();it!=sets.end();){bool used=false;for(auto& a:attachments)used=used||a.second->set==it->get();
     if(used){++it;}else{freeAnimation(**it);freeOwned(**it);it=sets.erase(it);}}
   seen.clear();skipped.clear();pruneRestoreBackups();std::lock_guard<std::mutex> l(sm);loaded.clear();return done;}
  // The bone names of a renderer, in order, equal to a list.
@@ -1344,7 +1405,7 @@ struct Runtime::Impl {
   for(Ptr r:list){try{if(!alive(r)||attachments.count(r))continue;Ptr native=load<Ptr>(r+0x10);if(skipped.count({r,native})){scanSkipped++;continue;}Ptr m=e.get(abi::getMesh,r);if(!alive(m))continue;
     auto o=ours.find(m);if(o!=ours.end()){adopt(r,*o->second.first,o->second.second,now);continue;}seen.push_back({r,m,fingerprint(m)});}
    catch(const std::exception& ex){log("discover-skip",ex.what());}}
-  attachSeen(live,now);}
+  attachSeen(live,now);swapTick(list);}
  // A finished build takes over in the same tick: its predecessor's renderers, and those of models switched on after it
  // that replace the same meshes.
  void promote(Set& s,uint64_t now){std::vector<std::pair<Ptr,Ptr>> moved;std::set<Ptr> taken;size_t mine=rank(s.path);

@@ -153,7 +153,10 @@ struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;st
 struct TexRef {unsigned w=0,h=0;uint64_t off=0,len=0;bool present()const{return len>0;}};
 struct MaterialFile {bool original=true;std::shared_ptr<Texture> main,light,normal;TexRef mainRef,lightRef,normalRef;
  bool loaded()const{return original||main!=nullptr;}};
-struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;uint64_t blobSize=0;uint32_t blobCrc=0;AnimationSpec animation;};
+// A texture swap (model.json "textures", optional): the main texture of the character's renderer of that name becomes the
+// material's, its mesh stays the game's (a mod's face texture, which on PC replaces the game's texture wherever it is drawn).
+struct TextureSwap {std::string renderer,material;};
+struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;uint64_t blobSize=0;uint32_t blobCrc=0;AnimationSpec animation;std::vector<TextureSwap> swaps;};
 
 namespace detail {
 // model.bin, checked whole (size, CRC-32 streamed in 1 MiB steps) before any view is read from it; views are then read
@@ -205,6 +208,10 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allT
     if(f.lightRef.present())f.light=std::make_shared<Texture>(Texture{f.lightRef.w,f.lightRef.h,blob.read(f.lightRef.off,f.lightRef.len)});
     if(f.normalRef.present())f.normal=std::make_shared<Texture>(Texture{f.normalRef.w,f.normalRef.h,blob.read(f.normalRef.off,f.normalRef.len)});}}
   out->materials[name]=f;}
+ if(m.at("textures").type!=Json::Null)for(auto& t:jarr(m,"textures",1,8)){TextureSwap x{jstr(t,"renderer",64),jstr(t,"material",64)};auto it=out->materials.find(x.material);
+  require(safeName(x.renderer),"Texture swap renderer: "+x.renderer);require(it!=out->materials.end()&&!it->second.original,"Texture swap material: "+x.material);
+  for(auto& y:out->swaps){require(y.renderer!=x.renderer,"Texture swap renderer listed twice: "+x.renderer);}
+  out->swaps.push_back(x);}
  out->blobSize=size;out->blobCrc=crc;if(animationFrame<0)out->animation=std::move(animation);
  const auto& parts=jarr(m,"parts",1,model::maxParts);
  for(size_t pi=0;pi<parts.size();pi++){const auto& p=parts[pi];const auto& ps=summary.parts[pi];PartFile f;
@@ -252,6 +259,8 @@ inline void readTextures(const std::string& dir,const std::string& generation,ui
 // The materials an assignment draws, over all parts.
 inline std::set<std::string> materialsDrawn(const std::vector<PartFile>& parts,const Assignment& a){std::set<std::string> out;std::vector<Submesh> subs;std::vector<Material> rows;
  for(auto& p:parts){activeDraws(p.draws,a,subs,rows);for(auto& r:rows)out.insert(r.name);}return out;}
+// ...and the textures swapped onto the game's renderers, which every assignment uses.
+inline std::set<std::string> materialsNeeded(const ModelFile& m,const Assignment& a){auto out=materialsDrawn(m.parts,a);for(auto& x:m.swaps)out.insert(x.material);return out;}
 
 // ---------------------------------------------------------------- learned.json (runtime-written)
 struct Learned {unsigned id=0;std::map<std::string,Fingerprint> targets;};

@@ -161,6 +161,14 @@ int main(int argc,char**argv){
   m=mergeDraws({{0,0},{3,3}},{a,a},true);assert(m.size()==1&&m[0].ranges.size()==1&&m[0].ranges[0].start==3&&m[0].count==3);
   activeDraws({{{0,3},a,mid}},Assignment{{"$mid",0}},subs,rows);m=mergeDraws(subs,rows,true);assert(m.size()==1&&m[0].count==0&&joinedIndices(idx,m[0]).empty());   // nothing drawn
   rejects([&]{joinedIndices(idx,MergedDraw{a,{{9,6}},6});});rejects([&]{mergeDraws({{0,3}},{},true);});}
+ // Texture swaps ("textures"): a material of its own onto a game renderer; always among the materials an assignment needs.
+ {auto swaps=[](const std::string& list){return [list](Spec& x){x.textures=true;x.extraMaterials=1;x.edit=[list](std::string& j){replaceIn(j,",\"parts\":[",",\"textures\":"+list+",\"parts\":[");};};};
+  Spec ok;swaps("[{\"renderer\":\"Face\",\"material\":\"Material1\"}]")(ok);fixture::writeModel(root+"/swap",ok);auto m=loadModelFile(root+"/swap",false);Assignment a;
+  assert(m->swaps.size()==1&&m->swaps[0].renderer=="Face"&&m->swaps[0].material=="Material1"&&!materialsDrawn(m->parts,a).count("Material1")&&materialsNeeded(*m,a).count("Material1")&&materialsNeeded(*m,a).count("Material0"));
+  refused(root+"/swap-unknown",swaps("[{\"renderer\":\"Face\",\"material\":\"Material9\"}]"),"Texture swap material");
+  refused(root+"/swap-twice",swaps("[{\"renderer\":\"Face\",\"material\":\"Material1\"},{\"renderer\":\"Face\",\"material\":\"Material0\"}]"),"listed twice");
+  refused(root+"/swap-name",swaps("[{\"renderer\":\"Face/..\",\"material\":\"Material1\"}]"),"Texture swap renderer");
+  refused(root+"/swap-original",[](Spec& x){x.edit=[](std::string& j){replaceIn(j,",\"parts\":[",",\"textures\":[{\"renderer\":\"Face\",\"material\":\"Material0\"}],\"parts\":[");};},"Texture swap material");}
  std::filesystem::remove_all(root);
  std::cout<<"Native core: PASS (GIBox model format: manifest, model.bin views, CRC-32, value/range/reference checks, variants, on-demand textures, learned.json, skeleton.json; bones, JSON, ELF notes, DDS, targets)\n";
 }

@@ -144,9 +144,35 @@ public final class CompatibilityTest {
         result=Importer.convert(src,10000107,models,libraryRoot,DECODE,new StringBuilder());ok(result.summary.contains("动画骨骼兼容：开启（实验）"),"import summary must disclose the experiment");
         Importer.setAnimationBoneFallback(src,false);rejected=false;try{Importer.convert(src,10000107,models,libraryRoot,DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("骨骼索引越界");}ok(rejected&&!Importer.animationBoneFallback(src),"disabling restores strict conversion");
     }
+    // A texture-only face override (GIMI FaceHeadDiffuse) becomes a material and a texture swap onto the game's Face renderer.
+    // One that changes with a value only the face section reads is left out and said so; two face files at once are refused.
+    private static void face(File base)throws Exception{
+        String face="[TextureOverrideCitlaliFaceHeadDiffuse]\nhash = 55555555\nps-t0 = ResourceCitlaliFaceHeadDiffuse\n[ResourceCitlaliFaceHeadDiffuse]\nfilename = CitlaliFaceHeadDiffuse.dds\n";
+        String text=GimiPatternsTest.ini("global $look = 0\n","","","")+face;File src=GimiPatternsTest.mod(base,"face",text);GimiPatternsTest.put(src,"CitlaliFaceHeadDiffuse.dds",new byte[128]);
+        File out=new File(base,"face-out");StringBuilder log=new StringBuilder();ModelConverter.convert(src,null,out,10000107,new ModelConverter.Options().variants(true),DECODE,log);
+        Map<String,Object> manifest=Json.obj(Json.read(new File(out,"model.json"),4L<<20),"model");Map<String,Object> swap=Json.obj(Json.arr(manifest.get("textures"),"textures",1,1).get(0),"texture");
+        ok("Face".equals(swap.get("renderer"))&&"FaceTexture".equals(swap.get("material"))&&log.toString().contains("脸部贴图：CitlaliFaceHeadDiffuse.dds -> 游戏的 Face 渲染器"),"the face texture becomes a texture swap: "+log);
+        boolean material=false;for(Object raw:Json.arr(manifest.get("materials"),"materials",1,64)){Map<String,Object> m=Json.obj(raw,"material");material|="FaceTexture".equals(m.get("name"))&&m.get("main")!=null;}
+        ok(material,"the swap's material carries the face texture");
+        String varying=GimiPatternsTest.ini("global $look = 0\n","","","")+"[TextureOverrideCitlaliFaceHeadDiffuse]\nhash = 55555555\nif $look == 0\nps-t0 = ResourceCitlaliFaceHeadDiffuse\nelse\nps-t0 = ResourceCitlaliFaceAlt\nendif\n"
+            +"[ResourceCitlaliFaceHeadDiffuse]\nfilename = CitlaliFaceHeadDiffuse.dds\n[ResourceCitlaliFaceAlt]\nfilename = CitlaliFaceAlt.dds\n[KeyLook]\nkey = l\ntype = cycle\n$look = 0,1\n";
+        GimiPatternsTest.put(src,"CitlaliFaceAlt.dds",new byte[128]);GimiPatternsTest.put(src,"Citlali.ini",varying);log=new StringBuilder();
+        ModelConverter.convert(src,null,out,10000107,new ModelConverter.Options().variants(true).replace(true),DECODE,log);manifest=Json.obj(Json.read(new File(out,"model.json"),4L<<20),"model");
+        ok(manifest.get("textures")==null&&log.toString().contains("脸部贴图随款式或动画帧变化，暂不导入"),"a face that changes with a value only it reads is left out: "+log);
+        GimiPatternsTest.put(src,"Citlali.ini",text+"[TextureOverrideCitlaliFaceDiffuseTwo]\nhash = 66666666\nps-t0 = ResourceCitlaliFaceAlt\n[ResourceCitlaliFaceAlt]\nfilename = CitlaliFaceAlt.dds\n");boolean rejected=false;
+        try{ModelConverter.convert(src,null,new File(base,"face-two"),10000107,new ModelConverter.Options().variants(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("脸部贴图有多个来源");}
+        ok(rejected,"two face files in one assignment are refused");
+        // A frame animation whose every frame binds the same face texture swaps it too (the Traveler mod's layout).
+        String program="[Present]\nif $counter % $speed == 0\nif $frame < $last\n$frame = $frame + 1\nelse\n$frame = $first\nendif\nendif\npost $counter = $counter + 1\n";
+        String animated=GimiPatternsTest.ini("global $speed = 0.5\nglobal $counter = 0\nglobal $frame = 0\nglobal $first = 0\nglobal $last = 2\n","if $frame == 1\nvb0 = ResourceNextPosition\nendif\n","","")
+            +"[ResourceNextPosition]\nstride = 40\nfilename = Next.buf\n"+program+face;
+        GimiPatternsTest.put(src,"Next.buf",Files.readAllBytes(new File(src,"CitlaliPosition.buf").toPath()));GimiPatternsTest.put(src,"Citlali.ini",animated);log=new StringBuilder();
+        File frames=new File(base,"face-frames");ModelConverter.convert(src,null,frames,10000107,new ModelConverter.Options().variants(true),DECODE,log);manifest=Json.obj(Json.read(new File(frames,"model.json"),4L<<20),"model");
+        ok(ModelManifest.read(frames).version==4&&Json.arr(manifest.get("textures"),"textures",1,1).size()==1&&log.toString().contains("脸部贴图：CitlaliFaceHeadDiffuse.dds"),"an animation keeps its face texture: "+log);
+    }
     public static void main(String[] args)throws Exception{
         File base=Files.createTempDirectory("gibox-compatibility-").toFile();
-        try{legacy(base);hohe(base);animation(base);System.out.println("Compatibility: PASS (layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
+        try{legacy(base);hohe(base);animation(base);face(base);System.out.println("Compatibility: PASS (face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
         finally{ModelConverter.remove(base);}
     }
 }

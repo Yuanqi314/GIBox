@@ -255,6 +255,38 @@ public final class ModelConverter {
         }
         return false;
     }
+    /** The face diffuse a texture-only override puts on (GIMI's FaceHeadDiffuse: hash = the game's face texture, ps-t0 =
+     *  the mod's, no draw and no buffers): on PC the game's own face mesh draws with it. The section or its resource must
+     *  be named as a face diffuse; null when there is none. Two different files in one assignment are refused. */
+    private static Resource faceTexture(Ini ini,Map<String,Integer> vars,Map<String,Resource> rs){Resource found=null;
+        for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")){Evaluated e=new Evaluated(ini,s,vars,rs);String t=e.bindings.get("ps-t0");
+            if(e.declaresDraw||!e.draws.isEmpty()||unbound(t))continue;boolean buffers=false;for(String k:e.bindings.keySet())buffers|=k.equals("ib")||k.matches("vb[0-9]+")||k.startsWith("vertex-stream:");
+            if(buffers||!faceDiffuse(e.name)&&!faceDiffuse(t))continue;Resource r=resource(rs,t);
+            if(found!=null&&!found.file.equals(r.file))check(false,"脸部贴图有多个来源："+found.file.getName()+"、"+r.file.getName());found=r;}
+        return found;}
+    /** Named as a face diffuse, or binding one to ps-t0 itself or in a CommandList it runs. */
+    private static boolean faceSection(Ini ini,Section s,Set<String> visited){if(faceDiffuse(s.name))return true;if(!visited.add(lower(s.name)))return false;
+        for(String l:s.lines){String[] a=kv(l);if(a==null)continue;if(a[0].equals("ps-t0")&&faceDiffuse(a[1]))return true;if(a[0].equals("run")){Section t=ini.sections.get(lower(a[1].trim()));if(t!=null&&faceSection(ini,t,visited))return true;}}
+        return false;}
+    private static boolean faceDiffuse(String name){String n=lower(name).replaceAll("[^a-z]","");return n.contains("face")&&n.contains("diffuse");}
+    /** The face texture of every assignment converted (variants or frames), each also with every listed value of the
+     *  variables the texture-only sections read themselves (they need not be variants of the geometry): kept only when it
+     *  is one file in all of them. */
+    private static Resource faceTexture(Ini ini,File src,List<Map<String,Integer>> converted,StringBuilder log)throws Exception{Resource face=null;boolean varies=false;
+        Set<String> own=new TreeSet<>();for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")&&faceSection(ini,s,new HashSet<>()))own.addAll(sectionVars(ini,s,new HashSet<>()));
+        List<Map<String,Integer>> assignments=new ArrayList<>(converted);
+        for(String k:own){TreeSet<Integer> values=ini.choices.get(k);if(values==null)continue;List<Map<String,Integer>> more=new ArrayList<>();
+            for(Map<String,Integer> a:assignments)for(int v:values){Map<String,Integer> b=new LinkedHashMap<>(a);b.put(k,v);more.add(b);}
+            check(more.size()<=MAX_ASSIGNMENTS,"脸部贴图条件的取值组合过多");assignments=more;}
+        for(int i=0;i<assignments.size();i++){Map<String,Integer> a=assignments.get(i);Resource f=faceTexture(ini,a,resources(ini,src,a));
+            if(i==0)face=f;else varies|=(face==null)!=(f==null)||face!=null&&!face.file.equals(f.file);}
+        if(varies){log.append("脸部贴图随款式或动画帧变化，暂不导入；脸保持游戏原版\n");return null;}
+        if(face!=null)log.append("脸部贴图：").append(face.file.getName()).append(" -> 游戏的 ").append(FACE_RENDERER).append(" 渲染器（只换贴图，不换脸部网格）\n");
+        return face;}
+    /** The texture swap entry of model.json, its material added to the build. */
+    private static List<Object> faceSwap(Resource face,Build b){MaterialDef m=new MaterialDef();m.name="FaceTexture";m.diffuse=face;b.materials.put("face|"+path(face),m);
+        return Collections.singletonList(Json.of("renderer",FACE_RENDERER,"material",m.name));}
+    static final String FACE_RENDERER="Face";
     static final int MAX_ASSIGNMENTS=4096;
     private static final Pattern CONDITION_VAR=Pattern.compile("\\$[a-z_][a-z0-9_]*");
     private static boolean controlSection(String name){String n=lower(name);return n.startsWith("key")||n.equals("present")||n.equals("constants");}
@@ -686,9 +718,12 @@ public final class ModelConverter {
                     check(blob.size<=256L*1024*1024,"动画几何数据超过 256 MiB 预算");log.append("动画帧 ").append(frame).append("：写出完成，累计几何 ").append(blob.size/1024/1024).append(" MiB\n");
                 }
                 log.append("动画权重固定排列：").append(animation.stableWeights?"所有帧一致；动态模式不改写权重":"存在实际权重变化；请使用缓存帧网格模式").append('\n');
+                List<Map<String,Integer>> frameVars=new ArrayList<>();for(int frame:animation.values){Map<String,Integer> v=new LinkedHashMap<>(ini.vars);v.put(animation.variable,frame);frameVars.add(v);}
+                Resource face=faceTexture(ini,src,frameVars,log);List<Object> swaps=face==null?null:faceSwap(face,registry);
                 weights.clear();List<Object> materials=emitMaterials(registry,decoder,blob);blob.out.flush();String generation;synchronized(ModelConverter.class){generation=System.currentTimeMillis()+"-"+(++generationCounter);}
                 Map<String,Object> animationInfo=animation.json(frames);animationInfo.put("bonePolicy",o.animationBoneFallback?"retain-valid-experimental":"strict");
                 Map<String,Object> manifest=Json.of("format","gibox-model","version",4,"name",dest.getName(),"generation",generation,"character",Json.of("id",id,"names",new ArrayList<Object>(o.names)),"flags",Json.of("originalMaterials",false,"diffuseOnly",false),"animation",animationInfo,"parts",firstParts,"materials",materials,"blob",Json.of("file","model.bin","size",blob.size,"crc32",blob.crc.getValue()));
+                if(swaps!=null)manifest.put("textures",swaps);
                 if(o.sourcePath!=null)manifest.put("source",Json.of("path",o.sourcePath,"signature",o.sourceSignature==null?"":o.sourceSignature));
                 write(tmp,"conversion.log",text(log.toString()));write(tmp,"model.json",text(Json.write(manifest)));
             }
@@ -777,7 +812,9 @@ public final class ModelConverter {
             for(Group g:b.groups.values())log.append(g.bones.name).append(": ").append(g.vertices.size()).append(" 顶点，").append(g.indices.size()).append(" 索引").append(g.bones.synthetic?"（骨骼取自游戏内角色）":g.bones.target==null?"（骨骼库没有网格特征，首次在场景中出现时识别）":"").append('\n');
             for(String x:ini.external){if(nnFix(x))log.append("已按 NNFix 识别贴图：ps-t0 为颜色图，ps-t1 为材质遮罩，不使用法线图\n");else if(!texFxComponent(x))log.append("已忽略外部 CommandList：").append(x).append('\n');}ini.external.clear();
             for(String note:ini.compatibility)log.append(note).append('\n');
-            Map<String,Object> data=emit(tmp,b,kept.size(),decoder);
+            // Every assignment, not only the kept ones: a value that only changes the face draws the same geometry.
+            Resource face=faceTexture(ini,src,var.runs,log);List<Object> swaps=face==null?null:faceSwap(face,b);
+            Map<String,Object> data=emit(tmp,b,kept.size(),decoder);if(swaps!=null)data.put("textures",swaps);
             String generation;synchronized(ModelConverter.class){generation=System.currentTimeMillis()+"-"+(++generationCounter);}
             Map<String,Object> manifest=Json.of("format","gibox-model","version",2,"name",dest.getName(),"generation",generation,
                 "character",Json.of("id",id,"names",new ArrayList<Object>(o.names)),"flags",Json.of("originalMaterials",false,"diffuseOnly",false));
