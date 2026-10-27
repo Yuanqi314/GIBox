@@ -158,8 +158,9 @@ fun SettingsScreen(state: AppState) {
             if (state.logLevel == "debug") item {
                 val rev = state.revision
                 val animation = remember(rev) { state.experimentInt("animationMode") }
+                val logic = remember(rev) { state.experiment("logicCore") }
                 SettingsGroup(title = { SectionTitle("模型动画实验（调试）") }, verticalArrangement = gap) {
-                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(0, 1)) {
+                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(0, 2)) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("动画播放方式", style = MaterialTheme.typography.titleSmall)
                             Text("切换后自动重建动画模型。预热完成后开始播放；只影响带动画的 MOD。调试日志记录帧号、耗时和内存估算。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -170,6 +171,13 @@ fun SettingsScreen(state: AppState) {
                             }
                         }
                     }
+                    SettingsSwitch(
+                        state = logic,
+                        title = { Text("由 MOD 自己的 INI 逻辑决定显示哪一帧") },
+                        subtitle = { Text("3DMigoto 逻辑核心在游戏里执行 [Constants]、[Present]、TextureOverride，按选中的资源找已转换的帧；需要重新转换过的 MOD，否则或出错时仍按原帧循环。日志看 logic-") },
+                        shapes = ListItemDefaults.segmentedShapes(1, 2),
+                        onCheckedChange = { state.setExperiment("logicCore", it) },
+                    )
                 }
             }
             item {

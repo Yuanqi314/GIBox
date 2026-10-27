@@ -3,12 +3,14 @@ package com.gibox.tool;
 import java.io.File;
 import java.io.PrintStream;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
 import java.util.*;
 
 /** Host-only: what the old converter makes of a Present frame-loop MOD, for migoto_parity to compare the new logic
  *  core against. For every frame value the old path converts, the draws it resolves (part, IB, the three vertex
  *  streams, ps-t0..2) and the face texture; plus the loop parameters the old runtime FrameLoop advances with. It
- *  reads only the INI: buffers and textures need not be present (their file names are enough). */
+ *  reads only the INI: buffers and textures need not be present (their file names are enough). A fourth argument
+ *  also writes the converter's logic-core data for the INI there, for the game-side driver. */
 public final class LegacyAnimationDump {
     private static String name(Map<String,String> b,String key){String v=b.get(key);return v==null?"-":v.trim();}
     public static void main(String[] a)throws Exception{
@@ -18,6 +20,10 @@ public final class LegacyAnimationDump {
         Method resources=ModelConverter.class.getDeclaredMethod("resources",ModelConverter.Ini.class,File.class,Map.class);resources.setAccessible(true);
         Method drawCalls=ModelConverter.class.getDeclaredMethod("drawCalls",ModelConverter.Ini.class,Map.class,Map.class,Map.class);drawCalls.setAccessible(true);
         Method face=ModelConverter.class.getDeclaredMethod("faceTexture",ModelConverter.Ini.class,Map.class,Map.class);face.setAccessible(true);
+        // With a fourth argument: the converter's logic-core data for this INI (logic/ and model-logic.json there).
+        if(a.length>3){File dir=new File(a[3]);dir.mkdirs();Method logic=ModelConverter.class.getDeclaredMethod("logic",ModelConverter.Ini.class,File.class,ModelConverter.Animation.class,Map.class,File.class,StringBuilder.class);
+            logic.setAccessible(true);StringBuilder log=new StringBuilder();Object data=logic.invoke(null,x,root,an,new HashMap<String,String>(),dir,log);
+            if(data==null)throw new IllegalArgumentException("no logic data: "+log);Files.write(new File(dir,"model-logic.json").toPath(),Json.write(Json.of("logic",data)).getBytes("UTF-8"));}
         try(PrintStream out=new PrintStream(a[2],"UTF-8")){
             StringBuilder values=new StringBuilder();for(int v:an.values)values.append(' ').append(v);
             out.println("animation "+an.variable+" "+an.first+" "+an.last+" "+an.step+" "+an.initial+" "+an.counter+" "+an.period+" "+an.counterStep+values);

@@ -3,6 +3,7 @@
 #include "logfmt.hpp"
 #include "render_probe.hpp"
 #include "glow_trace.hpp"
+#include "logic_game.hpp"
 #include <chrono>
 #include <atomic>
 #include <cctype>
@@ -37,11 +38,13 @@ std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static
 //                  property block (1) or per-material custom texture (2); no copies or refreshes
 //   separateDraws  every draw in effect its own submesh, as before 0.7.23 (mergeDraws, model.hpp): for comparing the
 //                  picture and the draw count (rebuilds the model)
-struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false,separateDraws=false;int firstRefreshMs=0,slotTextures=0,animationMode=0;
+//   logicCore      an animation model's own INI logic (3DMigoto logic core, logic_game.hpp) picks the frame shown,
+//                  by what its draws select; FrameLoop when the model has no logic data or the core fails
+struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false,separateDraws=false,logicCore=false;int firstRefreshMs=0,slotTextures=0,animationMode=0;
  std::string meshKey(bool animated=false)const{return std::string(neutralColors?"c":"-")+(noUv2?"u":"-")+(separateDraws?"s":"-")+(animated?"a"+std::to_string(animationMode):"");}
- bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&separateDraws==o.separateDraws&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures&&animationMode==o.animationMode;}
- bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||separateDraws||firstRefreshMs||slotTextures||animationMode;}
- std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off")+" animationMode="+std::to_string(animationMode);}};
+ bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&separateDraws==o.separateDraws&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures&&animationMode==o.animationMode&&logicCore==o.logicCore;}
+ bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||separateDraws||firstRefreshMs||slotTextures||animationMode||logicCore;}
+ std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off")+" animationMode="+std::to_string(animationMode)+" logicCore="+(logicCore?"on":"off");}};
 struct ControlState {Experiments exp;bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"Control JSON object");ControlState s;
@@ -57,7 +60,7 @@ ControlState parseControl(const std::string& raw){
  for(auto& model:vars.object){require(model.second.type==Json::Object,"Variables object");for(auto& kv:model.second.object){require(kv.first.size()>1&&kv.first[0]=='$',"Variable name");auto n=integerOf(kv.second);require(std::abs(n)<=1000000,"Variable value");s.variables[model.first][kv.first]=int(n);}}
  s.logLevel=logThreshold(c);
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
-  s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");
+  s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");s.exp.logicCore=flag("logicCore");
   auto ms=integerOf(x.at("firstRefreshMs"));require(ms>=0&&ms<=10000,"experiments.firstRefreshMs");s.exp.firstRefreshMs=int(ms);
   auto slots=integerOf(x.at("slotTextures"));require(slots>=0&&slots<=2,"experiments.slotTextures");s.exp.slotTextures=int(slots);auto animation=integerOf(x.at("animationMode"));require(animation>=0&&animation<=2,"experiments.animationMode");s.exp.animationMode=int(animation);}
  return s;
@@ -175,11 +178,11 @@ struct Runtime::Impl {
   Ptr animationOwner=0;Ptr originMesh=0,originMaterials=0;RestoreBackup* backup=nullptr;
   Owned dynamicRoots;std::map<std::string,Ptr> dynamicArrays;std::string dynamicShape;std::vector<int> boneMapping,targetParents;Bytes targetBinds;
   int bindable=-1;};  // last incoming bone-name hash count compatibility, for log suppression; origin pair pinned by the set
- struct AnimationRun {std::string error;FrameLoop loop;int mode=0;uint64_t token=0,started=0,lastStats=0,lastMark=0,updates=0,applyUs=0,maxApplyUs=0;size_t preparing=0,buildPart=0,backPart=0,applied=0;bool loading=false,ready=false,stopped=false;
+ struct AnimationRun {std::string error;FrameLoop loop;std::unique_ptr<LogicDriver> logic;bool logicFailed=false,logicFresh=false;uint64_t logicMisses=0;std::string logicMissLogged;int mode=0;uint64_t token=0,started=0,lastStats=0,lastMark=0,updates=0,applyUs=0,maxApplyUs=0;size_t preparing=0,buildPart=0,backPart=0,applied=0;bool loading=false,ready=false,stopped=false;
   std::vector<std::shared_ptr<ModelFile>> cpu;std::vector<std::vector<Ptr>> meshes;std::vector<std::vector<Ptr>> owned;std::vector<Ptr> back;
  };
  uint64_t animationToken=0;
- struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;AnimationRun animation;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false,mergeDraws=true;std::vector<TextureSwap> swaps;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
+ struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;AnimationRun animation;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false,mergeDraws=true;std::vector<TextureSwap> swaps;LogicSpec logicSpec;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
  // source: for a renderer the game created from one of ours (adopted), the renderer whose material clones it shows.
  struct Attachment:Owned {Ptr renderer=0,native=0,original=0,originalMaterials=0,source=0;Set* set=nullptr;RestoreBackup* backup=nullptr;size_t part=0;bool adopted=false;std::map<std::string,Ptr> clones;std::string restoreError;
    uint64_t refreshAt=0,materialTraceStart=0,materialTraceAt=0,materialCheckAt=0,materialCheckUntil=0;unsigned refreshes=0,materialTraceSamples=0,materialRepairs=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;  // clone -> canonical game material; retained across refreshes
@@ -1061,12 +1064,29 @@ struct Runtime::Impl {
   for(size_t i=0;i<s.parts.size();i++){Ptr old=s.parts[i].mesh;s.parts[i].mesh=next[i];if(a.mode==1)a.back[i]=old;}a.applied=frame;
  }
  std::string animationMemory(const Set& s)const{uint64_t cpu=0;size_t meshes=0;for(auto& frame:s.animation.cpu)if(frame)cpu+=loadedBytes(*frame);for(auto& part:s.animation.owned)meshes+=part.size();return " cpuFrameMiB="+std::to_string(cpu>>20)+" meshInstances="+std::to_string(meshes);}
+ // experiments.logicCore: the logic core of a set that has logic data starts with the switch (its first selection must
+ // match a prebuilt frame) and stops with it; any failure drops it for good and FrameLoop carries on from the frame shown.
+ void logicSwitch(Set& s){auto& a=s.animation;
+  if(!ctl.exp.logicCore||!s.logicSpec.present()){if(a.logic){a.logic.reset();a.loop.current=a.applied;a.loop.clock=false;log("logic-off",s.name+": FrameLoop from frame value "+std::to_string(a.loop.spec.frames[a.applied].value));}return;}
+  if(a.logic||a.logicFailed)return;
+  try{auto d=std::make_unique<LogicDriver>(s.logicSpec);
+   if(d->frame()<0){a.logicFailed=true;log("logic-error",s.name+": what the draws select after [Constants] matches no prebuilt frame; FrameLoop kept. "+d->miss);return;}
+   size_t notes=0;for(auto& n:d->diagnostics().list){if(n.level==migoto::Diagnostic::Notice)continue;if(++notes>24){log("logic-note",s.name+": ...");break;}
+    log("logic-note",s.name+": "+(n.level==migoto::Diagnostic::Limitation?"limitation":n.level==migoto::Diagnostic::Warning?"warning":"error")+" "+n.where+": "+n.message);}
+   log("logic-start",s.name+": "+d->summary()+"; first frame value "+std::to_string(a.loop.spec.frames[size_t(d->frame())].value));a.logic=std::move(d);a.logicFresh=true;a.logicMisses=0;a.logicMissLogged.clear();}
+  catch(const std::exception& ex){a.logicFailed=true;log("logic-error",s.name+": "+ex.what()+"; FrameLoop kept");}}
  void animationTick(uint64_t now){if(inTick||!ctl.enabled)return;bool any=false;for(auto& s:sets)any|=s->built&&s->animation.ready&&!s->animation.stopped&&wantedSet(*s);if(!any)return;inTick=true;
   try{uint32_t frame=uint32_t(e.call<int32_t>(abi::frameCount,Ptr(0)));bool debug=logLevel.load(std::memory_order_relaxed)==int(Level::Debug);
    for(auto& ptr:sets){auto& s=*ptr;auto& a=s.animation;if(!s.built||!a.ready||a.stopped||!wantedSet(s))continue;
-    try{bool changed=a.loop.tick(frame);if(changed&&a.loop.current!=a.applied){auto start=debug?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};applyAnimation(s,a.loop.current);a.updates++;
-      if(debug){auto us=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());a.applyUs+=us;a.maxApplyUs=std::max(a.maxApplyUs,us);if(a.updates<=32)log("animation-frame",s.name+" mode="+animationMode(s)+" engineFrame="+std::to_string(frame)+" value="+std::to_string(a.loop.spec.frames[a.applied].value)+" us="+std::to_string(us));}}
-     if(debug&&(now>=a.lastStats+5000||ctl.renderMark!=static_cast<long long>(a.lastMark))){log(ctl.renderMark!=static_cast<long long>(a.lastMark)?"animation-mark":"animation-stats",s.name+" mode="+animationMode(s)+" engineFrame="+std::to_string(frame)+" value="+std::to_string(a.loop.spec.frames[a.applied].value)+" updates="+std::to_string(a.updates)+" advances="+std::to_string(a.loop.advances)+" avgApplyUs="+std::to_string(a.updates?a.applyUs/a.updates:0)+" maxApplyUs="+std::to_string(a.maxApplyUs)+" clockGaps="+std::to_string(a.loop.gaps)+animationMemory(s));a.lastStats=now;a.lastMark=uint64_t(ctl.renderMark);}
+    try{logicSwitch(s);bool changed=false;size_t next=a.loop.current;
+     if(a.logic){try{changed=a.logic->tick(frame,double(now)/1000.0)||a.logicFresh;a.logicFresh=false;next=size_t(a.logic->frame());
+       if(a.logic->stats.misses>a.logicMisses){a.logicMisses=a.logic->stats.misses;if(a.logic->miss!=a.logicMissLogged){log("logic-miss",s.name+": the draws select resources no prebuilt frame has; frame value "+std::to_string(a.loop.spec.frames[a.applied].value)+" stays. "+a.logic->miss);a.logicMissLogged=a.logic->miss;}}}
+      catch(const std::exception& ex){a.logic.reset();a.logicFailed=true;a.loop.current=a.applied;a.loop.clock=false;log("logic-error",s.name+": "+ex.what()+"; FrameLoop from here");}}
+     else{changed=a.loop.tick(frame);next=a.loop.current;}
+     if(changed&&next!=a.applied){auto start=debug?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};applyAnimation(s,next);a.updates++;
+      if(debug){auto us=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());a.applyUs+=us;a.maxApplyUs=std::max(a.maxApplyUs,us);if(a.updates<=32)log("animation-frame",s.name+" mode="+animationMode(s)+" driver="+(a.logic?"logic":"frameloop")+" engineFrame="+std::to_string(frame)+" value="+std::to_string(a.loop.spec.frames[a.applied].value)+" us="+std::to_string(us));}}
+     if(debug&&(now>=a.lastStats+5000||ctl.renderMark!=static_cast<long long>(a.lastMark))){std::string driver=a.logic?" driver=logic presents="+std::to_string(a.logic->stats.presents)+" misses="+std::to_string(a.logic->stats.misses)+" avgLogicUs="+std::to_string(a.logic->stats.presents?a.logic->stats.stepUs/a.logic->stats.presents:0)+" maxLogicUs="+std::to_string(a.logic->stats.maxStepUs):" driver=frameloop advances="+std::to_string(a.loop.advances)+" clockGaps="+std::to_string(a.loop.gaps);
+      log(ctl.renderMark!=static_cast<long long>(a.lastMark)?"animation-mark":"animation-stats",s.name+" mode="+animationMode(s)+" engineFrame="+std::to_string(frame)+" value="+std::to_string(a.loop.spec.frames[a.applied].value)+" updates="+std::to_string(a.updates)+driver+" avgApplyUs="+std::to_string(a.updates?a.applyUs/a.updates:0)+" maxApplyUs="+std::to_string(a.maxApplyUs)+animationMemory(s));a.lastStats=now;a.lastMark=uint64_t(ctl.renderMark);}
     }catch(const std::exception& ex){a.stopped=true;a.error=ex.what();log("animation-error",s.name+" mode="+animationMode(s)+" playback: "+ex.what());}}
   }catch(const std::exception& ex){for(auto& s:sets)if(s->animation.ready&&!s->animation.stopped){s->animation.stopped=true;s->animation.error=ex.what();log("animation-error",s->name+": engine frame clock: "+ex.what());}}
   inTick=false;
@@ -1078,7 +1098,7 @@ struct Runtime::Impl {
   // Estimated memory once built: vertex arrays and the clone's skin, indices (ours and the engine's), RGBA textures.
   for(auto& p:res.data->parts){s->bytes+=uint64_t(p.geo.n)*(12+12+8+32+32);for(auto& c:p.channels)s->bytes+=c.second.size();s->bytes+=uint64_t(p.geo.ni)*8;}
   if(res.data->animation.present()){auto& a=s->animation;a.loop=FrameLoop(res.data->animation);a.mode=ctl.exp.animationMode;a.token=++animationToken;a.started=now;a.cpu.resize(a.loop.spec.frames.size());a.meshes.resize(a.cpu.size());a.owned.resize(res.data->parts.size());a.back.resize(res.data->parts.size());a.cpu[0]=res.data;}
-  s->meshKey=ctl.exp.meshKey(res.data->animation.present());s->mergeDraws=!ctl.exp.separateDraws&&!s->originalMaterials;s->swaps=res.data->swaps;s->mats=std::move(res.data->materials);res.data->materials.clear();s->blobSize=res.data->blobSize;s->fileGeneration=res.data->generation;
+  s->meshKey=ctl.exp.meshKey(res.data->animation.present());s->mergeDraws=!ctl.exp.separateDraws&&!s->originalMaterials;s->swaps=res.data->swaps;s->logicSpec=res.data->logic;s->mats=std::move(res.data->materials);res.data->materials.clear();s->blobSize=res.data->blobSize;s->fileGeneration=res.data->generation;
   auto v=ctl.variables.find(s->name);s->assignment=pick(s->variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second);s->used=now;Set* cur=s.get();sets.push_back(std::move(s));log("loading",m.name+" "+m.generation);return cur;}
 
  // ---------------------------------------------------------------- attachments

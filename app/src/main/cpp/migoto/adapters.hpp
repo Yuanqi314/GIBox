@@ -46,16 +46,16 @@ struct ImportScan {
  void walk(Engine& e,CommandList& l,bool draws,std::set<const CommandList*>& seen,const std::string& where){
   if(!seen.insert(&l).second)return;
   for(auto& c:l.commands){Command* cmd=c.get();
-   if(auto* a=dynamic_cast<Assign*>(cmd)){if(a->param)continue;auto& v=vars[a->var->name];v.name=a->var->name;
+   if(auto* a=cmd->kind()==Kind::Assign?static_cast<Assign*>(cmd):nullptr){if(a->param)continue;auto& v=vars[a->var->name];v.name=a->var->name;
     if(constant(*a->value.root)){StaticContext sc;float f=0;staticEvaluate(a->value,sc,f);v.values.insert(f);}
     else{v.finite=false;v.why.push_back(where+": "+a->line);}}
-   else if(auto* i=dynamic_cast<If*>(cmd)){if(draws){std::set<Var*> r;reads(*i->cond.root,r);for(auto* x:r){vars[x->name].name=x->name;vars[x->name].readByDraws=true;}}
+   else if(auto* i=cmd->kind()==Kind::If?static_cast<If*>(cmd):nullptr){if(draws){std::set<Var*> r;reads(*i->cond.root,r);for(auto* x:r){vars[x->name].name=x->name;vars[x->name].readByDraws=true;}}
     for(auto* sub:{&i->truePre,&i->truePost,&i->falsePre,&i->falsePost})walk(e,*sub,draws,seen,where);}
-   else if(auto* r=dynamic_cast<RunList*>(cmd)){walk(e,r->target->pre,draws,seen,r->target->name);walk(e,r->target->post,draws,seen,r->target->name);}
-   else if(auto* b=dynamic_cast<Bind*>(cmd)){std::string src=b->src;if(e.resources.count(src)){bindings.push_back({b->dst,src});resources.insert(src);}
+   else if(auto* r=cmd->kind()==Kind::Run?static_cast<RunList*>(cmd):nullptr){walk(e,r->target->pre,draws,seen,r->target->name);walk(e,r->target->post,draws,seen,r->target->name);}
+   else if(auto* b=cmd->kind()==Kind::Bind?static_cast<Bind*>(cmd):nullptr){std::string src=b->src;if(e.resources.count(src)){bindings.push_back({b->dst,src});resources.insert(src);}
 }
-   else if(auto* s=dynamic_cast<CustomShaderRun*>(cmd))customShaders.push_back(s->where);
-   else if(auto* u=dynamic_cast<Unported*>(cmd))unported.push_back(u->where);}}
+   else if(auto* s=cmd->kind()==Kind::CustomShader?static_cast<CustomShaderRun*>(cmd):nullptr)customShaders.push_back(s->where);
+   else if(auto* u=cmd->kind()==Kind::Unported?static_cast<Unported*>(cmd):nullptr)unported.push_back(u->where);}}
 
  explicit ImportScan(Engine& e,uint64_t limit=4096){
   std::set<const CommandList*> seen;

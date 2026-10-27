@@ -156,7 +156,47 @@ struct MaterialFile {bool original=true;std::shared_ptr<Texture> main,light,norm
 // A texture swap (model.json "textures", optional): the main texture of the character's renderer of that name becomes the
 // material's, its mesh stays the game's (a mod's face texture, which on PC replaces the game's texture wherever it is drawn).
 struct TextureSwap {std::string renderer,material;};
-struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;uint64_t blobSize=0;uint32_t blobCrc=0;AnimationSpec animation;std::vector<TextureSwap> swaps;};
+// model.json "logic" (optional, animation models): for the 3DMigoto logic core in the game. The mod's INI files (copied
+// to logic/, each with the namespace XXMI gives it), the draws replayed every frame (slot -> game hash, the order the
+// slots are checked, draw values), where each field of each draw is read from ([pass, slot]), and per animation frame
+// what each draw used when the converter built it. The runtime shows the prebuilt frame whose draws match.
+struct LogicSpec {
+ struct File {std::string ns,file,text;};
+ struct Pass {std::string name;std::map<std::string,uint32_t> bindings;std::vector<std::string> checks;std::map<std::string,float> call;};
+ std::vector<File> files;std::vector<Pass> passes;std::map<std::string,std::vector<std::pair<std::string,std::pair<std::string,std::string>>>> reads;   // draw -> field -> (pass, slot)
+ std::vector<std::map<std::string,std::string>> frames;   // per animation frame: draw -> signature
+ bool present()const{return !files.empty();}
+};
+inline const std::vector<std::string>& logicFields(){static const std::vector<std::string> f={"ib","position","blend","texcoord","ps-t0","ps-t1","ps-t2"};return f;}
+inline bool logicSlot(const std::string& s){return !s.empty()&&s.size()<=16&&s.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-")==s.npos;}
+inline LogicSpec logicOf(const Json& m,const std::string& dir,const AnimationSpec& animation){LogicSpec l;const auto& j=m.at("logic");if(j.type==Json::Null)return l;
+ require(animation.present(),"logic: only for animation models");uint64_t total=0;std::set<std::string> files;
+ for(auto& f:jarr(j,"files",1,64)){LogicSpec::File x{jstr(f,"namespace",512),jstr(f,"file",32),""};
+  require(x.file.compare(0,6,"logic/")==0&&x.file.size()>10&&x.file.compare(x.file.size()-4,4,".ini")==0&&x.file.find_first_not_of("0123456789",6)==x.file.size()-4,"logic: file name "+x.file);
+  require(files.insert(x.file).second,"logic: file listed twice");auto b=read(dir+"/"+x.file,4*1024*1024);x.text.assign(b.begin(),b.end());total+=x.text.size();require(total<=8*1024*1024,"logic: INI files over 8 MiB");
+  l.files.push_back(std::move(x));}
+ std::set<std::string> names;
+ for(auto& p:jarr(j,"passes",1,256)){LogicSpec::Pass x;x.name=jstr(p,"name",128);require(names.insert(x.name).second,"logic: pass "+x.name+" listed twice");
+  const auto& b=jfield(p,"bindings");require(b.type==Json::Object&&b.object.size()<=32,"logic: bindings of "+x.name);
+  for(auto& kv:b.object){require(logicSlot(kv.first)&&kv.second.type==Json::String&&!kv.second.string.empty()&&kv.second.string.size()<=8&&kv.second.string.find_first_not_of("0123456789abcdefABCDEF")==std::string::npos,"logic: binding "+kv.first+" of "+x.name);
+   x.bindings[kv.first]=uint32_t(std::stoul(kv.second.string,nullptr,16));}
+  for(auto& c:jarr(p,"checks",1,32)){require(c.type==Json::String&&logicSlot(c.string),"logic: checks of "+x.name);x.checks.push_back(c.string);}
+  const auto& call=p.at("call");if(call.type!=Json::Null){require(call.type==Json::Object&&call.object.size()<=6,"logic: call of "+x.name);
+   static const std::set<std::string> keys={"vertex_count","index_count","instance_count","first_vertex","first_index","first_instance"};
+   for(auto& kv:call.object){require(keys.count(kv.first),"logic: call value "+kv.first);x.call[kv.first]=float(jnum(kv.second,0,0xffffffffull,"logic: "+kv.first));}}
+  l.passes.push_back(std::move(x));}
+ const auto& reads=jfield(j,"reads");require(reads.type==Json::Object&&!reads.object.empty()&&reads.object.size()<=256,"logic: reads");
+ for(auto& d:reads.object){require(!d.first.empty()&&d.first.size()<=128&&d.second.type==Json::Object,"logic: reads of "+d.first);auto& list=l.reads[d.first];
+  for(auto& f:logicFields()){const auto& at=jfield(d.second,f.c_str());require(at.type==Json::Array&&at.array.size()==2&&at.array[0].type==Json::String&&names.count(at.array[0].string)&&at.array[1].type==Json::String&&logicSlot(at.array[1].string),"logic: "+d.first+" "+f);
+   list.push_back({f,{at.array[0].string,at.array[1].string}});}
+  require(d.second.object.size()==logicFields().size(),"logic: unknown field in reads of "+d.first);}
+ const auto& frames=jarr(j,"frames",animation.frames.size(),animation.frames.size());
+ for(size_t i=0;i<frames.size();i++){require(jint(jfield(frames[i],"value"),"logic frame value")==animation.frames[i].value,"logic: frame values differ from the animation");
+  const auto& d=jfield(frames[i],"draws");require(d.type==Json::Object&&d.object.size()==l.reads.size(),"logic: draws of frame "+std::to_string(i));std::map<std::string,std::string> sig;
+  for(auto& kv:d.object){require(l.reads.count(kv.first)&&kv.second.type==Json::String&&kv.second.string.size()<=4096,"logic: draw "+kv.first+" of frame "+std::to_string(i));sig[kv.first]=kv.second.string;}
+  l.frames.push_back(std::move(sig));}
+ return l;}
+struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;uint64_t blobSize=0;uint32_t blobCrc=0;AnimationSpec animation;std::vector<TextureSwap> swaps;LogicSpec logic;};
 
 namespace detail {
 // model.bin, checked whole (size, CRC-32 streamed in 1 MiB steps) before any view is read from it; views are then read
@@ -212,7 +252,7 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allT
   require(safeName(x.renderer),"Texture swap renderer: "+x.renderer);require(it!=out->materials.end()&&!it->second.original,"Texture swap material: "+x.material);
   for(auto& y:out->swaps){require(y.renderer!=x.renderer,"Texture swap renderer listed twice: "+x.renderer);}
   out->swaps.push_back(x);}
- out->blobSize=size;out->blobCrc=crc;if(animationFrame<0)out->animation=std::move(animation);
+ out->blobSize=size;out->blobCrc=crc;if(animationFrame<0){out->logic=logicOf(m,dir,animation);out->animation=std::move(animation);}
  const auto& parts=jarr(m,"parts",1,model::maxParts);
  for(size_t pi=0;pi<parts.size();pi++){const auto& p=parts[pi];const auto& ps=summary.parts[pi];PartFile f;
   unsigned n=unsigned(juint(p,"vertices",1,model::maxVertices)),ni=unsigned(juint(p,"indices",3,model::maxIndices));require(ni%3==0,ps.name+": index count not a multiple of 3");

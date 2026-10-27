@@ -56,7 +56,8 @@ public final class Control {
     /** A monotonically increasing marker; game retains the preceding 30 seconds only while logLevel=debug. */
     /** Material experiments (control.json "experiments"; read by the game, debug only): glowTrace, gameMaterials,
      *  neutralColors, noUv2, separateDraws (booleans), firstRefreshMs (0 = default 1.5 s) and slotTextures (0 off,
-     *  1 per-material property block, 2 per-material custom texture). */
+     *  1 per-material property block, 2 per-material custom texture); for animations animationMode (0 cached frame
+     *  meshes, 1 dynamic, 2 paused) and logicCore (boolean: the mod's own INI logic picks the frame shown). */
     public static boolean experiment(String pkg, String key) { JSONObject x = load(pkg).optJSONObject("experiments"); return x != null && x.optBoolean(key, false); }
     public static int experimentMs(String pkg) { return experimentInt(pkg, "firstRefreshMs"); }
     public static int experimentInt(String pkg, String key) { JSONObject x = load(pkg).optJSONObject("experiments"); return x == null ? 0 : x.optInt(key, 0); }

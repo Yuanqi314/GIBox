@@ -3,6 +3,7 @@
 #include "model.hpp"
 #include "model_fixture.hpp"
 #include "runtime.hpp"
+#include "logic_game.hpp"
 #include <cassert>
 #include <elf.h>
 #include <iostream>
@@ -25,6 +26,9 @@ int main(int argc,char**argv){
  if(argc==2){std::string p=argv[1];auto m=loadModelFile(p);auto s=readSummary(p);assert(m->parts.size()==s.parts.size()&&!m->parts.empty()&&m->variants.combos.empty());
   for(auto& part:m->parts){assert(!part.draws.empty());for(auto& d:part.draws)assert(m->materials.count(d.row.name));std::vector<Submesh> subs;std::vector<Material> rows;activeDraws(part.draws,m->variants.defaults,subs,rows);assert(!subs.empty());}
   if(m->animation.present())for(size_t i=0;i<m->animation.frames.size();i++){auto frame=loadModelFile(p,false,false,int(i),m->generation);assert(frame->parts.size()==m->parts.size());}
+  if(m->logic.present()){LogicDriver d(m->logic);assert(d.frame()>=0);FrameLoop loop(m->animation);loop.tick(0);d.tick(0,0);
+   for(uint32_t t=1;t<=60;t++){loop.tick(t);d.tick(t,t/60.0);if(m->logic.frames[size_t(d.frame())]!=m->logic.frames[loop.current]){std::cerr<<"logic frame "<<d.frame()<<" vs FrameLoop "<<loop.current<<" at "<<t<<"\n";return 1;}}
+   std::cout<<"Native logic: "<<d.summary()<<"; 60 frames as FrameLoop\n";}
   if(exists(p+"/learned.json"))learnedOf(JsonParser(text(p+"/learned.json")).parse());
   return 0;}
  char temp[]="/tmp/gibox-core-XXXXXX";assert(mkdtemp(temp));std::string root=temp;
@@ -168,6 +172,20 @@ int main(int argc,char**argv){
   refused(root+"/swap-unknown",swaps("[{\"renderer\":\"Face\",\"material\":\"Material9\"}]"),"Texture swap material");
   refused(root+"/swap-twice",swaps("[{\"renderer\":\"Face\",\"material\":\"Material1\"},{\"renderer\":\"Face\",\"material\":\"Material0\"}]"),"listed twice");
   refused(root+"/swap-name",swaps("[{\"renderer\":\"Face/..\",\"material\":\"Material1\"}]"),"Texture swap renderer");
+  // model.json "logic": animation models only, files inside logic/, reads of known draws, one record per frame.
+  auto logicRefused=[&](const std::string& name,Spec spec,const char* why){std::filesystem::create_directories(root+"/"+name+"/logic");write(root+"/"+name+"/logic/0.ini",std::string(fixture::logicIni));
+   std::string message;fixture::writeModel(root+"/"+name,spec);try{loadModelFile(root+"/"+name);}catch(const std::exception& ex){message=ex.what();}
+   if(message.find(why)==std::string::npos){std::cerr<<"expected \""<<why<<"\", got \""<<message<<"\"\n";assert(false);}};
+  auto ibs=std::vector<std::string>{"resourcea","resourceb","resourcec"};
+  logicRefused("logic-static",fixture::withLogic(Spec(),fixture::logicJson(ibs)),"logic: only for animation models");
+  logicRefused("logic-path",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/../x.ini")),"logic: file name");
+  logicRefused("logic-missing",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/7.ini")),"Cannot read");
+  logicRefused("logic-pass",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/0.ini","Skin")),"logic: Part ib");
+  logicRefused("logic-frames",fixture::withLogic(fixture::animated(),fixture::logicJson({"resourcea","resourceb"})),"Invalid \"frames\" list");
+  {fixture::writeLogicModel(root+"/logic-ok",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs)));auto m=loadModelFile(root+"/logic-ok");
+   assert(m->logic.present()&&m->logic.files[0].text==fixture::logicIni&&m->logic.passes[0].bindings.at("ib")==0xaaaa0001u&&m->logic.frames.size()==3);
+   LogicDriver d(m->logic);assert(d.frame()==0&&d.signature("Part")==fixture::logicSignature("resourcea"));
+   FrameLoop loop(m->animation);loop.tick(0);d.tick(0,0);for(uint32_t t=1;t<=12;t++){loop.tick(t);d.tick(t,t/60.0);assert(d.frame()==int(loop.current));}}
   refused(root+"/swap-original",[](Spec& x){x.edit=[](std::string& j){replaceIn(j,",\"parts\":[",",\"textures\":[{\"renderer\":\"Face\",\"material\":\"Material0\"}],\"parts\":[");};},"Texture swap material");}
  std::filesystem::remove_all(root);
  std::cout<<"Native core: PASS (GIBox model format: manifest, model.bin views, CRC-32, value/range/reference checks, variants, on-demand textures, learned.json, skeleton.json; bones, JSON, ELF notes, DDS, targets)\n";

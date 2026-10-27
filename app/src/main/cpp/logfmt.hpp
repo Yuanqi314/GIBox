@@ -24,7 +24,7 @@ inline std::string logLine(const char* logger,Level level,const std::string& mes
 inline Level levelOf(const std::string& state){
  auto ends=[&](const char* s){size_t n=std::strlen(s);return state.size()>=n&&state.compare(state.size()-n,n,s)==0;};
  if(state=="error"||state=="buildid-mismatch"||ends("-error"))return Level::Error;
- for(const char* w:{"find-disabled","bind-incompatible","restore-materials-dead","hook-skip","attach-skip","attachment-dropped","renderer-type-dump","target-missing","handoff-type-wait","bone-export-skip","build-retry","world-renderers","bone-library-partial","slot-textures-lost"})if(state==w)return Level::Warning;
+ for(const char* w:{"find-disabled","bind-incompatible","restore-materials-dead","hook-skip","attach-skip","attachment-dropped","renderer-type-dump","target-missing","handoff-type-wait","bone-export-skip","build-retry","world-renderers","bone-library-partial","slot-textures-lost","logic-miss"})if(state==w)return Level::Warning;
  if(ends("-disabled"))return Level::Warning;
  for(const char* d:{"bind-passed","bind-filter-stats","discover-skip","direct-mesh-prepared","handoff-type","array-classes","bone-library-unchanged","bone-library-wait","preload","texture-read","variant-textures-loading","experiments","experiment-mesh","experiment-rebuild","appearance","glow-hooks","glow-note","glow-window","glow-write","glow-diff","direct-textures-copied","animation-load","animation-read","animation-build","animation-ready","animation-frame","animation-stats","animation-mark"})if(state==d)return Level::Debug;
  return Level::Info;}

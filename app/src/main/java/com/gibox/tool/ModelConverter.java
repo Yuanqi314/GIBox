@@ -696,6 +696,68 @@ public final class ModelConverter {
         log.append("转换内存预算：几何估算 ").append(estimate/1024/1024).append(" MiB，预算 ").append(budget/1024/1024).append(" MiB\n");
         check(estimate<=budget,"模型几何预计超出转换内存预算（"+estimate/1024/1024+" / "+budget/1024/1024+" MiB）；请减少同时转换的款式或拆分动画资源");
     }
+    /** The INI files XXMI loads for a mod (include_recursive with exclude_recursive = DISABLED*): every .ini under the
+     *  folder except DISABLED* and desktop.ini, a folder's files (case-insensitive order) before its subfolders. */
+    private static void logicFiles(File dir,List<File> out,int depth){File[] all=dir.listFiles();if(all==null||depth>8)return;
+        List<File> files=new ArrayList<>(),dirs=new ArrayList<>();for(File f:all){String n=lower(f.getName());if(n.startsWith("disabled")||n.equals("desktop.ini")||n.startsWith("."))continue;
+            if(f.isDirectory())dirs.add(f);else if(n.endsWith(".ini"))files.add(f);}
+        Comparator<File> order=(a,b)->lower(a.getName()).compareTo(lower(b.getName()));files.sort(order);dirs.sort(order);out.addAll(files);for(File d:dirs)logicFiles(d,out,depth+1);}
+    private static final String[] LOGIC_FIELDS={"ib","position","blend","texcoord","ps-t0","ps-t1","ps-t2"};
+    private static String logicName(String v){return v==null?"-":lower(v.replaceFirst("(?i)^ref\\s+","").trim());}
+    /** What each draw uses in one frame, field by field, as the game's logic core reports it (resource section names). */
+    private static String logicSignature(Draw d){StringBuilder b=new StringBuilder();
+        for(String f:LOGIC_FIELDS){String v=f.equals("ib")||f.startsWith("ps-t")?d.bindings.get(f):d.bindings.get(streamKey(f.equals("position")?0:f.equals("blend")?1:2));b.append(f).append('=').append(logicName(v)).append(';');}
+        return b.toString();}
+    /** For the 3DMigoto logic core in the game (experiments.logicCore): the mod's INI files in logic/; the draws the
+     *  runtime replays every frame, in the GIMI layout of a character (the Position and Blend buffers are matched in the
+     *  skinning pass, the Texcoord buffer and the IB at each part's draw, vertex buffers checked before the IB); where
+     *  each field of a draw is read from; and per frame what each draw uses, by which the runtime picks the prebuilt
+     *  frame. Null, with the reason in the log, when that cannot be stated; the old frame loop is used then. */
+    private static Map<String,Object> logic(Ini ini,File src,Animation an,Map<String,String> mapping,File out,StringBuilder log)throws Exception{
+        List<File> files=new ArrayList<>();logicFiles(src,files,0);
+        if(files.isEmpty()||files.size()>64){log.append("逻辑核心数据：INI 文件数 ").append(files.size()).append("，不写入\n");return null;}
+        File dir=new File(out,"logic");check(dir.mkdirs(),"无法创建 logic 目录");List<Object> list=new ArrayList<>();long total=0;String root=src.getCanonicalPath();
+        for(int i=0;i<files.size();i++){File f=files.get(i);String body=ModConfig.source(f);total+=body.length();
+            if(total>8L*1024*1024){log.append("逻辑核心数据：INI 合计超过 8 MiB，不写入\n");return null;}
+            write(dir,i+".ini",text(body));String rel=f.getCanonicalPath().substring(root.length()+1).replace('/','\\');
+            list.add(Json.of("namespace","Mods\\"+src.getName()+"\\"+rel,"file","logic/"+i+".ini"));}
+        Map<String,Integer> vars0=new LinkedHashMap<>(ini.vars);vars0.put(an.variable,an.values.get(0));Map<String,Resource> rs0=resources(ini,src,vars0);
+        // The vertex-buffer sections that serve every part (no draw, no IB): their hash and the slot they bind.
+        String[] hash=new String[3],slot=new String[3];
+        for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")){Evaluated e=new Evaluated(ini,s,vars0,rs0);
+            if(e.declaresDraw||e.bindings.containsKey("ib")||e.hash.isEmpty())continue;
+            for(int k=0;k<3;k++){String v=e.bindings.get(streamKey(k));if(v==null)continue;String at=null;
+                for(Map.Entry<String,String> b:e.bindings.entrySet())if(b.getKey().matches("vb[0-9]+")&&v.equals(b.getValue()))at=b.getKey();
+                if(at==null)continue;
+                if(hash[k]!=null&&!(hash[k].equals(e.hash)&&slot[k].equals(at))){log.append("逻辑核心数据：").append(streamName(k)).append(" 顶点流由多个段提供，不写入\n");return null;}
+                hash[k]=e.hash;slot[k]=at;}}
+        Map<String,Long> firstIndex=new HashMap<>();
+        for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride"))for(String l:s.lines){String[] a=kv(l);
+            if(a!=null&&a[0].equals("match_first_index"))try{firstIndex.put(lower(s.name.substring(15)),Long.parseLong(a[1].trim()));}catch(NumberFormatException ex){log.append("逻辑核心数据：").append(s.name).append(" 的 match_first_index 不是数字，不写入\n");return null;}}
+        List<Object> passes=new ArrayList<>();Map<String,Object> reads=new LinkedHashMap<>();
+        if(hash[0]!=null||hash[1]!=null){Map<String,Object> b=new LinkedHashMap<>();List<Object> checks=new ArrayList<>();
+            for(int k=0;k<2;k++)if(hash[k]!=null){if(b.containsKey(slot[k])){log.append("逻辑核心数据：Position 和 Blend 在同一槽位，不写入\n");return null;}b.put(slot[k],hash[k]);checks.add(slot[k]);}
+            passes.add(Json.of("name","skin","bindings",b,"checks",checks));}
+        Set<String> parts=new LinkedHashSet<>();
+        for(Draw d:drawCalls(ini,vars0,rs0,mapping)){if("skip".equalsIgnoreCase(mapping.get(lower(d.part))))continue;
+            if(!parts.add(d.part)){log.append("逻辑核心数据：").append(d.part).append(" 一帧里绘制多次，不写入\n");return null;}
+            Map<String,Object> b=new LinkedHashMap<>();b.put("ib",d.hash);if(hash[2]!=null)b.put(slot[2],hash[2]);
+            Map<String,Object> pass=Json.of("name",d.part,"bindings",b,"checks",Arrays.asList("vb0","vb1","vb2","ib"));Long first=firstIndex.get(lower(d.part));
+            if(first!=null)pass.put("call",Json.of("first_index",first));passes.add(pass);
+            Map<String,Object> r=new LinkedHashMap<>();
+            for(String f:LOGIC_FIELDS){String from=d.part,at=f;
+                if(!f.equals("ib")&&!f.startsWith("ps-t")){int k=f.equals("position")?0:f.equals("blend")?1:2;String v=d.bindings.get(streamKey(k));at=null;
+                    for(Map.Entry<String,String> x:d.bindings.entrySet())if(x.getKey().matches("vb[0-9]+")&&v!=null&&v.equals(x.getValue()))at=x.getKey();   // its own binding
+                    if(at==null){if(hash[k]==null){log.append("逻辑核心数据：").append(d.part).append(" 的 ").append(streamName(k)).append(" 来源不明，不写入\n");return null;}at=slot[k];if(k<2)from="skin";}}
+                r.put(f,Arrays.asList(from,at));}
+            reads.put(d.part,r);}
+        List<Object> frames=new ArrayList<>();
+        for(int v:an.values){Map<String,Integer> vars=new LinkedHashMap<>(ini.vars);vars.put(an.variable,v);Map<String,Object> sig=new LinkedHashMap<>();
+            for(Draw d:drawCalls(ini,vars,resources(ini,src,vars),mapping))if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part))))sig.put(d.part,logicSignature(d));
+            if(!sig.keySet().equals(parts)){log.append("逻辑核心数据：帧 ").append(v).append(" 的绘制部件和第一帧不同，不写入\n");return null;}
+            frames.add(Json.of("value",v,"draws",sig));}
+        log.append("逻辑核心数据：").append(files.size()).append(" 个 INI、").append(passes.size()).append(" 次绘制、").append(frames.size()).append(" 帧的资源记录（实验开关“逻辑核心驱动”使用；关闭时仍按原帧循环）\n");
+        return Json.of("files",list,"passes",passes,"reads",reads,"frames",frames);}
     private static File convertAnimation(Ini ini,File src,List<Bones> bones,Map<String,String> mapping,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log,Animation animation)throws Exception {
         if(o.animationBoneFallback){for(Bones bone:bones)check(!bone.synthetic,"动画骨骼兼容需要完整骨骼库或本 MOD 已保存的完整骨骼记录，不能用未知的索引上限判断哪些关联可忽略");
             for(Section section:ini.sections.values()){String n=lower(section.name);check(!n.startsWith("customshader")&&!n.startsWith("shaderoverride"),"动画骨骼兼容暂不支持自定义着色器；需要先实现其矩阵资源和蒙皮规则");
@@ -724,6 +786,7 @@ public final class ModelConverter {
                 Map<String,Object> animationInfo=animation.json(frames);animationInfo.put("bonePolicy",o.animationBoneFallback?"retain-valid-experimental":"strict");
                 Map<String,Object> manifest=Json.of("format","gibox-model","version",4,"name",dest.getName(),"generation",generation,"character",Json.of("id",id,"names",new ArrayList<Object>(o.names)),"flags",Json.of("originalMaterials",false,"diffuseOnly",false),"animation",animationInfo,"parts",firstParts,"materials",materials,"blob",Json.of("file","model.bin","size",blob.size,"crc32",blob.crc.getValue()));
                 if(swaps!=null)manifest.put("textures",swaps);
+                Map<String,Object> logic=logic(ini,src,animation,mapping,tmp,log);if(logic!=null)manifest.put("logic",logic);
                 if(o.sourcePath!=null)manifest.put("source",Json.of("path",o.sourcePath,"signature",o.sourceSignature==null?"":o.sourceSignature));
                 write(tmp,"conversion.log",text(log.toString()));write(tmp,"model.json",text(Json.write(manifest)));
             }

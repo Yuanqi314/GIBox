@@ -54,7 +54,9 @@ struct Event {enum Kind {Assign,Branch,Run,Bind,Draw,Skip,Abort,Match,Key,Unport
 
 class Engine;
 struct RunState;
-struct Command {std::string line;virtual ~Command()=default;virtual void run(RunState&)=0;};
+// kind: what a command is, for the parser's endif and the import scan (no RTTI: the Android build may not have it).
+enum class Kind {Other,Assign,Else,If,Run,Bind,CustomShader,Unported};
+struct Command {std::string line;virtual ~Command()=default;virtual void run(RunState&)=0;virtual Kind kind()const{return Kind::Other;}};
 using CommandPtr=std::shared_ptr<Command>;
 struct CommandList {std::vector<CommandPtr> commands;bool post=false;std::string section;};
 // A section with command lists ([TextureOverride], [CommandList], [Present], [Constants], a key's run). Locals live
@@ -182,35 +184,35 @@ private:
 inline void add(CommandPtr c,CommandList* explicitList,CommandList* sensible,CommandList& pre,CommandList& post){
  if(explicitList)explicitList->commands.push_back(c);else if(sensible)sensible->commands.push_back(c);else{pre.commands.push_back(c);post.commands.push_back(c);}}
 
-struct Assign:Command {Var* var=nullptr;int index=0;char comp='x';bool param=false;Expression value;std::string where;
+struct Assign:Command {Kind kind()const override{return Kind::Assign;}Var* var=nullptr;int index=0;char comp='x';bool param=false;Expression value;std::string where;
  void run(RunState& s)override{float v=value(s);if(param){auto k=std::make_pair(index,comp);float b=s.e.params[k];s.e.params[k]=v;s.e.note(Event::Assign,where,std::string(1,comp)+std::to_string(index),b,v);return;}
   float b=var->value;var->value=v;s.e.note(Event::Assign,where,var->name,b,v);if((var->flags&VarPersist)&&v!=b)s.e.persistDirty=true;}};
-struct ElsePlaceholder:Command {void run(RunState&)override{}};
-struct If:Command {Expression cond;CommandList truePre,truePost,falsePre,falsePost;bool preDone=false,postDone=false,elseIf=false,nested=false;std::string where;
- void run(RunState& s)override{bool yes=cond(s)!=0;s.e.note(Event::Branch,where,line+(yes?" : true":" : false"),0,yes);
+struct ElsePlaceholder:Command {Kind kind()const override{return Kind::Else;}void run(RunState&)override{}};
+struct If:Command {Kind kind()const override{return Kind::If;}Expression cond;CommandList truePre,truePost,falsePre,falsePost;bool preDone=false,postDone=false,elseIf=false,nested=false;std::string where;
+ void run(RunState& s)override{bool yes=cond(s)!=0;if(s.e.trace)s.e.note(Event::Branch,where,line+(yes?" : true":" : false"),0,yes);
   CommandList& l=yes?(s.post?truePost:truePre):(s.post?falsePost:falsePre);s.e.runList(l,s,false);}};
-struct RunList:Command {ListSection* target=nullptr;bool together=false;std::string where;
- void run(RunState& s)override{s.e.note(Event::Run,where,target->name+(together?" (pre+post)":s.post?" (post)":" (pre)"));
+struct RunList:Command {Kind kind()const override{return Kind::Run;}ListSection* target=nullptr;bool together=false;std::string where;
+ void run(RunState& s)override{if(s.e.trace)s.e.note(Event::Run,where,target->name+(together?" (pre+post)":s.post?" (post)":" (pre)"));
   if(together){bool saved=s.post;s.post=false;s.e.runList(target->pre,s);s.post=true;s.e.runList(target->post,s);s.post=saved;}
   else s.e.runList(s.post?target->post:target->pre,s);}};
 struct Skip:Command {std::string where;void run(RunState& s)override{s.e.note(Event::Skip,where,"handling = skip");if(s.result)s.result->skip=true;}};
 struct Abort:Command {std::string where;void run(RunState& s)override{s.e.note(Event::Abort,where,"handling = abort");s.aborted=true;}};
 struct CheckOverride:Command {std::string slot,where;bool together=false;void run(RunState& s)override{s.e.checkSlot(s,slot,together,where);}};
-struct CustomShaderRun:Command {std::string name,where;void run(RunState& s)override{s.e.note(Event::Unported,where,"run = "+name);if(s.result)s.result->customShaders.push_back(name);}};
-struct Unported:Command {std::string where,what;void run(RunState& s)override{s.e.note(Event::Unported,where,what);}};
+struct CustomShaderRun:Command {Kind kind()const override{return Kind::CustomShader;}std::string name,where;void run(RunState& s)override{s.e.note(Event::Unported,where,"run = "+name);if(s.result)s.result->customShaders.push_back(name);}};
+struct Unported:Command {Kind kind()const override{return Kind::Unported;}std::string where,what;void run(RunState& s)override{s.e.note(Event::Unported,where,what);}};
 // dst = [options] src. A slot gets the source as the draw sees it; a [Resource] keeps what the source held then.
-struct Bind:Command {std::string dst,src,options,where,ns;bool dstResource=false;
+struct Bind:Command {Kind kind()const override{return Kind::Bind;}std::string dst,src,options,where,ns;bool dstResource=false;
  Ref resolve(RunState& s){if(src=="null")return Ref{Ref::Null,0,{}};
   if(slotName(src)||src=="this"){std::string slot=src=="this"?s.thisSlot:src;auto it=s.bindings->find(slot);return it==s.bindings->end()?Ref{}:it->second;}
   auto c=s.e.customResources.find(src);if(c!=s.e.customResources.end())return c->second;return Ref::mod(src);}
  void run(RunState& s)override{Ref r=resolve(s);std::string to=dst=="this"?s.thisSlot:dst;
-  if(dstResource){s.e.customResources[to]=r;s.e.note(Event::Bind,where,to+" = "+src);return;}
+  if(dstResource){s.e.customResources[to]=r;if(s.e.trace)s.e.note(Event::Bind,where,to+" = "+src);return;}
   if(!s.draw&&s.bindings==&s.e.contextBindings)s.e.limitation(where,"a slot set outside a draw ("+to+"); Android has no D3D context to keep it bound for later draws");
-  (*s.bindings)[to]=r;s.e.note(Event::Bind,where,to+" = "+src);}};
+  (*s.bindings)[to]=r;if(s.e.trace)s.e.note(Event::Bind,where,to+" = "+src);}};
 struct DrawCmd:Command {std::string kind,where;std::vector<Expression> args;bool automatic=false,fromCaller=false;
  void run(RunState& s)override{IssuedDraw d;d.kind=kind;d.where=where;d.automatic=automatic;d.fromCaller=fromCaller;for(auto& a:args)d.args.push_back(a(s));d.bindings=*s.bindings;
-  std::string detail=kind+(automatic?" = auto":fromCaller?" = from_caller":"");for(size_t i=0;i<d.args.size();i++)detail+=(i?",":" = ")+std::to_string(d.args[i]);
-  s.e.note(Event::Draw,where,detail);if(s.result)s.result->draws.push_back(d);else s.e.limitation(where,kind+" outside a draw: the core records it, nothing is drawn");}};
+  if(s.e.trace){std::string detail=kind+(automatic?" = auto":fromCaller?" = from_caller":"");for(size_t i=0;i<d.args.size();i++)detail+=(i?",":" = ")+std::to_string(d.args[i]);
+  s.e.note(Event::Draw,where,detail);}if(s.result)s.result->draws.push_back(d);else s.e.limitation(where,kind+" outside a draw: the core records it, nothing is drawn");}};
 
 // ------------------------------------------------------------------ context
 inline RunState::RunState(Engine& engine):e(engine){}
@@ -231,7 +233,7 @@ inline void Engine::checkSlot(RunState& s,const std::string& slot,bool together,
   if(it!=s.bindings->end()&&it->second.kind==Ref::Mod)diag.add(Diagnostic::Notice,where,"checktextureoverride = "+checked+": it holds a mod resource, which has no tracked hash; nothing matches");
   return;}
  auto found=matches(it->second.hash,s.draw);std::string saved=s.thisSlot;s.thisSlot=checked;
- for(auto* t:found){note(Event::Match,where,t->name+(together?" (pre+post)":s.post?" (post)":" (pre)"));if(!s.post&&s.result&&!together)s.result->matched.push_back(t->name);}
+ for(auto* t:found){if(trace)note(Event::Match,where,t->name+(together?" (pre+post)":s.post?" (post)":" (pre)"));if(!s.post&&s.result&&!together)s.result->matched.push_back(t->name);}
  if(together){bool p=s.post;s.post=false;for(auto* t:found)runList(t->list->pre,s);s.post=true;for(auto* t:found)runList(t->list->post,s);s.post=p;}
  else for(auto* t:found)runList(s.post?t->list->post:t->list->pre,s);
  s.thisSlot=saved;}
@@ -298,8 +300,8 @@ inline bool Engine::parseLine(ListSection& ls,Scope& scope,const Line& line,cons
   if(raw=="else"){if(scope.levels.size()>1)scope.levels.front().clear();add(std::make_shared<ElsePlaceholder>(),nullptr,nullptr,ls.pre,ls.post);return true;}
   if(raw=="endif"){
    std::function<bool(CommandList&,bool,bool)> close=[&](CommandList& list,bool post,bool nested)->bool{size_t elsePos=list.commands.size();
-    for(size_t k=list.commands.size();k-->0;){if(dynamic_cast<ElsePlaceholder*>(list.commands[k].get()))elsePos=k;
-     auto* c=dynamic_cast<If*>(list.commands[k].get());if(!c||(post?c->postDone:c->preDone))continue;
+    for(size_t k=list.commands.size();k-->0;){if(list.commands[k]->kind()==Kind::Else)elsePos=k;
+     auto* c=list.commands[k]->kind()==Kind::If?static_cast<If*>(list.commands[k].get()):nullptr;if(!c||(post?c->postDone:c->preDone))continue;
      CommandList& t=post?c->truePost:c->truePre;CommandList& f=post?c->falsePost:c->falsePre;t.post=f.post=post;t.section=f.section=ls.name;
      t.commands.assign(list.commands.begin()+long(k)+1,list.commands.begin()+long(elsePos));
      if(elsePos!=list.commands.size())f.commands.assign(list.commands.begin()+long(elsePos)+1,list.commands.end());

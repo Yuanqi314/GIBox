@@ -10,9 +10,11 @@
 // what the d3dx.ini host lists must do for drawindexed = auto to see the replaced buffers; it is an assumption of
 // this adapter, not something the fixed 3DMigoto commit contains.
 //
-// usage: migoto_parity <mod folder> <main ini> <dump from LegacyAnimationDump> [frames]
+// usage: migoto_parity <mod folder> <main ini> <dump from LegacyAnimationDump> [frames] [logic data folder]
+// With the logic data folder (LegacyAnimationDump's fourth argument), the game-side LogicDriver also runs on the
+// converter's data and must choose, frame by frame, a prebuilt frame recording the same resources as FrameLoop's.
 #include "migoto/adapters.hpp"
-#include "model.hpp"
+#include "logic_game.hpp"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -76,10 +78,18 @@ int main(int argc,char** argv){
    for(auto& f:fields)if(f.second.first!=f.second.second){if(mismatches<10)std::cerr<<"tick "<<tick<<" frame "<<value<<" "<<d.part<<" "<<f.first<<": old "<<f.second.first<<", core "<<f.second.second<<"\n";mismatches++;}}
   std::string coreFace=fileOf(sel["face"].bindings["ps-t0"]);if(legacyFace[value]!=coreFace){if(mismatches<10)std::cerr<<"tick "<<tick<<" face: old "<<legacyFace[value]<<", core "<<coreFace<<"\n";mismatches++;}
   old.tick(uint32_t(tick));}
+ // The game side: LogicDriver on the converter's logic data, against FrameLoop.
+ std::string driverNote;
+ if(argc>5){fs::path dir=argv[5];ms::LogicSpec logic=ms::logicOf(ms::JsonParser(slurp(dir/"model-logic.json")).parse(),dir.string(),spec);ms::LogicDriver d(logic);ms::FrameLoop loop(spec);loop.tick(0);d.tick(0,0);
+  int bad=d.frame()<0?1:0;std::set<int> shown;
+  for(int tick=1;tick<=frames&&!bad;tick++){loop.tick(uint32_t(tick));d.tick(uint32_t(tick),tick/60.0);
+   if(d.frame()<0||logic.frames[size_t(d.frame())]!=logic.frames[loop.current]){std::cerr<<"tick "<<tick<<": driver frame "<<d.frame()<<", FrameLoop frame "<<loop.current<<(d.miss.empty()?"":"; miss "+d.miss)<<"\n";bad++;}
+   else shown.insert(spec.frames[size_t(d.frame())].value);}
+  mismatches+=bad;driverNote="\n  game side: LogicDriver on the converter's data: "+d.summary()+"; "+std::to_string(frames)+" frames, "+(bad?"MISMATCH":"same resources as FrameLoop every frame")+", "+std::to_string(shown.size())+" distinct frames shown, "+std::to_string(d.stats.changes)+" frame changes, "+std::to_string(d.stats.misses)+" misses, "+std::to_string(d.stats.presents?d.stats.stepUs/d.stats.presents:0)+" us per frame on this host (max "+std::to_string(d.stats.maxStepUs)+")";}
  ImportScan scan(e);
  std::cout<<"parity "<<mod.filename().string()<<"/"<<mainIni<<": "<<frames<<" presented frames, "<<compared<<" part draws compared, "<<mismatches<<" mismatches; "
   <<seen.size()<<" of "<<spec.frames.size()<<" frames shown; first frames:";for(int f:firstFrames)std::cout<<' '<<f;
  std::cout<<"\n  core: "<<files.size()<<" INI loaded, "<<e.resources.size()<<" resources ("<<scan.resources.size()<<" bindable), "<<session.changes<<" selection changes over "<<passes.size()<<" draws (";{bool first=true;for(auto& c:session.changesOf){std::cout<<(first?"":", ")<<c.first<<" "<<c.second;first=false;}}std::cout<<"), finite-state: "<<(scan.finiteStates?"yes":"no");
  for(auto& v:scan.vars)if(v.second.readByDraws)std::cout<<"; "<<v.first<<(v.second.finite?" finite":" runtime ("+(v.second.why.empty()?std::string():v.second.why[0])+")");
- std::cout<<"\n";for(auto& d:e.diag.list)std::cout<<"  "<<(d.level==Diagnostic::Limitation?"limitation":d.level==Diagnostic::Warning?"warning":d.level==Diagnostic::Error?"error":"notice")<<": "<<d.where<<": "<<d.message<<"\n";
+ std::cout<<driverNote<<"\n";for(auto& d:e.diag.list)std::cout<<"  "<<(d.level==Diagnostic::Limitation?"limitation":d.level==Diagnostic::Warning?"warning":d.level==Diagnostic::Error?"error":"notice")<<": "<<d.where<<": "<<d.message<<"\n";
  return mismatches?1:0;}

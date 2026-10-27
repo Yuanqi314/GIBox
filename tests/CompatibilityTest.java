@@ -93,8 +93,21 @@ public final class CompatibilityTest {
         String text=GimiPatternsTest.ini("global $speed = 0.5\nglobal $counter = 0\nglobal $frame = 0\nglobal $first = 0\nglobal $last = 2\n",
             "if $frame == 1\nvb0 = ResourceNextPosition\nendif\n","","")+"[ResourceNextPosition]\nstride = 40\nfilename = Next.buf\n"+program;
         File src=GimiPatternsTest.mod(base,"animation",text),out=new File(base,"animation-out");byte[] next=Files.readAllBytes(new File(src,"CitlaliPosition.buf").toPath());ByteBuffer.wrap(next).order(ByteOrder.LITTLE_ENDIAN).putFloat(0,99);GimiPatternsTest.put(src,"Next.buf",next);
+        GimiPatternsTest.put(src,"DISABLED old.ini",text);   // XXMI skips it, so the logic data must too
         StringBuilder log=new StringBuilder();ModelConverter.convert(src,null,out,10000107,new ModelConverter.Options().variants(true),DECODE,log);
         Map<String,Object> manifest=Json.obj(Json.read(new File(out,"model.json"),4L<<20),"model");List<Object> frames=Json.arr(Json.obj(manifest.get("animation"),"animation").get("frames"),"frames",3,3);
+        // The logic core's data: the INI as XXMI names it, the draws replayed (skinning pass, then each part with its
+        // first index), where each field is read, and per frame what each draw used.
+        Map<String,Object> logic=Json.obj(manifest.get("logic"),"logic");Map<String,Object> file=Json.obj(Json.arr(logic.get("files"),"files",1,1).get(0),"file");
+        ok("Mods\\animation\\Citlali.ini".equals(file.get("namespace"))&&"logic/0.ini".equals(file.get("file"))&&new String(Files.readAllBytes(new File(out,"logic/0.ini").toPath()),"UTF-8").equals(text),"the mod's INI is shipped as XXMI loads it: "+file);
+        List<Object> passes=Json.arr(logic.get("passes"),"passes",3,3);ok("skin".equals(Json.obj(passes.get(0),"pass").get("name"))&&Json.obj(Json.obj(passes.get(0),"pass").get("bindings"),"b").equals(Json.of("vb0","11111111","vb1","22222222")),"the skinning pass: "+passes.get(0));
+        Map<String,Object> body=Json.obj(passes.get(2),"pass");ok("CitlaliBody".equals(body.get("name"))&&((Number)Json.obj(body.get("call"),"call").get("first_index")).doubleValue()==3&&Json.obj(body.get("bindings"),"b").equals(Json.of("ib","44444444","vb1","33333333")),"a part draw: "+body);
+        Map<String,Object> reads=Json.obj(Json.obj(logic.get("reads"),"reads").get("CitlaliHead"),"head");ok(reads.get("position").equals(Arrays.asList("skin","vb0"))&&reads.get("texcoord").equals(Arrays.asList("CitlaliHead","vb1")),"fields are read where GIMI binds them: "+reads);
+        List<Object> records=Json.arr(logic.get("frames"),"frames",3,3);String head1=(String)Json.obj(Json.obj(records.get(1),"frame").get("draws"),"draws").get("CitlaliHead");
+        ok(head1.equals("ib=resourcecitlaliheadib;position=resourcenextposition;blend=resourcecitlaliblend;texcoord=resourcecitlalitexcoord;ps-t0=resourcecitlaliheaddiffuse;ps-t1=-;ps-t2=-;"),"frame 1 records its own position buffer: "+head1);
+        ok(log.toString().contains("逻辑核心数据：1 个 INI、3 次绘制、3 帧"),"the conversion log names the logic data: "+log);
+        if(nativeChecker!=null){Process check=new ProcessBuilder(nativeChecker,out.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"the native loader reads the logic data and its driver follows FrameLoop");}
+        Files.delete(new File(src,"DISABLED old.ini").toPath());
         ok(ModelManifest.read(out).version==4&&ModelManifest.read(out).vars.isEmpty()&&log.toString().contains("完整转换"),"animation must not become a variant union");
         ok(log.toString().contains("动画骨骼要求：Part0 / Body，无骨骼名映射，按索引绑定至少 ")&&log.toString().contains("转换成功不代表已通过游戏骨骼匹配"),"conversion must disclose the indexed skeleton requirement before device playback");
         Map<String,Object> part=Json.obj(Json.arr(Json.obj(frames.get(1),"frame").get("parts"),"parts",1,64).get(0),"part");
@@ -170,9 +183,10 @@ public final class CompatibilityTest {
         File frames=new File(base,"face-frames");ModelConverter.convert(src,null,frames,10000107,new ModelConverter.Options().variants(true),DECODE,log);manifest=Json.obj(Json.read(new File(frames,"model.json"),4L<<20),"model");
         ok(ModelManifest.read(frames).version==4&&Json.arr(manifest.get("textures"),"textures",1,1).size()==1&&log.toString().contains("脸部贴图：CitlaliFaceHeadDiffuse.dds"),"an animation keeps its face texture: "+log);
     }
+    private static String nativeChecker;   // tools/test_host.py passes build/host/core_test
     public static void main(String[] args)throws Exception{
-        File base=Files.createTempDirectory("gibox-compatibility-").toFile();
-        try{legacy(base);hohe(base);animation(base);face(base);System.out.println("Compatibility: PASS (face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
+        nativeChecker=args.length>0?args[0]:null;File base=Files.createTempDirectory("gibox-compatibility-").toFile();
+        try{legacy(base);hohe(base);animation(base);face(base);System.out.println("Compatibility: PASS (logic core data for animations, face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
         finally{ModelConverter.remove(base);}
     }
 }
