@@ -60,18 +60,23 @@ inline Spec animated(Spec s=Spec()){
   m.object["animation"]=std::move(animation);text=jsonText(m);};return s;
 }
 
-// model.json "logic" for an animated fixture: one draw "Part" (the game's IB hash aaaa0001), every field read from it,
-// and frame i recorded as drawing IB resource ibs[i]; logicIni drives $frame like the fixture's FrameLoop and binds
-// ResourceA / B / C for frames 0 / 1 / 2.
+// model.json "logic" (signature 2) for an animated fixture: one part "Part" (the game's IB hash aaaa0001), every
+// field read from its own draws, and frame i recorded as drawing the [Resource] of identity ids[i] with
+// drawindexed = auto under handling = skip; logicIni drives $frame like the fixture's FrameLoop and binds ResourceA /
+// B / C (identities file:a.ib / b.ib / c.ib) for frames 0 / 1 / 2.
 inline const char* logicIni="[Constants]\nglobal $frame = 0\nglobal $counter = 0\n[Present]\nif $counter % 0.5 == 0\n if $frame < 2\n  $frame = $frame + 1\n else\n  $frame = 0\n endif\nendif\npost $counter = $counter + 1\n"
  "[TextureOverridePart]\nhash = aaaa0001\nif $frame == 0\n ib = ResourceA\nelif $frame == 1\n ib = ResourceB\nelse\n ib = ResourceC\nendif\nhandling = skip\ndrawindexed = auto\n"
  "[ResourceA]\nfilename = a.ib\n[ResourceB]\nfilename = b.ib\n[ResourceC]\nfilename = c.ib\n";
-inline std::string logicSignature(const std::string& ib){return "ib="+ib+";position=-;blend=-;texcoord=-;ps-t0=-;ps-t1=-;ps-t2=-;";}
-inline std::string logicJson(const std::vector<std::string>& ibs,const std::string& file="logic/0.ini",const std::string& readPass="Part"){std::string frames,reads;
- for(size_t i=0;i<ibs.size();i++)frames+=(i?",":"")+std::string("{\"value\":")+std::to_string(i)+",\"draws\":{\"Part\":\""+logicSignature(ibs[i])+"\"}}";
- for(std::string f:{"ib","position","blend","texcoord","ps-t0","ps-t1","ps-t2"})reads+=(reads.empty()?"":",")+("\""+f+"\":[\""+readPass+"\",\""+(f=="ib"||f.rfind("ps-",0)==0?f:std::string("vb0"))+"\"]");
- return "{\"files\":[{\"namespace\":\"Mods\\\\Logic\\\\a.ini\",\"file\":\""+file+"\"}],\"passes\":[{\"name\":\"Part\",\"bindings\":{\"ib\":\"aaaa0001\"},\"checks\":[\"ib\"]}],"
-  "\"reads\":{\"Part\":{"+reads+"}},\"frames\":["+frames+"]}";}
+inline std::string logicDraw(const std::string& ib,const std::string& range="count=auto;start=0;base=0;"){return "kind=drawindexed;"+range+"ib="+ib+";position=-;blend=-;texcoord=-;ps-t0=-;ps-t1=-;ps-t2=-;|";}
+inline std::string logicSignature(const std::string& ib){return logicDraw(ib);}
+inline std::string logicResources(){return "{\"resource\\\\mods\\\\logic\\\\a.ini\\\\a\":\"file:a.ib\",\"resource\\\\mods\\\\logic\\\\a.ini\\\\b\":\"file:b.ib\",\"resource\\\\mods\\\\logic\\\\a.ini\\\\c\":\"file:c.ib\"}";}
+// sigs: each frame's whole signature for Part; logicJson(ids) records logicSignature(ids[i]).
+inline std::string logicJsonOf(const std::vector<std::string>& sigs,const std::string& file="logic/0.ini",const std::string& readPass="Part",const std::string& resources=logicResources()){std::string frames,fields;
+ for(size_t i=0;i<sigs.size();i++)frames+=(i?",":"")+std::string("{\"value\":")+std::to_string(i)+",\"draws\":{\"Part\":"+quote(sigs[i])+"}}";
+ for(std::string f:{"ib","position","blend","texcoord","ps-t0","ps-t1","ps-t2"})fields+=(fields.empty()?"":",")+("\""+f+"\":[\""+readPass+"\",\""+(f=="ib"||f.rfind("ps-",0)==0?f:std::string("vb0"))+"\"]");
+ return "{\"signature\":2,\"files\":[{\"namespace\":\"Mods\\\\Logic\\\\a.ini\",\"file\":\""+file+"\"}],\"resources\":"+resources+",\"passes\":[{\"name\":\"Part\",\"bindings\":{\"ib\":\"aaaa0001\"},\"checks\":[\"ib\"]}],"
+  "\"fields\":{\"Part\":{"+fields+"}},\"frames\":["+frames+"]}";}
+inline std::string logicJson(const std::vector<std::string>& ids,const std::string& file="logic/0.ini",const std::string& readPass="Part"){std::vector<std::string> sigs;for(auto& i:ids)sigs.push_back(logicSignature(i));return logicJsonOf(sigs,file,readPass);}
 inline Spec withLogic(Spec a,const std::string& logic){auto inner=a.edit;a.edit=[inner,logic](std::string& t){if(inner)inner(t);t.insert(t.rfind('}'),",\"logic\":"+logic);};return a;}
 inline void writeLogicModel(const std::string& dir,const Spec& a,const std::string& ini=logicIni){std::filesystem::create_directories(dir+"/logic");write(dir+"/logic/0.ini",ini);writeModel(dir,a);}
 

@@ -120,7 +120,7 @@ public final class ModelConverter {
             while(p<s.length()&&Character.isDigit(s.charAt(p)))p++;check(p>start,"不支持的表达式："+s);return Long.parseLong(s.substring(start,p));}
     }
     static final class Resource {File file;int stride;String format;Resource(File f,int s,String t){file=f;stride=s;format=t;} }
-    static final class Draw {String part,hash="";Map<String,String> bindings;int count,start;Draw(String p,Map<String,String>b,int c,int s){part=p;bindings=new LinkedHashMap<>(b);count=c;start=s;} }
+    static final class Draw {String part,hash="",issuer="";Map<String,String> bindings;int count,start;Draw(String p,Map<String,String>b,int c,int s){part=p;bindings=new LinkedHashMap<>(b);count=c;start=s;} }
     private static String[] kv(String l){int p=l.indexOf('=');return p<0?null:new String[]{lower(l.substring(0,p).trim()),l.substring(p+1).trim()};}
     private static boolean binding(String k){return k.equals("ib")||k.matches("vb[0-9]+")||k.matches("ps-t[0-9]+");}
     private static boolean unbound(String name){return name==null||name.equalsIgnoreCase("null");}
@@ -168,13 +168,15 @@ public final class ModelConverter {
         }
         bindings.put(key,value);
     }
+    /** A drawindexed argument: a number or an expression of the variables, as 3DMigoto takes them. */
+    private static int drawArgument(String text,Map<String,Integer> vars){long n=new Expr(text.trim(),vars).eval();check(n>=Integer.MIN_VALUE&&n<=Integer.MAX_VALUE,"drawindexed 参数越界："+text);return (int)n;}
     private static void commands(Ini ini,Section s,Map<String,Integer> vars,Map<String,Resource> rs,Map<String,String> bindings,List<Draw> draws,String part,int depth){
         check(depth<16,"CommandList 递归过深");for(String l:ini.active(s,vars)){String[] a=kv(l);if(a==null)continue;String k=a[0],v=a[1];if(binding(k))assign(rs,bindings,k,v);
             else if(k.equals("handling"))bindings.put(k,lower(v));
             else if(texFxArgument(k)){long n=new Expr(v,vars).eval();check(n>=0&&n<=Integer.MAX_VALUE,"TexFx 绘制参数越界");bindings.put(k,Long.toString(n));}
             else if(k.equals("run")){Section target=ini.run(v);if(target!=null)commands(ini,target,vars,rs,bindings,draws,part,depth+1);else if(nnFix(v))referenceNoNormal(bindings);
                 else if(texFxComponent(v)){componentDraw(bindings,draws,part);ini.compatibility.add("已还原 TexFx Component 的条件绘制区间；透明、发光和自定义描边使用手机原材质，未复刻 PC 着色器");}}
-            else if(k.equals("drawindexed")){String[] f=v.split(",");check(f.length<=3,"drawindexed 参数");int count=f[0].trim().equalsIgnoreCase("auto")?-1:Integer.parseInt(f[0].trim());int start=f.length>1?Integer.parseInt(f[1].trim()):0;check(f.length<3||Integer.parseInt(f[2].trim())==0,"仅支持 baseVertex=0");check(count>=-1,"drawindexed 数量");check(start>=0,"drawindexed 起始");if(count!=0)draws.add(new Draw(part,bindings,count,start));}
+            else if(k.equals("drawindexed")){String[] f=v.split(",");check(f.length<=3,"drawindexed 参数");int count=f[0].trim().equalsIgnoreCase("auto")?-1:drawArgument(f[0],vars);int start=f.length>1?drawArgument(f[1],vars):0;check(f.length<3||drawArgument(f[2],vars)==0,"仅支持 baseVertex=0");check(count>=-1,"drawindexed 数量");check(start>=0,"drawindexed 起始");if(count!=0){Draw d=new Draw(part,bindings,count,start);d.issuer=part;draws.add(d);}}
         }
     }
     private static Map<String,Resource> resources(Ini ini,File root,Map<String,Integer> vars)throws Exception {
@@ -228,7 +230,7 @@ public final class ModelConverter {
         }
     }
     private static List<Draw> drawCalls(Ini ini,Map<String,Integer> vars,Map<String,Resource> rs,Map<String,String> mapping){
-        List<Evaluated> sections=new ArrayList<>(),providers=new ArrayList<>();List<Draw> draws=new ArrayList<>();Set<String> autoHashes=new HashSet<>(),usedHashes=new HashSet<>();
+        List<Evaluated> sections=new ArrayList<>(),providers=new ArrayList<>();List<Draw> draws=new ArrayList<>();Set<String> autoHashes=new HashSet<>(),usedHashes=new HashSet<>();Map<String,String> autoIssuer=new HashMap<>();
         for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")){
             Evaluated e=new Evaluated(ini,s,vars,rs);sections.add(e);
             if(!e.declaresDraw&&!e.bindings.containsKey("ib")&&(e.bindings.containsKey(streamKey(0))||e.bindings.containsKey(streamKey(1))||e.bindings.containsKey(streamKey(2))))providers.add(e);
@@ -236,11 +238,11 @@ public final class ModelConverter {
                 if(d.bindings.containsKey("ib")){if(!unbound(d.bindings.get("ib"))){draws.add(d);usedHashes.add(e.hash);}continue;}
                 // Standard GIMI: a hash-level auto draw uses the IB of its
                 // match_first_index child section, whose resource is already split.
-                if(d.count==-1&&d.start==0&&!e.hash.isEmpty())autoHashes.add(e.hash);
+                if(d.count==-1&&d.start==0&&!e.hash.isEmpty()){autoHashes.add(e.hash);autoIssuer.putIfAbsent(e.hash,e.name);}
                 else throw new IllegalArgumentException("绘制区段 "+e.name+" 缺少 ib 资源");
             }
         }
-        for(Evaluated e:sections)if(!e.declaresDraw&&autoHashes.contains(e.hash)&&!unbound(e.bindings.get("ib"))){{Draw d=new Draw(e.name,e.bindings,-1,0);d.hash=e.hash;draws.add(d);}usedHashes.add(e.hash);}
+        for(Evaluated e:sections)if(!e.declaresDraw&&autoHashes.contains(e.hash)&&!unbound(e.bindings.get("ib"))){{Draw d=new Draw(e.name,e.bindings,-1,0);d.hash=e.hash;d.issuer=autoIssuer.get(e.hash);draws.add(d);}usedHashes.add(e.hash);}
         for(String hash:autoHashes)check(usedHashes.contains(hash),"drawindexed=auto 没有对应的 ib 资源，hash="+hash);
         for(Draw d:draws)if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part))))resolveStreams(d,providers,rs);
         return draws;
@@ -703,24 +705,80 @@ public final class ModelConverter {
             if(f.isDirectory())dirs.add(f);else if(n.endsWith(".ini"))files.add(f);}
         Comparator<File> order=(a,b)->lower(a.getName()).compareTo(lower(b.getName()));files.sort(order);dirs.sort(order);out.addAll(files);for(File d:dirs)logicFiles(d,out,depth+1);}
     private static final String[] LOGIC_FIELDS={"ib","position","blend","texcoord","ps-t0","ps-t1","ps-t2"};
-    private static String logicName(String v){return v==null?"-":lower(v.replaceFirst("(?i)^ref\\s+","").trim());}
-    /** What each draw uses in one frame, field by field, as the game's logic core reports it (resource section names). */
-    private static String logicSignature(Draw d){StringBuilder b=new StringBuilder();
-        for(String f:LOGIC_FIELDS){String v=f.equals("ib")||f.startsWith("ps-t")?d.bindings.get(f):d.bindings.get(streamKey(f.equals("position")?0:f.equals("blend")?1:2));b.append(f).append('=').append(logicName(v)).append(';');}
-        return b.toString();}
-    /** For the 3DMigoto logic core in the game (experiments.logicCore): the mod's INI files in logic/; the draws the
-     *  runtime replays every frame, in the GIMI layout of a character (the Position and Blend buffers are matched in the
-     *  skinning pass, the Texcoord buffer and the IB at each part's draw, vertex buffers checked before the IB); where
-     *  each field of a draw is read from; and per frame what each draw uses, by which the runtime picks the prebuilt
-     *  frame. Null, with the reason in the log, when that cannot be stated; the old frame loop is used then. */
+    /** The namespace XXMI gives an INI: Mods\<mod folder>\<path>, or what its "namespace =" line (before the first
+     *  section) says. */
+    private static String logicNamespace(File root,File f,String text)throws Exception{String ns="Mods\\"+root.getName()+"\\"+f.getCanonicalPath().substring(root.getCanonicalPath().length()+1).replace('/','\\');
+        for(String raw:text.split("\\r?\\n")){String l=raw.trim();if(l.isEmpty()||l.startsWith(";"))continue;if(l.startsWith("["))break;String[] a=kv(l);if(a!=null&&a[0].equals("namespace"))ns=a[1];}
+        return ns;}
+    /** Every [Resource] of the logic INIs by the key the logic core gives it (lowercase "resource\<namespace>\<name>"),
+     *  and what it is: the file it resolves to under the mod (relative to its INI, as 3DMigoto resolves it, letter case
+     *  matched like the conversion does) and the layout keys. Equal identities are the same resource to a renderer.
+     *  The game side has no access to the mod folder; it looks resources up here (logic_game.hpp), so both use one rule. */
+    private static Map<String,String> logicResources(File root,List<File> files,List<String> namespaces,List<String> texts)throws Exception{
+        Map<String,String> out=new TreeMap<>();String base=root.getCanonicalPath();
+        for(int i=0;i<files.size();i++){File f=files.get(i);String name=null;Map<String,String> kv=null;
+            List<String> lines=new ArrayList<>(Arrays.asList(texts.get(i).split("\\r?\\n")));lines.add("[]");
+            for(String raw:lines){String l=raw.trim();if(l.isEmpty()||l.startsWith(";"))continue;
+                if(l.startsWith("[")){
+                    if(name!=null){String key="resource\\"+lower(namespaces.get(i))+"\\"+lower(name.substring(8));if(!out.containsKey(key))out.put(key,logicIdentity(root,base,f,kv,key));}
+                    int e=l.indexOf(']');String n=(e<0?l.substring(1):l.substring(1,e)).trim();boolean res=lower(n).startsWith("resource")&&n.length()>8;name=res?n:null;kv=res?new LinkedHashMap<>():null;continue;}
+                if(kv!=null){String[] a=kv(l);if(a!=null&&!kv.containsKey(a[0]))kv.put(a[0],a[1].trim());}}}
+        return out;}
+    private static String logicIdentity(File root,String base,File ini,Map<String,String> kv,String key){String id;String file=kv.get("filename");
+        if(file!=null){try{String rel=ini.getParentFile().getCanonicalPath().substring(base.length());rel=(rel.startsWith(File.separator)?rel.substring(1)+"/":rel.isEmpty()?"":rel+"/")+file.replace('\\','/').replace("\"","").trim();
+                File r=inside(root,rel);id="file:"+lower(r.getCanonicalPath().substring(base.length()+1).replace('\\','/'));}
+            catch(Exception ex){id="outside:"+lower(file.trim());}}
+        else if(kv.containsKey("data")){String d=lower(kv.get("data"));id="data:"+(d.length()<=128?d:Integer.toHexString(d.hashCode())+":"+d.length());}
+        else id="empty:"+key;
+        for(String k:new String[]{"type","stride","format","width","height","depth","mips","array","byte_width"})if(kv.containsKey(k))id+=","+k+"="+lower(kv.get(k));
+        return id;}
+    /** What the logic core gives a binding as: the identity of the [Resource] it names (looked up like the core does:
+     *  the main INI's namespace first, then the global name), "null", or "-" when nothing is bound. Null: not known. */
+    private static String logicRef(String v,Map<String,String> table,String mainNs){if(v==null)return "-";String n=lower(v.replaceFirst("(?i)^ref(?:erence)?\\s+","").trim());if(n.equals("null"))return "null";
+        if(!n.startsWith("resource"))return null;String own="resource\\"+lower(mainNs)+"\\"+n.substring(8);String id=table.get(own);return id!=null?id:table.get(n);}
+    /** A TextureOverride section as 3DMigoto matches and orders it: hash, match_first_index, match_priority, name. */
+    static final class LogicSection {String name,hash="";Long first;int priority;}
+    private static List<LogicSection> logicSections(Ini ini,StringBuilder why){List<LogicSection> out=new ArrayList<>();
+        for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")){LogicSection x=new LogicSection();x.name=s.name.substring(15);
+            for(String l:s.lines){String[] a=kv(l);if(a==null)continue;
+                try{if(a[0].equals("hash"))x.hash=lower(a[1].trim());if(a[0].equals("match_first_index"))x.first=Long.parseLong(a[1].trim());if(a[0].equals("match_priority"))x.priority=Integer.parseInt(a[1].trim());}
+                catch(NumberFormatException ex){why.append(s.name).append(" 的 ").append(a[0]).append(" 不是数字");return null;}}
+            out.add(x);}
+        return out;}
+    /** One part's signature for one assignment, in the form the game side computes from the logic core's selection:
+     *  "hidden" (handling = skip, no draw of its own), "original" (the game draws it), or its draws in 3DMigoto's
+     *  order (match_priority, section name, command order), each with its range and the identity of every field,
+     *  "original|" first when the game's own draw is not skipped. Null with the reason when it cannot be stated. */
+    private static String logicSignature(List<Draw> draws,boolean skip,Map<String,LogicSection> byName,Map<String,String> table,String mainNs,StringBuilder why){
+        if(draws.isEmpty())return skip?"hidden":"original";
+        List<Draw> order=new ArrayList<>(draws);
+        order.sort((x,y)->{LogicSection a=byName.get(x.issuer),b=byName.get(y.issuer);int pa=a==null?0:a.priority,pb=b==null?0:b.priority;return pa!=pb?Integer.compare(pa,pb):("TextureOverride"+x.issuer).compareTo("TextureOverride"+y.issuer);});
+        StringBuilder out=new StringBuilder(skip?"":"original|");
+        for(Draw d:order){for(String k:d.bindings.keySet())if(k.startsWith("compat:")||k.startsWith("texture-role:")){why.append(d.part).append(" 用了 TexFx / ORFix 兼容转换");return null;}
+            out.append("kind=drawindexed;count=").append(d.count<0?"auto":Integer.toString(d.count)).append(";start=").append(d.start).append(";base=0;");
+            for(String f:LOGIC_FIELDS){String v=f.equals("ib")||f.startsWith("ps-t")?d.bindings.get(f):d.bindings.get(streamKey(f.equals("position")?0:f.equals("blend")?1:2));
+                String id=logicRef(v,table,mainNs);if(id==null){why.append(d.part).append(" 的 ").append(f).append(" = ").append(v).append(" 不是本 MOD 的 [Resource]");return null;}
+                out.append(f).append('=').append(id).append(';');}
+            out.append('|');}
+        return out.toString();}
+    /** For the 3DMigoto logic core in the game (experiments.logicCore): the mod's INI files in logic/ with the
+     *  identity of every [Resource]; the draws the runtime replays every frame, in the GIMI layout of a character (the
+     *  Position and Blend buffers are matched in the skinning pass, the Texcoord buffer and the IB at each part's
+     *  draw, vertex buffers checked before the IB); where each field of a part's draws is read; and per frame each
+     *  part's signature (logicSignature), by which the runtime picks the prebuilt frame. Null, with the reason in the
+     *  log, when that cannot be stated; the old frame loop plays the model then. */
     private static Map<String,Object> logic(Ini ini,File src,Animation an,Map<String,String> mapping,File out,StringBuilder log)throws Exception{
-        List<File> files=new ArrayList<>();logicFiles(src,files,0);
+        List<File> files=new ArrayList<>();logicFiles(src,files,0);StringBuilder why=new StringBuilder();
         if(files.isEmpty()||files.size()>64){log.append("逻辑核心数据：INI 文件数 ").append(files.size()).append("，不写入\n");return null;}
-        File dir=new File(out,"logic");check(dir.mkdirs(),"无法创建 logic 目录");List<Object> list=new ArrayList<>();long total=0;String root=src.getCanonicalPath();
+        File dir=new File(out,"logic");check(dir.mkdirs(),"无法创建 logic 目录");List<Object> list=new ArrayList<>();long total=0;List<String> namespaces=new ArrayList<>(),texts=new ArrayList<>();String mainNs=null;
         for(int i=0;i<files.size();i++){File f=files.get(i);String body=ModConfig.source(f);total+=body.length();
             if(total>8L*1024*1024){log.append("逻辑核心数据：INI 合计超过 8 MiB，不写入\n");return null;}
-            write(dir,i+".ini",text(body));String rel=f.getCanonicalPath().substring(root.length()+1).replace('/','\\');
-            list.add(Json.of("namespace","Mods\\"+src.getName()+"\\"+rel,"file","logic/"+i+".ini"));}
+            write(dir,i+".ini",text(body));String ns=logicNamespace(src,f,body);namespaces.add(ns);texts.add(body);if(f.getCanonicalFile().equals(ini.file.getCanonicalFile()))mainNs=ns;
+            list.add(Json.of("namespace",ns,"file","logic/"+i+".ini"));}
+        if(mainNs==null){log.append("逻辑核心数据：主 INI 不在 XXMI 会加载的文件里，不写入\n");return null;}
+        Map<String,String> table=logicResources(src,files,namespaces,texts);
+        List<LogicSection> sections=logicSections(ini,why);if(sections==null){log.append("逻辑核心数据：").append(why).append("，不写入\n");return null;}
+        Map<String,LogicSection> byName=new HashMap<>();for(LogicSection x:sections)byName.put(x.name,x);
         Map<String,Integer> vars0=new LinkedHashMap<>(ini.vars);vars0.put(an.variable,an.values.get(0));Map<String,Resource> rs0=resources(ini,src,vars0);
         // The vertex-buffer sections that serve every part (no draw, no IB): their hash and the slot they bind.
         String[] hash=new String[3],slot=new String[3];
@@ -731,33 +789,37 @@ public final class ModelConverter {
                 if(at==null)continue;
                 if(hash[k]!=null&&!(hash[k].equals(e.hash)&&slot[k].equals(at))){log.append("逻辑核心数据：").append(streamName(k)).append(" 顶点流由多个段提供，不写入\n");return null;}
                 hash[k]=e.hash;slot[k]=at;}}
-        Map<String,Long> firstIndex=new HashMap<>();
-        for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride"))for(String l:s.lines){String[] a=kv(l);
-            if(a!=null&&a[0].equals("match_first_index"))try{firstIndex.put(lower(s.name.substring(15)),Long.parseLong(a[1].trim()));}catch(NumberFormatException ex){log.append("逻辑核心数据：").append(s.name).append(" 的 match_first_index 不是数字，不写入\n");return null;}}
-        List<Object> passes=new ArrayList<>();Map<String,Object> reads=new LinkedHashMap<>();
+        // Every assignment's draws; the parts are the sections that draw in any of them.
+        List<Map<String,Integer>> assignments=new ArrayList<>();for(int v:an.values){Map<String,Integer> vars=new LinkedHashMap<>(ini.vars);vars.put(an.variable,v);assignments.add(vars);}
+        List<List<Draw>> drawn=new ArrayList<>();Map<String,Draw> firstDraw=new LinkedHashMap<>();
+        for(Map<String,Integer> vars:assignments){List<Draw> ds=new ArrayList<>();for(Draw d:drawCalls(ini,vars,resources(ini,src,vars),mapping))if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part)))){ds.add(d);firstDraw.putIfAbsent(d.part,d);}drawn.add(ds);}
+        List<Object> passes=new ArrayList<>();Map<String,Object> fields=new LinkedHashMap<>();Set<String> keys=new HashSet<>();
         if(hash[0]!=null||hash[1]!=null){Map<String,Object> b=new LinkedHashMap<>();List<Object> checks=new ArrayList<>();
             for(int k=0;k<2;k++)if(hash[k]!=null){if(b.containsKey(slot[k])){log.append("逻辑核心数据：Position 和 Blend 在同一槽位，不写入\n");return null;}b.put(slot[k],hash[k]);checks.add(slot[k]);}
             passes.add(Json.of("name","skin","bindings",b,"checks",checks));}
-        Set<String> parts=new LinkedHashSet<>();
-        for(Draw d:drawCalls(ini,vars0,rs0,mapping)){if("skip".equalsIgnoreCase(mapping.get(lower(d.part))))continue;
-            if(!parts.add(d.part)){log.append("逻辑核心数据：").append(d.part).append(" 一帧里绘制多次，不写入\n");return null;}
+        for(Draw d:firstDraw.values()){LogicSection own=byName.get(d.part);Long first=own==null?null:own.first;
+            if(!keys.add(d.hash+"|"+first)){log.append("逻辑核心数据：").append(d.part).append(" 和另一个部件的 hash / match_first_index 相同，无法分开，不写入\n");return null;}
             Map<String,Object> b=new LinkedHashMap<>();b.put("ib",d.hash);if(hash[2]!=null)b.put(slot[2],hash[2]);
-            Map<String,Object> pass=Json.of("name",d.part,"bindings",b,"checks",Arrays.asList("vb0","vb1","vb2","ib"));Long first=firstIndex.get(lower(d.part));
-            if(first!=null)pass.put("call",Json.of("first_index",first));passes.add(pass);
+            Map<String,Object> pass=Json.of("name",d.part,"bindings",b,"checks",Arrays.asList("vb0","vb1","vb2","ib"));if(first!=null)pass.put("call",Json.of("first_index",first));passes.add(pass);
             Map<String,Object> r=new LinkedHashMap<>();
             for(String f:LOGIC_FIELDS){String from=d.part,at=f;
                 if(!f.equals("ib")&&!f.startsWith("ps-t")){int k=f.equals("position")?0:f.equals("blend")?1:2;String v=d.bindings.get(streamKey(k));at=null;
                     for(Map.Entry<String,String> x:d.bindings.entrySet())if(x.getKey().matches("vb[0-9]+")&&v!=null&&v.equals(x.getValue()))at=x.getKey();   // its own binding
                     if(at==null){if(hash[k]==null){log.append("逻辑核心数据：").append(d.part).append(" 的 ").append(streamName(k)).append(" 来源不明，不写入\n");return null;}at=slot[k];if(k<2)from="skin";}}
                 r.put(f,Arrays.asList(from,at));}
-            reads.put(d.part,r);}
+            fields.put(d.part,r);}
+        // Whether a part's own draw is skipped: any section 3DMigoto matches for it (same hash, its first index or none) skips.
         List<Object> frames=new ArrayList<>();
-        for(int v:an.values){Map<String,Integer> vars=new LinkedHashMap<>(ini.vars);vars.put(an.variable,v);Map<String,Object> sig=new LinkedHashMap<>();
-            for(Draw d:drawCalls(ini,vars,resources(ini,src,vars),mapping))if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part))))sig.put(d.part,logicSignature(d));
-            if(!sig.keySet().equals(parts)){log.append("逻辑核心数据：帧 ").append(v).append(" 的绘制部件和第一帧不同，不写入\n");return null;}
-            frames.add(Json.of("value",v,"draws",sig));}
-        log.append("逻辑核心数据：").append(files.size()).append(" 个 INI、").append(passes.size()).append(" 次绘制、").append(frames.size()).append(" 帧的资源记录（实验开关“逻辑核心驱动”使用；关闭时仍按原帧循环）\n");
-        return Json.of("files",list,"passes",passes,"reads",reads,"frames",frames);}
+        for(int i=0;i<assignments.size();i++){Map<String,Integer> vars=assignments.get(i);Map<String,Resource> rs=resources(ini,src,vars);Map<String,Object> sig=new LinkedHashMap<>();
+            for(Draw part:firstDraw.values()){LogicSection own=byName.get(part.part);Long first=own==null?null:own.first;boolean skip=false;
+                for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")){LogicSection x=byName.get(s.name.substring(15));
+                    if(x==null||!x.hash.equals(part.hash)||(x.first!=null&&!x.first.equals(first)))continue;skip|="skip".equals(new Evaluated(ini,s,vars,rs).bindings.get("handling"));}
+                List<Draw> mine=new ArrayList<>();for(Draw d:drawn.get(i))if(d.part.equals(part.part))mine.add(d);
+                String text=logicSignature(mine,skip,byName,table,mainNs,why);if(text==null){log.append("逻辑核心数据：").append(why).append("，不写入\n");return null;}
+                sig.put(part.part,text);}
+            frames.add(Json.of("value",an.values.get(i),"draws",sig));}
+        log.append("逻辑核心数据：").append(files.size()).append(" 个 INI、").append(table.size()).append(" 个资源、").append(passes.size()).append(" 次绘制、").append(frames.size()).append(" 帧的资源记录（实验开关“逻辑核心驱动”使用；关闭时仍按原帧循环）\n");
+        return Json.of("signature",2,"files",list,"resources",table,"passes",passes,"fields",fields,"frames",frames);}
     private static File convertAnimation(Ini ini,File src,List<Bones> bones,Map<String,String> mapping,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log,Animation animation)throws Exception {
         if(o.animationBoneFallback){for(Bones bone:bones)check(!bone.synthetic,"动画骨骼兼容需要完整骨骼库或本 MOD 已保存的完整骨骼记录，不能用未知的索引上限判断哪些关联可忽略");
             for(Section section:ini.sections.values()){String n=lower(section.name);check(!n.startsWith("customshader")&&!n.startsWith("shaderoverride"),"动画骨骼兼容暂不支持自定义着色器；需要先实现其矩阵资源和蒙皮规则");

@@ -974,7 +974,7 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
  // match what its draw selects; a selection no frame has keeps the frame shown; no match at the start keeps FrameLoop.
  {auto mediaL=root+"/logic-media",sharedLg=mediaL+"/"+pkg+"/GIBox";Spec source;source.positions={0,0,0,1,0,0,0,1,0};
   auto model=[&](const std::string& name,const std::vector<std::string>& ibs){fixture::writeLogicModel(sharedLg+"/models/"+name,fixture::withLogic(fixture::animated(source),fixture::logicJson(ibs)));};
-  model("Logic",{"resourcea","resourceb","resourcec"});fixture::writeModel(sharedLg+"/models/Plain",fixture::animated(source));model("Miss",{"resourcea","resourceb","resourcex"});model("Early",{"resourcex","resourceb","resourcec"});
+  model("Logic",{"file:a.ib","file:b.ib","file:c.ib"});fixture::writeModel(sharedLg+"/models/Plain",fixture::animated(source));model("Miss",{"file:a.ib","file:b.ib","file:x.ib"});model("Early",{"file:x.ib","file:b.ib","file:c.ib"});
   Ptr renderer=f->renderer(original);f->world(renderer);f->scene={renderer};int revision=0;
   auto control=[&](const std::string& selected,bool logic){write(sharedLg+"/control.json","{\"enabled\":true,\"selected\":[\""+selected+"\"],\"logLevel\":\"debug\",\"revision\":"+std::to_string(++revision)+",\"experiments\":{\"animationMode\":0,\"logicCore\":"+(logic?"true":"false")+"}}");};
   auto log=[&]{return text(sharedLg+"/GIBox Log.txt");};
@@ -988,7 +988,7 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   control("Logic",false);now+=200;for(int n=0;n<6;n++)logic.tick(now++);assert(log().find("logic-off Logic: FrameLoop from frame value")!=std::string::npos&&log().find("logicCore=off")!=std::string::npos&&!values("Logic","frameloop").empty());   // the frame log stops after 32 updates
   control("Miss",true);now+=200;for(int n=0;n<25;n++){logic.tick(now);now+=120;}for(int n=0;n<8;n++)logic.tick(now++);
   auto missed=values("Miss","logic");assert(missed.size()>=4);for(int v:missed)assert(v!=2);   // frame 2's resources are not the ones selected: 1 stays
-  assert(log().find("logic-miss Miss: the draws select resources no prebuilt frame has; frame value 1 stays. Part: ib=resourcec;")!=std::string::npos);
+  assert(log().find("logic-miss Miss: the draws select what no prebuilt frame has; frame value 1 stays. closest prebuilt frame index 0 (0 of 1 parts equal); Part: prebuilt "+fixture::logicSignature("file:a.ib")+" selected "+fixture::logicSignature("file:c.ib"))!=std::string::npos);
   control("Early",true);now+=200;for(int n=0;n<25;n++){logic.tick(now);now+=120;}for(int n=0;n<6;n++)logic.tick(now++);
   assert(log().find("logic-error Early: what the draws select after [Constants] matches no prebuilt frame; FrameLoop kept.")!=std::string::npos&&values("Early","frameloop").size()>=4&&values("Early","logic").empty());
   control("Plain",true);now+=200;for(int n=0;n<25;n++){logic.tick(now);now+=120;}for(int n=0;n<6;n++)logic.tick(now++);

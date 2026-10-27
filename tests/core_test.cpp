@@ -176,16 +176,51 @@ int main(int argc,char**argv){
   auto logicRefused=[&](const std::string& name,Spec spec,const char* why){std::filesystem::create_directories(root+"/"+name+"/logic");write(root+"/"+name+"/logic/0.ini",std::string(fixture::logicIni));
    std::string message;fixture::writeModel(root+"/"+name,spec);try{loadModelFile(root+"/"+name);}catch(const std::exception& ex){message=ex.what();}
    if(message.find(why)==std::string::npos){std::cerr<<"expected \""<<why<<"\", got \""<<message<<"\"\n";assert(false);}};
-  auto ibs=std::vector<std::string>{"resourcea","resourceb","resourcec"};
+  auto ibs=std::vector<std::string>{"file:a.ib","file:b.ib","file:c.ib"};
   logicRefused("logic-static",fixture::withLogic(Spec(),fixture::logicJson(ibs)),"logic: only for animation models");
   logicRefused("logic-path",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/../x.ini")),"logic: file name");
   logicRefused("logic-missing",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/7.ini")),"Cannot read");
   logicRefused("logic-pass",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/0.ini","Skin")),"logic: Part ib");
-  logicRefused("logic-frames",fixture::withLogic(fixture::animated(),fixture::logicJson({"resourcea","resourceb"})),"Invalid \"frames\" list");
+  logicRefused("logic-frames",fixture::withLogic(fixture::animated(),fixture::logicJson({"file:a.ib","file:b.ib"})),"Invalid \"frames\" list");
   {fixture::writeLogicModel(root+"/logic-ok",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs)));auto m=loadModelFile(root+"/logic-ok");
    assert(m->logic.present()&&m->logic.files[0].text==fixture::logicIni&&m->logic.passes[0].bindings.at("ib")==0xaaaa0001u&&m->logic.frames.size()==3);
-   LogicDriver d(m->logic);assert(d.frame()==0&&d.signature("Part")==fixture::logicSignature("resourcea"));
+   LogicDriver d(m->logic);assert(d.frame()==0&&d.signature("Part")==fixture::logicSignature("file:a.ib"));
    FrameLoop loop(m->animation);loop.tick(0);d.tick(0,0);for(uint32_t t=1;t<=12;t++){loop.tick(t);d.tick(t,t/60.0);assert(d.frame()==int(loop.current));}}
+  // Signature 2: what a part's draws select, matched to prebuilt frames by resource identity, range, order and state.
+  {const std::string cycle="[Constants]\nglobal $frame = 0\nglobal $counter = 0\nglobal $n = 6\n[Present]\nif $counter % 0.5 == 0\n if $frame < 2\n  $frame = $frame + 1\n else\n  $frame = 0\n endif\nendif\npost $counter = $counter + 1\n";
+   // inis: (namespace, text); resources / passes / fields: JSON; frames: per frame, part -> signature.
+   auto model=[&](const std::string& name,const std::vector<std::pair<std::string,std::string>>& inis,const std::string& resources,const std::string& passes,const std::string& fields,const std::vector<std::map<std::string,std::string>>& frames){
+    std::string dir=root+"/"+name,files,fr;std::filesystem::create_directories(dir+"/logic");
+    for(size_t i=0;i<inis.size();i++){write(dir+"/logic/"+std::to_string(i)+".ini",inis[i].second);files+=(i?",":"")+std::string("{\"namespace\":")+quote(inis[i].first)+",\"file\":\"logic/"+std::to_string(i)+".ini\"}";}
+    for(size_t i=0;i<frames.size();i++){std::string d;for(auto& kv:frames[i])d+=(d.empty()?"":",")+quote(kv.first)+":"+quote(kv.second);fr+=(i?",":"")+std::string("{\"value\":")+std::to_string(i)+",\"draws\":{"+d+"}}";}
+    fixture::writeModel(dir,fixture::withLogic(fixture::animated(),"{\"signature\":2,\"files\":["+files+"],\"resources\":"+resources+",\"passes\":"+passes+",\"fields\":"+fields+",\"frames\":["+fr+"]}"));
+    return loadModelFile(dir);};
+   auto own=[](const std::string& part){std::string f;for(std::string x:{"ib","position","blend","texcoord","ps-t0","ps-t1","ps-t2"})f+=(f.empty()?"":",")+("\""+x+"\":[\""+part+"\",\""+(x=="ib"||x.rfind("ps-",0)==0?x:std::string("vb0"))+"\"]");return "{"+f+"}";};
+   auto pass=[](const std::string& part,const std::string& hash){return "{\"name\":\""+part+"\",\"bindings\":{\"ib\":\""+hash+"\"},\"checks\":[\"ib\"]}";};
+   auto follows=[&](LogicDriver& d,const ms::AnimationSpec& a){FrameLoop loop(a);loop.tick(0);d.tick(0,0);if(d.frame()!=0)return false;for(uint32_t t=1;t<=9;t++){loop.tick(t);d.tick(t,t/60.0);if(d.frame()!=int(loop.current))return false;}return true;};
+   // The same [ResourceA] name in two INIs: each binding is its own file's, by namespace.
+   auto two=model("logic-namespaces",{{"Mods\\Two\\a.ini",cycle+"[TextureOverridePart]\nhash = aaaa0001\nhandling = skip\nib = ResourceA\ndrawindexed = auto\n[ResourceA]\nfilename = a.ib\n"},
+     {"Mods\\Two\\b.ini","[TextureOverrideOther]\nhash = bbbb0001\nhandling = skip\nib = ResourceA\ndrawindexed = auto\n[ResourceA]\nfilename = other.ib\n"}},
+    "{\"resource\\\\mods\\\\two\\\\a.ini\\\\a\":\"file:a.ib\",\"resource\\\\mods\\\\two\\\\b.ini\\\\a\":\"file:other.ib\"}","["+pass("Part","aaaa0001")+","+pass("Other","bbbb0001")+"]",
+    "{\"Part\":"+own("Part")+",\"Other\":"+own("Other")+"}",std::vector<std::map<std::string,std::string>>(3,{{"Part",fixture::logicDraw("file:a.ib")},{"Other",fixture::logicDraw("file:other.ib")}}));
+   {LogicDriver d(two->logic);assert(d.frame()==0&&d.signature("Other")==fixture::logicDraw("file:other.ib")&&d.unknown.empty());}
+   // One part, two drawindexed: their order and ranges count; a draw count read straight from a variable.
+   std::string ranges=cycle+"[TextureOverridePart]\nhash = aaaa0001\nhandling = skip\nib = ResourceA\nif $frame == 0\n drawindexed = 3,0,0\n drawindexed = 3,3,0\nelif $frame == 1\n drawindexed = 3,3,0\n drawindexed = 3,0,0\nelse\n drawindexed = $n,0,0\nendif\n[ResourceA]\nfilename = a.ib\n";
+   auto r0=fixture::logicDraw("file:a.ib","count=3;start=0;base=0;"),r3=fixture::logicDraw("file:a.ib","count=3;start=3;base=0;"),r6=fixture::logicDraw("file:a.ib","count=6;start=0;base=0;");
+   auto table="{\"resource\\\\mods\\\\logic\\\\a.ini\\\\a\":\"file:a.ib\"}";
+   auto ordered=model("logic-ranges",{{"Mods\\Logic\\a.ini",ranges}},table,"["+pass("Part","aaaa0001")+"]","{\"Part\":"+own("Part")+"}",{{{"Part",r0+r3}},{{"Part",r3+r0}},{{"Part",r6}}});
+   {LogicDriver d(ordered->logic);assert(follows(d,ordered->animation)&&d.stats.misses==0);}
+   // Recorded as one order only: the other order is a different selection, not the same draws.
+   auto unordered=model("logic-order",{{"Mods\\Logic\\a.ini",ranges}},table,"["+pass("Part","aaaa0001")+"]","{\"Part\":"+own("Part")+"}",{{{"Part",r0+r3}},{{"Part",r0+r3}},{{"Part",r6}}});
+   {LogicDriver d(unordered->logic);d.tick(0,0);d.tick(1,1/60.0);assert(d.frame()==0&&d.stats.misses==1&&d.miss.find("selected "+r3+r0)!=std::string::npos);}
+   // Hidden (skipped, nothing drawn), the game's own draw, and a replacement are three selections.
+   std::string states=cycle+"[TextureOverridePart]\nhash = aaaa0001\nif $frame == 0\n handling = skip\nelif $frame == 2\n handling = skip\n ib = ResourceA\n drawindexed = auto\nendif\n[ResourceA]\nfilename = a.ib\n";
+   auto shown=model("logic-states",{{"Mods\\Logic\\a.ini",states}},table,"["+pass("Part","aaaa0001")+"]","{\"Part\":"+own("Part")+"}",{{{"Part","hidden"}},{{"Part","original"}},{{"Part",fixture::logicDraw("file:a.ib")}}});
+   {LogicDriver d(shown->logic);assert(follows(d,shown->animation)&&d.stats.misses==0);}
+   // Logic data of 0.7.34 loads (the model is fine) and is refused by the driver, with the reason.
+   fixture::writeModel(root+"/logic-old",fixture::withLogic(fixture::animated(),"{\"files\":[{\"namespace\":\"Mods\\\\Logic\\\\a.ini\",\"file\":\"logic/0.ini\"}],\"passes\":[],\"reads\":{},\"frames\":[]}"));
+   auto old=loadModelFile(root+"/logic-old");std::string why;try{LogicDriver d(old->logic);}catch(const std::exception& ex){why=ex.what();}
+   assert(old->logic.present()&&why.find("logic data of 0.7.34")!=std::string::npos);}
   refused(root+"/swap-original",[](Spec& x){x.edit=[](std::string& j){replaceIn(j,",\"parts\":[",",\"textures\":[{\"renderer\":\"Face\",\"material\":\"Material0\"}],\"parts\":[");};},"Texture swap material");}
  std::filesystem::remove_all(root);
  std::cout<<"Native core: PASS (GIBox model format: manifest, model.bin views, CRC-32, value/range/reference checks, variants, on-demand textures, learned.json, skeleton.json; bones, JSON, ELF notes, DDS, targets)\n";

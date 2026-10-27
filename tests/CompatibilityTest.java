@@ -102,10 +102,12 @@ public final class CompatibilityTest {
         ok("Mods\\animation\\Citlali.ini".equals(file.get("namespace"))&&"logic/0.ini".equals(file.get("file"))&&new String(Files.readAllBytes(new File(out,"logic/0.ini").toPath()),"UTF-8").equals(text),"the mod's INI is shipped as XXMI loads it: "+file);
         List<Object> passes=Json.arr(logic.get("passes"),"passes",3,3);ok("skin".equals(Json.obj(passes.get(0),"pass").get("name"))&&Json.obj(Json.obj(passes.get(0),"pass").get("bindings"),"b").equals(Json.of("vb0","11111111","vb1","22222222")),"the skinning pass: "+passes.get(0));
         Map<String,Object> body=Json.obj(passes.get(2),"pass");ok("CitlaliBody".equals(body.get("name"))&&((Number)Json.obj(body.get("call"),"call").get("first_index")).doubleValue()==3&&Json.obj(body.get("bindings"),"b").equals(Json.of("ib","44444444","vb1","33333333")),"a part draw: "+body);
-        Map<String,Object> reads=Json.obj(Json.obj(logic.get("reads"),"reads").get("CitlaliHead"),"head");ok(reads.get("position").equals(Arrays.asList("skin","vb0"))&&reads.get("texcoord").equals(Arrays.asList("CitlaliHead","vb1")),"fields are read where GIMI binds them: "+reads);
+        Map<String,Object> reads=Json.obj(Json.obj(logic.get("fields"),"fields").get("CitlaliHead"),"head");ok(reads.get("position").equals(Arrays.asList("skin","vb0"))&&reads.get("texcoord").equals(Arrays.asList("CitlaliHead","vb1")),"fields are read where GIMI binds them: "+reads);
         List<Object> records=Json.arr(logic.get("frames"),"frames",3,3);String head1=(String)Json.obj(Json.obj(records.get(1),"frame").get("draws"),"draws").get("CitlaliHead");
-        ok(head1.equals("ib=resourcecitlaliheadib;position=resourcenextposition;blend=resourcecitlaliblend;texcoord=resourcecitlalitexcoord;ps-t0=resourcecitlaliheaddiffuse;ps-t1=-;ps-t2=-;"),"frame 1 records its own position buffer: "+head1);
-        ok(log.toString().contains("逻辑核心数据：1 个 INI、3 次绘制、3 帧"),"the conversion log names the logic data: "+log);
+        String head="file:citlalihead.ib,type=buffer,format=dxgi_format_r32_uint",tex="file:citlalitexcoord.buf,type=buffer,stride=20",blend="file:citlaliblend.buf,type=buffer,stride=32";
+        ok(head1.equals("kind=drawindexed;count=auto;start=0;base=0;ib="+head+";position=file:next.buf,stride=40;blend="+blend+";texcoord="+tex+";ps-t0=file:citlaliheaddiffuse.dds;ps-t1=-;ps-t2=-;|"),"frame 1 records its own position buffer: "+head1);
+        ok(Json.obj(logic.get("resources"),"resources").get("resource\\mods\\animation\\citlali.ini\\citlaliheadib").equals(head)&&Integer.valueOf(2).equals(((Number)logic.get("signature")).intValue()),"resources by the core's key and identity: "+logic.get("resources"));
+        ok(log.toString().contains("逻辑核心数据：1 个 INI、8 个资源、3 次绘制、3 帧"),"the conversion log names the logic data: "+log);
         if(nativeChecker!=null){Process check=new ProcessBuilder(nativeChecker,out.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"the native loader reads the logic data and its driver follows FrameLoop");}
         Files.delete(new File(src,"DISABLED old.ini").toPath());
         ok(ModelManifest.read(out).version==4&&ModelManifest.read(out).vars.isEmpty()&&log.toString().contains("完整转换"),"animation must not become a variant union");
@@ -183,10 +185,24 @@ public final class CompatibilityTest {
         File frames=new File(base,"face-frames");ModelConverter.convert(src,null,frames,10000107,new ModelConverter.Options().variants(true),DECODE,log);manifest=Json.obj(Json.read(new File(frames,"model.json"),4L<<20),"model");
         ok(ModelManifest.read(frames).version==4&&Json.arr(manifest.get("textures"),"textures",1,1).size()==1&&log.toString().contains("脸部贴图：CitlaliFaceHeadDiffuse.dds"),"an animation keeps its face texture: "+log);
     }
+    /** The logic data of an INI-only mod (no geometry is built): tests/fixtures/logic-signature. A part with two
+     *  drawindexed whose ranges come from a variable, another INI with a [Resource] of the same name, a DISABLED INI. */
+    @SuppressWarnings("unchecked")
+    private static void logicSignature(File base)throws Exception{File src=new File("tests/fixtures/logic-signature").getCanonicalFile(),out=new File(base,"logic-signature");out.mkdirs();
+        ModelConverter.Ini ini=new ModelConverter.Ini(src,new File(src,"Hero.ini"));ModelConverter.Animation an=ModelConverter.Animation.parse(ini);ok(an!=null,"the fixture is a Present loop");
+        java.lang.reflect.Method logic=ModelConverter.class.getDeclaredMethod("logic",ModelConverter.Ini.class,File.class,ModelConverter.Animation.class,Map.class,File.class,StringBuilder.class);logic.setAccessible(true);
+        StringBuilder log=new StringBuilder();Map<String,Object> data=(Map<String,Object>)logic.invoke(null,ini,src,an,new HashMap<String,String>(),out,log);ok(data!=null,"logic data: "+log);
+        List<Object> files=Json.arr(data.get("files"),"files",2,2);ok(Json.obj(files.get(0),"f").get("namespace").equals("Mods\\logic-signature\\extra.ini")&&Json.obj(files.get(1),"f").get("namespace").equals("Mods\\logic-signature\\Hero.ini"),"both INIs, DISABLED skipped: "+files);
+        Map<String,Object> res=Json.obj(data.get("resources"),"resources");String head="file:head.ib,type=buffer,format=dxgi_format_r32_uint",body="file:body.ib,type=buffer,format=dxgi_format_r32_uint";
+        ok(head.equals(res.get("resource\\mods\\logic-signature\\hero.ini\\heroheadib"))&&"file:other.ib,type=buffer,format=dxgi_format_r32_uint".equals(res.get("resource\\mods\\logic-signature\\extra.ini\\heroheadib"))&&"file:textures/diffuse.dds".equals(res.get("resource\\mods\\logic-signature\\hero.ini\\herodiffuse"))&&res.size()==7,"one key per INI, same name kept apart: "+res);
+        List<Object> frames=Json.arr(data.get("frames"),"frames",2,2);String common=";position=file:position.buf,type=buffer,stride=40;blend=file:blend.buf,type=buffer,stride=32;texcoord=file:texcoord.buf,type=buffer,stride=20;ps-t0=file:textures/diffuse.dds;ps-t1=-;ps-t2=-;|";
+        String body0=(String)Json.obj(Json.obj(frames.get(0),"frame").get("draws"),"d").get("HeroBody"),body1=(String)Json.obj(Json.obj(frames.get(1),"frame").get("draws"),"d").get("HeroBody"),head0=(String)Json.obj(Json.obj(frames.get(0),"frame").get("draws"),"d").get("HeroHead");
+        ok(body0.equals("kind=drawindexed;count=3;start=0;base=0;ib="+body+common+"kind=drawindexed;count=3;start=3;base=0;ib="+body+common),"two draws, ranges from $half, in command order: "+body0);
+        ok(body1.equals("kind=drawindexed;count=6;start=0;base=0;ib="+body+common)&&head0.equals("kind=drawindexed;count=auto;start=0;base=0;ib="+head+common),"frame 1 and the auto draw: "+body1+" / "+head0);}
     private static String nativeChecker;   // tools/test_host.py passes build/host/core_test
     public static void main(String[] args)throws Exception{
         nativeChecker=args.length>0?args[0]:null;File base=Files.createTempDirectory("gibox-compatibility-").toFile();
-        try{legacy(base);hohe(base);animation(base);face(base);System.out.println("Compatibility: PASS (logic core data for animations, face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
+        try{legacy(base);hohe(base);animation(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (logic core data for animations, face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
         finally{ModelConverter.remove(base);}
     }
 }

@@ -37,14 +37,14 @@ run([java,'-cp',classes,'com.gibox.tool.GimiPatternsTest',patterns])
 run([java,'-cp',classes,'com.gibox.tool.CompatibilityTest',out/'core_test'])
 # The 3DMigoto logic core next to the old converter and FrameLoop: the committed fixture always; a real MOD
 # (not in the repository) when GIBOX_PARITY_MOD=<folder>::<main ini> is set.
-parity=[(root/'tests/fixtures/present-loop','Anim.ini')]
-if os.environ.get('GIBOX_PARITY_MOD'):folder,_,main=os.environ['GIBOX_PARITY_MOD'].partition('::');parity.append((Path(folder),main))
-for folder,main in parity:
+parity=[(root/'tests/fixtures/present-loop','Anim.ini',''),(root/'tests/fixtures/logic-signature','Hero.ini','driver-only')]
+if os.environ.get('GIBOX_PARITY_MOD'):folder,_,main=os.environ['GIBOX_PARITY_MOD'].partition('::');parity.append((Path(folder),main,''))
+for folder,main,mode in parity:
     dump=out/('legacy-'+folder.name+'.txt')
     logic=out/('logic-'+folder.name)
     if logic.exists():shutil.rmtree(logic)
     run([java,'-cp',classes,'com.gibox.tool.LegacyAnimationDump',folder,main,dump,logic])
-    run([out/'migoto_parity',folder,main,dump,'300',logic])
+    run([out/'migoto_parity',folder,main,dump,'300',logic,*([mode] if mode else [])])
 importer=out/'importer'
 if importer.exists():shutil.rmtree(importer)
 importer.mkdir(parents=True)
