@@ -10,6 +10,11 @@
 #pragma once
 #include "migoto/adapters.hpp"
 #include "model.hpp"
+#include <algorithm>
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
 #include <chrono>
 
 namespace ms {

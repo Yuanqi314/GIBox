@@ -9,11 +9,14 @@
 // & > ^ > | > && > ||.
 #pragma once
 #include "ini.hpp"
+#include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <stdexcept>

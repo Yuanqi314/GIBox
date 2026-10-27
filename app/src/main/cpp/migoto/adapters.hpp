@@ -11,6 +11,11 @@
 #pragma once
 #include "engine.hpp"
 #include <algorithm>
+#include <cstdio>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
 #include <sstream>
 
 namespace migoto {

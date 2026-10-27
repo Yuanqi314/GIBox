@@ -4,6 +4,7 @@
 // ParseIniKeyValLine, ParseIniPreamble, get_namespaced_section_name, the section lists); see
 // third_party/3dmigoto/README.md. No DirectX, Windows, Unity, JNI or hook code: text in, sections out.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <map>

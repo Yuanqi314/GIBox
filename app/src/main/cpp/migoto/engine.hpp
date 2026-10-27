@@ -14,8 +14,18 @@
 // a recorded effect or a diagnostic; nothing here touches DirectX, Windows, Unity or JNI.
 #pragma once
 #include "expr.hpp"
+#include <algorithm>
 #include <cfloat>
+#include <cmath>
+#include <cstdlib>
+#include <functional>
+#include <map>
+#include <memory>
 #include <deque>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 #include <set>
 
 namespace migoto {
