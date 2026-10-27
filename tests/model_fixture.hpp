@@ -74,7 +74,7 @@ inline std::string logicResources(){return "{\"resource\\\\mods\\\\logic\\\\a.in
 inline std::string logicJsonOf(const std::vector<std::string>& sigs,const std::string& file="logic/0.ini",const std::string& readPass="Part",const std::string& resources=logicResources()){std::string frames,fields;
  for(size_t i=0;i<sigs.size();i++)frames+=(i?",":"")+std::string("{\"value\":")+std::to_string(i)+",\"draws\":{\"Part\":"+quote(sigs[i])+"}}";
  for(std::string f:{"ib","position","blend","texcoord","ps-t0","ps-t1","ps-t2"})fields+=(fields.empty()?"":",")+("\""+f+"\":[\""+readPass+"\",\""+(f=="ib"||f.rfind("ps-",0)==0?f:std::string("vb0"))+"\"]");
- return "{\"signature\":2,\"files\":[{\"namespace\":\"Mods\\\\Logic\\\\a.ini\",\"file\":\""+file+"\"}],\"resources\":"+resources+",\"passes\":[{\"name\":\"Part\",\"bindings\":{\"ib\":\"aaaa0001\"},\"checks\":[\"ib\"]}],"
+ return "{\"signature\":2,\"main\":\"Mods\\\\Logic\\\\a.ini\",\"files\":[{\"namespace\":\"Mods\\\\Logic\\\\a.ini\",\"file\":\""+file+"\"}],\"resources\":"+resources+",\"passes\":[{\"name\":\"Part\",\"bindings\":{\"ib\":\"aaaa0001\"},\"checks\":[\"ib\"]}],"
   "\"fields\":{\"Part\":{"+fields+"}},\"frames\":["+frames+"]}";}
 inline std::string logicJson(const std::vector<std::string>& ids,const std::string& file="logic/0.ini",const std::string& readPass="Part"){std::vector<std::string> sigs;for(auto& i:ids)sigs.push_back(logicSignature(i));return logicJsonOf(sigs,file,readPass);}
 inline Spec withLogic(Spec a,const std::string& logic){auto inner=a.edit;a.edit=[inner,logic](std::string& t){if(inner)inner(t);t.insert(t.rfind('}'),",\"logic\":"+logic);};return a;}

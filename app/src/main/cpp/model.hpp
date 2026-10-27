@@ -160,8 +160,9 @@ struct TextureSwap {std::string renderer,material;};
 // the mod's INI files (copied to logic/, each with the namespace XXMI gives it); every [Resource] by the core's key
 // with its identity (file under the mod and layout, resolved by the converter); the draws replayed every frame (slot
 // -> game hash, the order the slots are checked, draw values); per part where each field of its draws is read
-// ([pass, slot]; the part's own pass means each of its issued draws); and per animation frame each part's signature.
-// The runtime shows the prebuilt frame whose signatures all match. Older logic data (0.7.34, no "signature") loads
+// ([pass, slot]; the part's own pass means each of its issued draws); and the choices the model was converted with,
+// each with every part's signature: per animation frame ("frames"), or per distinct outfit with its values of the
+// variant variables ("variants", static models). The runtime shows the choice whose signatures all match. Older logic data (0.7.34, no "signature") loads
 // but is never used: it names resources by section only and has no draw ranges (unsupported says so).
 struct LogicSpec {
  struct File {std::string ns,file,text;};
@@ -169,16 +170,18 @@ struct LogicSpec {
  struct Field {std::string name,pass,slot;};
  std::vector<File> files;std::map<std::string,std::string> resources;std::vector<Pass> passes;
  std::map<std::string,std::vector<Field>> parts;            // part -> its fields; the part's pass is the one named like it
- std::vector<std::map<std::string,std::string>> frames;     // per animation frame: part -> signature
+ std::vector<std::map<std::string,std::string>> choices;    // per animation frame, or per outfit: part -> signature
+ std::vector<Assignment> assignments;                       // outfits: each choice's values of the variant variables
+ std::string mainNs;                                        // the main INI's namespace (variant variables live there)
  std::string unsupported;
  bool present()const{return !files.empty()||!unsupported.empty();}
 };
 inline const std::vector<std::string>& logicFields(){static const std::vector<std::string> f={"ib","position","blend","texcoord","ps-t0","ps-t1","ps-t2"};return f;}
 inline bool logicSlot(const std::string& s){return !s.empty()&&s.size()<=16&&s.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-")==s.npos;}
-inline LogicSpec logicOf(const Json& m,const std::string& dir,const AnimationSpec& animation){LogicSpec l;const auto& j=m.at("logic");if(j.type==Json::Null)return l;
- require(animation.present(),"logic: only for animation models");require(j.type==Json::Object,"logic: not an object");
- if(j.at("signature").type==Json::Null){l.unsupported="logic data of 0.7.34 (resources by section name only, no draw ranges or hidden parts); convert the mod again";return l;}
- require(juint(j,"signature",2,2)==2,"logic: signature version");uint64_t total=0;std::set<std::string> files;
+inline LogicSpec logicOf(const Json& m,const std::string& dir,const AnimationSpec& animation,const Variants& variants){LogicSpec l;const auto& j=m.at("logic");if(j.type==Json::Null)return l;
+ require(j.type==Json::Object,"logic: not an object");
+ if(j.at("signature").type==Json::Null){require(animation.present(),"logic: only for animation models");l.unsupported="logic data of 0.7.34 (resources by section name only, no draw ranges or hidden parts); convert the mod again";return l;}
+ require(juint(j,"signature",2,2)==2,"logic: signature version");uint64_t total=0;std::set<std::string> files;l.mainNs=jstr(j,"main",512);
  for(auto& f:jarr(j,"files",1,64)){LogicSpec::File x{jstr(f,"namespace",512),jstr(f,"file",32),""};
   require(x.file.compare(0,6,"logic/")==0&&x.file.size()>10&&x.file.compare(x.file.size()-4,4,".ini")==0&&x.file.find_first_not_of("0123456789",6)==x.file.size()-4,"logic: file name "+x.file);
   require(files.insert(x.file).second,"logic: file listed twice");auto b=read(dir+"/"+x.file,4*1024*1024);x.text.assign(b.begin(),b.end());total+=x.text.size();require(total<=8*1024*1024,"logic: INI files over 8 MiB");
@@ -200,11 +203,16 @@ inline LogicSpec logicOf(const Json& m,const std::string& dir,const AnimationSpe
   for(auto& f:logicFields()){const auto& at=jfield(d.second,f.c_str());require(at.type==Json::Array&&at.array.size()==2&&at.array[0].type==Json::String&&names.count(at.array[0].string)&&at.array[1].type==Json::String&&logicSlot(at.array[1].string),"logic: "+d.first+" "+f);
    list.push_back({f,at.array[0].string,at.array[1].string});}
   require(d.second.object.size()==logicFields().size(),"logic: unknown field of "+d.first);}
- const auto& frames=jarr(j,"frames",animation.frames.size(),animation.frames.size());
- for(size_t i=0;i<frames.size();i++){require(jint(jfield(frames[i],"value"),"logic frame value")==animation.frames[i].value,"logic: frame values differ from the animation");
-  const auto& d=jfield(frames[i],"draws");require(d.type==Json::Object&&d.object.size()==l.parts.size(),"logic: draws of frame "+std::to_string(i));std::map<std::string,std::string> sig;
-  for(auto& kv:d.object){require(l.parts.count(kv.first)&&kv.second.type==Json::String&&!kv.second.string.empty()&&kv.second.string.size()<=65536,"logic: part "+kv.first+" of frame "+std::to_string(i));sig[kv.first]=kv.second.string;}
-  l.frames.push_back(std::move(sig));}
+ auto partsOf=[&](const Json& d,const std::string& what){require(d.type==Json::Object&&d.object.size()==l.parts.size(),"logic: parts of "+what);std::map<std::string,std::string> sig;
+  for(auto& kv:d.object){require(l.parts.count(kv.first)&&kv.second.type==Json::String&&!kv.second.string.empty()&&kv.second.string.size()<=65536,"logic: part "+kv.first+" of "+what);sig[kv.first]=kv.second.string;}
+  return sig;};
+ if(animation.present()){require(j.at("variants").type==Json::Null,"logic: an animation has frames, not variants");
+  const auto& frames=jarr(j,"frames",animation.frames.size(),animation.frames.size());
+  for(size_t i=0;i<frames.size();i++){require(jint(jfield(frames[i],"value"),"logic frame value")==animation.frames[i].value,"logic: frame values differ from the animation");l.choices.push_back(partsOf(jfield(frames[i],"draws"),"frame "+std::to_string(i)));}}
+ else{require(!variants.vars.empty(),"logic: only for animation or outfit models");
+  for(auto& v:jarr(j,"variants",1,256)){const auto& a=jfield(v,"assignment");require(a.type==Json::Object&&a.object.size()==variants.vars.size(),"logic: outfit assignment");Assignment x;
+   for(auto& var:variants.vars){const auto& n=a.at(var.first);int value=jint(n,"logic: "+var.first);require(std::find(var.second.begin(),var.second.end(),value)!=var.second.end(),"logic: "+var.first+" = "+std::to_string(value)+" is not a converted value");x[var.first]=value;}
+   l.assignments.push_back(x);l.choices.push_back(partsOf(jfield(v,"draws"),"outfit "+std::to_string(l.choices.size())));}}
  return l;}
 struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;uint64_t blobSize=0;uint32_t blobCrc=0;AnimationSpec animation;std::vector<TextureSwap> swaps;LogicSpec logic;};
 
@@ -262,7 +270,7 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allT
   require(safeName(x.renderer),"Texture swap renderer: "+x.renderer);require(it!=out->materials.end()&&!it->second.original,"Texture swap material: "+x.material);
   for(auto& y:out->swaps){require(y.renderer!=x.renderer,"Texture swap renderer listed twice: "+x.renderer);}
   out->swaps.push_back(x);}
- out->blobSize=size;out->blobCrc=crc;if(animationFrame<0){out->logic=logicOf(m,dir,animation);out->animation=std::move(animation);}
+ out->blobSize=size;out->blobCrc=crc;if(animationFrame<0){out->logic=logicOf(m,dir,animation,out->variants);out->animation=std::move(animation);}
  const auto& parts=jarr(m,"parts",1,model::maxParts);
  for(size_t pi=0;pi<parts.size();pi++){const auto& p=parts[pi];const auto& ps=summary.parts[pi];PartFile f;
   unsigned n=unsigned(juint(p,"vertices",1,model::maxVertices)),ni=unsigned(juint(p,"indices",3,model::maxIndices));require(ni%3==0,ps.name+": index count not a multiple of 3");

@@ -31,6 +31,14 @@ public final class CompatibilityTest {
             GimiPatternsTest.put(src,"CitlaliBody.ib",ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN).putShort((short)3).putShort((short)4).putShort((short)5).array());
             GimiPatternsTest.put(src,"Citlali.ini",text.replace("R32_UINT","R16_UINT"));
             StringBuilder log=new StringBuilder();ModelConverter.convert(src,null,out,10000073,new ModelConverter.Options().variants(true).fallback("Body"),DECODE,log);
+            // Outfit logic data: one record per distinct drawn result, with its value of the variant variable; the
+            // native check sets each outfit's values in the logic and needs the driver to pick that outfit.
+            Object logicData=Json.obj(Json.read(new File(out,"model.json"),4L<<20),"model").get("logic");
+            if(mode==0){List<Object> variants=Json.arr(Json.obj(logicData,"logic").get("variants"),"variants",2,2);
+                ok(Json.obj(Json.obj(variants.get(0),"v").get("assignment"),"a").equals(Json.of("$swapvar",0L))||Json.obj(Json.obj(variants.get(0),"v").get("assignment"),"a").get("$swapvar").equals(0.0),"first outfit: "+variants.get(0));
+                ok(((Number)Json.obj(Json.obj(variants.get(1),"v").get("assignment"),"a").get("$swapvar")).intValue()==4&&Json.obj(Json.obj(variants.get(1),"v").get("draws"),"d").toString().contains("ps-t1=file:otherlightmap.dds"),"the outfit that differs: "+variants.get(1));
+                if(nativeChecker!=null){Process check=new ProcessBuilder(nativeChecker,out.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"the native driver picks every converted outfit");}}
+            if(mode==1)ok(logicData==null&&log.toString().contains("用了 TexFx / ORFix 兼容转换"),"ORFix's NNFix convention is not something the logic core can state: "+log);
             for(int state=0;state<5;state++)for(Object raw:Fixtures.draws(out,0,Fixtures.set("$swapvar",state))){
                 Map<String,Object> draw=Json.obj(raw,"draw"),m=Fixtures.material(out,(String)draw.get("material"));
                 if(mode==0){ok(pixel(out,m,"main")== (state==4?44:22),"legacy IB must select real color across variants");

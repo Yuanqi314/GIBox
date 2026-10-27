@@ -38,8 +38,9 @@ std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static
 //                  property block (1) or per-material custom texture (2); no copies or refreshes
 //   separateDraws  every draw in effect its own submesh, as before 0.7.23 (mergeDraws, model.hpp): for comparing the
 //                  picture and the draw count (rebuilds the model)
-//   logicCore      an animation model's own INI logic (3DMigoto logic core, logic_game.hpp) picks the frame shown,
-//                  by what its draws select; FrameLoop when the model has no logic data or the core fails
+//   logicCore      a model's own INI logic (3DMigoto logic core, logic_game.hpp) picks the animation frame or the
+//                  outfit shown, by what its draws select (an outfit model's logic must be finite; the App's outfit
+//                  values are its input); FrameLoop or the App's choice when there is no logic data or it fails
 struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false,separateDraws=false,logicCore=false;int firstRefreshMs=0,slotTextures=0,animationMode=0;
  std::string meshKey(bool animated=false)const{return std::string(neutralColors?"c":"-")+(noUv2?"u":"-")+(separateDraws?"s":"-")+(animated?"a"+std::to_string(animationMode):"");}
  bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&separateDraws==o.separateDraws&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures&&animationMode==o.animationMode&&logicCore==o.logicCore;}
@@ -178,11 +179,13 @@ struct Runtime::Impl {
   Ptr animationOwner=0;Ptr originMesh=0,originMaterials=0;RestoreBackup* backup=nullptr;
   Owned dynamicRoots;std::map<std::string,Ptr> dynamicArrays;std::string dynamicShape;std::vector<int> boneMapping,targetParents;Bytes targetBinds;
   int bindable=-1;};  // last incoming bone-name hash count compatibility, for log suppression; origin pair pinned by the set
- struct AnimationRun {std::string error;FrameLoop loop;std::unique_ptr<LogicDriver> logic;bool logicFailed=false,logicFresh=false,logicNoted=false;uint64_t logicMisses=0;unsigned logicMissLines=0;std::string logicMissLogged;int mode=0;uint64_t token=0,started=0,lastStats=0,lastMark=0,updates=0,applyUs=0,maxApplyUs=0;size_t preparing=0,buildPart=0,backPart=0,applied=0;bool loading=false,ready=false,stopped=false;
+ struct AnimationRun {std::string error;FrameLoop loop;int mode=0;uint64_t token=0,started=0,lastStats=0,lastMark=0,updates=0,applyUs=0,maxApplyUs=0;size_t preparing=0,buildPart=0,backPart=0,applied=0;bool loading=false,ready=false,stopped=false;
   std::vector<std::shared_ptr<ModelFile>> cpu;std::vector<std::vector<Ptr>> meshes;std::vector<std::vector<Ptr>> owned;std::vector<Ptr> back;
  };
+ // experiments.logicCore: the set's own INI logic, picking its animation frame or its outfit (logic_game.hpp).
+ struct LogicRun {std::unique_ptr<LogicDriver> driver;bool failed=false,fresh=false,noted=false;uint64_t misses=0,lastStats=0;unsigned missLines=0;std::string missLogged;std::map<std::string,int> pushed;Assignment want;};   // want: the outfit it picked (applyVariant may wait for textures)
  uint64_t animationToken=0;
- struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;AnimationRun animation;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false,mergeDraws=true;std::vector<TextureSwap> swaps;LogicSpec logicSpec;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
+ struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;AnimationRun animation;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false,mergeDraws=true;std::vector<TextureSwap> swaps;LogicSpec logicSpec;LogicRun logic;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
  // source: for a renderer the game created from one of ours (adopted), the renderer whose material clones it shows.
  struct Attachment:Owned {Ptr renderer=0,native=0,original=0,originalMaterials=0,source=0;Set* set=nullptr;RestoreBackup* backup=nullptr;size_t part=0;bool adopted=false;std::map<std::string,Ptr> clones;std::string restoreError;
    uint64_t refreshAt=0,materialTraceStart=0,materialTraceAt=0,materialCheckAt=0,materialCheckUntil=0;unsigned refreshes=0,materialTraceSamples=0,materialRepairs=0;std::map<Ptr,std::string> retired;std::map<Ptr,Ptr> materialSources;  // clone -> canonical game material; retained across refreshes
@@ -1064,33 +1067,69 @@ struct Runtime::Impl {
   for(size_t i=0;i<s.parts.size();i++){Ptr old=s.parts[i].mesh;s.parts[i].mesh=next[i];if(a.mode==1)a.back[i]=old;}a.applied=frame;
  }
  std::string animationMemory(const Set& s)const{uint64_t cpu=0;size_t meshes=0;for(auto& frame:s.animation.cpu)if(frame)cpu+=loadedBytes(*frame);for(auto& part:s.animation.owned)meshes+=part.size();return " cpuFrameMiB="+std::to_string(cpu>>20)+" meshInstances="+std::to_string(meshes);}
- // experiments.logicCore: the logic core of a set that has logic data starts with the switch (its first selection must
- // match a prebuilt frame) and stops with it; any failure drops it for good and FrameLoop carries on from the frame shown.
- void logicSwitch(Set& s){auto& a=s.animation;
-  if(ctl.exp.logicCore&&!s.logicSpec.present()&&!a.logicNoted){a.logicNoted=true;log("logic-unavailable",s.name+": converted without logic data (before 0.7.34, or the converter could not state it: see its conversion log); FrameLoop plays it");}
-  if(!ctl.exp.logicCore||!s.logicSpec.present()){if(a.logic){a.logic.reset();a.loop.current=a.applied;a.loop.clock=false;log("logic-off",s.name+": FrameLoop from frame value "+std::to_string(a.loop.spec.frames[a.applied].value));}return;}
-  if(a.logic||a.logicFailed)return;
-  if(!s.logicSpec.unsupported.empty()){a.logicFailed=true;log("logic-unavailable",s.name+": "+s.logicSpec.unsupported+"; FrameLoop plays it");return;}
-  try{auto d=std::make_unique<LogicDriver>(s.logicSpec);
-   if(d->frame()<0){a.logicFailed=true;log("logic-error",s.name+": what the draws select after [Constants] matches no prebuilt frame; FrameLoop kept. "+d->miss);return;}
-   size_t notes=0;if(!d->unknown.empty()){std::string list;for(auto& u:d->unknown)list+=(list.empty()?"":", ")+u;log("logic-note",s.name+": resources the converter did not list (bindings to them match no frame): "+list.substr(0,600));}
-   for(auto& n:d->diagnostics().list){if(n.level==migoto::Diagnostic::Notice)continue;if(++notes>24){log("logic-note",s.name+": ...");break;}
+ // experiments.logicCore: the logic of a set that has logic data starts with the switch and stops with it. An
+ // animation's first selection must match a prebuilt frame; an outfit model's logic must also be finite (ImportScan)
+ // and take the App's outfit values. Any failure drops it for good: FrameLoop carries on from the frame shown, an
+ // outfit model goes back to the App's variable table.
+ bool animated(const Set& s)const{return s.animation.loop.spec.present();}
+ const char* fallback(const Set& s)const{return animated(s)?"FrameLoop":"the App's outfit choice";}
+ std::string choiceText(const Set& s,int i)const{if(animated(s))return "frame value "+std::to_string(s.animation.loop.spec.frames[size_t(i)].value);std::string t;for(auto& kv:s.logicSpec.assignments[size_t(i)])t+=(t.empty()?"":" ")+kv.first+"="+std::to_string(kv.second);return "outfit "+t;}
+ std::string shownText(const Set& s)const{if(animated(s))return "frame value "+std::to_string(s.animation.loop.spec.frames[s.animation.applied].value);std::string t;for(auto& kv:s.assignment)t+=(t.empty()?"":" ")+kv.first+"="+std::to_string(kv.second);return "outfit "+t;}
+ const std::map<std::string,int>& appChoice(const Set& s)const{static const std::map<std::string,int> none;auto v=ctl.variables.find(s.name);return v==ctl.variables.end()?none:v->second;}
+ // The App's outfit values the logic has not seen yet; false when the logic has no such variable.
+ bool pushChoice(Set& s,std::string& missing){auto& L=s.logic;bool ok=true;
+  for(auto& var:s.variants.vars){auto c=appChoice(s).find(var.first);int value=c!=appChoice(s).end()?c->second:s.variants.defaults.at(var.first);
+   auto seen=L.pushed.find(var.first);if(seen!=L.pushed.end()&&seen->second==value)continue;
+   if(!L.driver->set(var.first,value)){ok=false;missing=var.first;continue;}L.pushed[var.first]=value;}
+  return ok;}
+ void stopLogic(Set& s,const std::string& state,const std::string& why){auto& L=s.logic;L.driver.reset();L.pushed.clear();L.want.clear();
+  if(animated(s)){s.animation.loop.current=s.animation.applied;s.animation.loop.clock=false;}log(state,s.name+": "+why+"; "+fallback(s)+" from here ("+shownText(s)+")");}
+ void logicSwitch(Set& s){auto& L=s.logic;
+  if(ctl.exp.logicCore&&!s.logicSpec.present()&&!L.noted){L.noted=true;log("logic-unavailable",s.name+": converted without logic data (before 0.7.34 for animations, 0.7.36 for outfits, or the converter could not state it: see its conversion log); "+fallback(s)+" plays it");}
+  if(!ctl.exp.logicCore||!s.logicSpec.present()){if(L.driver)stopLogic(s,"logic-off","switched off");return;}
+  if(L.driver||L.failed)return;
+  if(!s.logicSpec.unsupported.empty()){L.failed=true;log("logic-unavailable",s.name+": "+s.logicSpec.unsupported+"; "+fallback(s)+" plays it");return;}
+  try{L.driver=std::make_unique<LogicDriver>(s.logicSpec);auto& d=*L.driver;
+   auto scan=d.scan();std::string scanText=scan.finiteStates?"finite, "+std::to_string(scan.states)+" states":"not finite";
+   if(!animated(s)){std::string why;if(!scan.finiteStates){for(auto& r:scan.reasons)why+=(why.empty()?"":"; ")+r;L.driver.reset();L.failed=true;log("logic-unavailable",s.name+": the outfit logic is not shown to be finite ("+why.substr(0,600)+"); the App's outfit choice stays");return;}
+    std::string missing;if(!pushChoice(s,missing)){L.driver.reset();L.failed=true;log("logic-error",s.name+": the outfit variable "+missing+" is not in the INI logic; the App's outfit choice stays");return;}d.reselect();}
+   if(d.frame()<0){std::string miss=d.miss;L.driver.reset();L.failed=true;log("logic-error",s.name+": what the draws select at the start matches no prebuilt "+(animated(s)?"frame":"outfit")+"; "+fallback(s)+" kept. "+miss);return;}
+   size_t notes=0;if(!d.unknown.empty()){std::string list;for(auto& u:d.unknown)list+=(list.empty()?"":", ")+u;log("logic-note",s.name+": resources the converter did not list (bindings to them match nothing): "+list.substr(0,600));}
+   for(auto& n:d.diagnostics().list){if(n.level==migoto::Diagnostic::Notice)continue;if(++notes>24){log("logic-note",s.name+": ...");break;}
     log("logic-note",s.name+": "+(n.level==migoto::Diagnostic::Limitation?"limitation":n.level==migoto::Diagnostic::Warning?"warning":"error")+" "+n.where+": "+n.message);}
-   log("logic-start",s.name+": "+d->summary()+"; first frame value "+std::to_string(a.loop.spec.frames[size_t(d->frame())].value));a.logic=std::move(d);a.logicFresh=true;a.logicMisses=0;a.logicMissLines=0;a.logicMissLogged.clear();}
-  catch(const std::exception& ex){a.logicFailed=true;log("logic-error",s.name+": "+ex.what()+"; FrameLoop kept");}}
- void animationTick(uint64_t now){if(inTick||!ctl.enabled)return;bool any=false;for(auto& s:sets)any|=s->built&&s->animation.ready&&!s->animation.stopped&&wantedSet(*s);if(!any)return;inTick=true;
+   log("logic-start",s.name+": "+d.summary()+"; draw variables "+scanText+"; first "+choiceText(s,d.frame()));L.fresh=true;L.misses=0;L.missLines=0;L.missLogged.clear();}
+  catch(const std::exception& ex){L.driver.reset();L.failed=true;log("logic-error",s.name+": "+ex.what()+"; "+fallback(s)+" kept");}}
+ // One engine frame of a set's logic: the App's outfit values, the Presents since the last frame, the misses.
+ // Returns the choice to show, or -1 for no change.
+ int logicStep(Set& s,uint32_t frame,uint64_t now){auto& L=s.logic;auto& d=*L.driver;
+  bool changed=false;
+  if(!animated(s)){std::string missing;size_t before=L.pushed.size();auto old=L.pushed;if(!pushChoice(s,missing))throw std::runtime_error("the outfit variable "+missing+" is not in the INI logic");
+   if(old!=L.pushed||before!=L.pushed.size())changed|=d.reselect();}
+  changed|=d.tick(frame,double(now)/1000.0);changed|=L.fresh;L.fresh=false;
+  // A miss is logged when what is selected differs from the last one logged; eight per set, then only counted.
+  if(d.stats.misses>L.misses){L.misses=d.stats.misses;if(d.miss!=L.missLogged&&L.missLines<=8){L.missLogged=d.miss;
+    log("logic-miss",s.name+(++L.missLines>8?": more selections match nothing prebuilt; not logged further (counted in the stats)":": the draws select what nothing prebuilt has; "+shownText(s)+" stays. "+d.miss));}}
+  return changed?d.frame():-1;}
+ void animationTick(uint64_t now){if(inTick||!ctl.enabled)return;bool any=false;
+  for(auto& s:sets)any|=s->built&&wantedSet(*s)&&((animated(*s)&&s->animation.ready&&!s->animation.stopped)||(!animated(*s)&&(s->logic.driver||(ctl.exp.logicCore&&s->logicSpec.present()&&!s->logic.failed))));
+  if(!any)return;
+  inTick=true;
   try{uint32_t frame=uint32_t(e.call<int32_t>(abi::frameCount,Ptr(0)));bool debug=logLevel.load(std::memory_order_relaxed)==int(Level::Debug);
-   for(auto& ptr:sets){auto& s=*ptr;auto& a=s.animation;if(!s.built||!a.ready||a.stopped||!wantedSet(s))continue;
+   for(auto& ptr:sets){auto& s=*ptr;auto& a=s.animation;if(!s.built||!wantedSet(s))continue;
+    // An outfit model: the logic picks the converted outfit; nothing else runs per frame.
+    if(!animated(s)){logicSwitch(s);if(!s.logic.driver)continue;
+     try{int next=logicStep(s,frame,now);if(next>=0){s.logic.want=pick(s.variants,s.logicSpec.assignments[size_t(next)]);if(s.logic.want!=s.assignment){applyVariant(s,s.logic.want);if(debug)log("logic-outfit",s.name+" engineFrame="+std::to_string(frame)+" "+choiceText(s,next));}}
+      if(debug&&now>=s.logic.lastStats+5000){auto& st=s.logic.driver->stats;log("logic-stats",s.name+" "+shownText(s)+" presents="+std::to_string(st.presents)+" changes="+std::to_string(st.changes)+" misses="+std::to_string(st.misses)+" avgLogicUs="+std::to_string(st.presents?st.stepUs/st.presents:0)+" maxLogicUs="+std::to_string(st.maxStepUs));s.logic.lastStats=now;}}
+     catch(const std::exception& ex){s.logic.failed=true;stopLogic(s,"logic-error",ex.what());}
+     continue;}
+    if(!a.ready||a.stopped)continue;
     try{logicSwitch(s);bool changed=false;size_t next=a.loop.current;
-     if(a.logic){try{changed=a.logic->tick(frame,double(now)/1000.0)||a.logicFresh;a.logicFresh=false;next=size_t(a.logic->frame());
-       // A miss is logged when what is selected differs from the last one logged; eight per set, then only counted.
-       if(a.logic->stats.misses>a.logicMisses){a.logicMisses=a.logic->stats.misses;if(a.logic->miss!=a.logicMissLogged&&a.logicMissLines<=8){a.logicMissLogged=a.logic->miss;
-         log("logic-miss",s.name+(++a.logicMissLines>8?": more selections match no prebuilt frame; not logged further (misses are counted in animation-stats)":": the draws select what no prebuilt frame has; frame value "+std::to_string(a.loop.spec.frames[a.applied].value)+" stays. "+a.logic->miss));}}}
-      catch(const std::exception& ex){a.logic.reset();a.logicFailed=true;a.loop.current=a.applied;a.loop.clock=false;log("logic-error",s.name+": "+ex.what()+"; FrameLoop from here");}}
+     if(s.logic.driver){try{int f=logicStep(s,frame,now);if(f>=0){changed=true;next=size_t(f);}}
+      catch(const std::exception& ex){s.logic.failed=true;stopLogic(s,"logic-error",ex.what());}}
      else{changed=a.loop.tick(frame);next=a.loop.current;}
      if(changed&&next!=a.applied){auto start=debug?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};applyAnimation(s,next);a.updates++;
-      if(debug){auto us=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());a.applyUs+=us;a.maxApplyUs=std::max(a.maxApplyUs,us);if(a.updates<=32)log("animation-frame",s.name+" mode="+animationMode(s)+" driver="+(a.logic?"logic":"frameloop")+" engineFrame="+std::to_string(frame)+" value="+std::to_string(a.loop.spec.frames[a.applied].value)+" us="+std::to_string(us));}}
-     if(debug&&(now>=a.lastStats+5000||ctl.renderMark!=static_cast<long long>(a.lastMark))){std::string driver=a.logic?" driver=logic presents="+std::to_string(a.logic->stats.presents)+" misses="+std::to_string(a.logic->stats.misses)+" avgLogicUs="+std::to_string(a.logic->stats.presents?a.logic->stats.stepUs/a.logic->stats.presents:0)+" maxLogicUs="+std::to_string(a.logic->stats.maxStepUs):" driver=frameloop advances="+std::to_string(a.loop.advances)+" clockGaps="+std::to_string(a.loop.gaps);
+      if(debug){auto us=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());a.applyUs+=us;a.maxApplyUs=std::max(a.maxApplyUs,us);if(a.updates<=32)log("animation-frame",s.name+" mode="+animationMode(s)+" driver="+(s.logic.driver?"logic":"frameloop")+" engineFrame="+std::to_string(frame)+" value="+std::to_string(a.loop.spec.frames[a.applied].value)+" us="+std::to_string(us));}}
+     if(debug&&(now>=a.lastStats+5000||ctl.renderMark!=static_cast<long long>(a.lastMark))){auto* d=s.logic.driver.get();std::string driver=d?" driver=logic presents="+std::to_string(d->stats.presents)+" misses="+std::to_string(d->stats.misses)+" avgLogicUs="+std::to_string(d->stats.presents?d->stats.stepUs/d->stats.presents:0)+" maxLogicUs="+std::to_string(d->stats.maxStepUs):" driver=frameloop advances="+std::to_string(a.loop.advances)+" clockGaps="+std::to_string(a.loop.gaps);
       log(ctl.renderMark!=static_cast<long long>(a.lastMark)?"animation-mark":"animation-stats",s.name+" mode="+animationMode(s)+" engineFrame="+std::to_string(frame)+" value="+std::to_string(a.loop.spec.frames[a.applied].value)+" updates="+std::to_string(a.updates)+driver+" avgApplyUs="+std::to_string(a.updates?a.applyUs/a.updates:0)+" maxApplyUs="+std::to_string(a.maxApplyUs)+animationMemory(s));a.lastStats=now;a.lastMark=uint64_t(ctl.renderMark);}
     }catch(const std::exception& ex){a.stopped=true;a.error=ex.what();log("animation-error",s.name+" mode="+animationMode(s)+" playback: "+ex.what());}}
   }catch(const std::exception& ex){for(auto& s:sets)if(s->animation.ready&&!s->animation.stopped){s->animation.stopped=true;s->animation.error=ex.what();log("animation-error",s->name+": engine frame clock: "+ex.what());}}
@@ -1857,7 +1896,7 @@ struct Runtime::Impl {
     live.clear();for(auto* m:wanted)if(Set* s=liveSet(*m))live.push_back(s);}  // a moved target releases its set
    prepareBindingTargets();
    // Variant choice from control.json, applied in place on built sets.
-   for(Set* s:live)try{auto v=ctl.variables.find(s->name);applyVariant(*s,pick(s->variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second));}catch(const std::exception& ex){log("variant-error",s->name+": "+ex.what());}
+   for(Set* s:live)try{if(s->logic.driver&&!animated(*s)){if(!s->logic.want.empty())applyVariant(*s,s->logic.want);continue;}auto v=ctl.variables.find(s->name);applyVariant(*s,pick(s->variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second));}catch(const std::exception& ex){log("variant-error",s->name+": "+ex.what());}
    bool budget=true;std::vector<std::string> active,errors,building;std::string waiting,animationWaiting;bool stale=false;
    for(auto* m:wanted){
     if(!findSet(m->path,m->generation)&&!liveSet(*m)&&shadowed(*m,wanted))continue;

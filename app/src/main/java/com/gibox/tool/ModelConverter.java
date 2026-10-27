@@ -767,7 +767,23 @@ public final class ModelConverter {
      *  draw, vertex buffers checked before the IB); where each field of a part's draws is read; and per frame each
      *  part's signature (logicSignature), by which the runtime picks the prebuilt frame. Null, with the reason in the
      *  log, when that cannot be stated; the old frame loop plays the model then. */
+    /** The logic data of a frame animation: each frame's signatures under "frames". */
+    @SuppressWarnings("unchecked")
     private static Map<String,Object> logic(Ini ini,File src,Animation an,Map<String,String> mapping,File out,StringBuilder log)throws Exception{
+        List<Map<String,Integer>> assignments=new ArrayList<>();for(int v:an.values){Map<String,Integer> vars=new LinkedHashMap<>(ini.vars);vars.put(an.variable,v);assignments.add(vars);}
+        Map<String,Object> data=logicData(ini,src,assignments,mapping,out,log,"帧");if(data==null)return null;List<Object> sigs=(List<Object>)data.remove("choices"),frames=new ArrayList<>();
+        for(int i=0;i<sigs.size();i++)frames.add(Json.of("value",an.values.get(i),"draws",sigs.get(i)));data.put("frames",frames);return data;}
+    /** The logic data of an outfit model: per converted assignment (one for each distinct drawn result) its values of
+     *  the model's variant variables and its signatures, under "variants". */
+    @SuppressWarnings("unchecked")
+    static Map<String,Object> logicVariants(Ini ini,File src,List<Map<String,Integer>> kept,Collection<String> variables,Map<String,String> mapping,File out,StringBuilder log)throws Exception{
+        if(kept.size()>256){log.append("逻辑核心数据：").append(kept.size()).append(" 种绘制结果，超过 256，不写入\n");return null;}
+        Map<String,Object> data=logicData(ini,src,kept,mapping,out,log,"种款式");if(data==null)return null;List<Object> sigs=(List<Object>)data.remove("choices"),variants=new ArrayList<>();
+        for(int i=0;i<sigs.size();i++){Map<String,Object> values=new LinkedHashMap<>();for(String v:variables)values.put(v,kept.get(i).get(v));variants.add(Json.of("assignment",values,"draws",sigs.get(i)));}
+        data.put("variants",variants);return data;}
+    /** What frames and outfits share: files, resources, the draws replayed, fields; per assignment the signatures
+     *  ("choices", taken out by the callers). unit names the choices in the log. */
+    private static Map<String,Object> logicData(Ini ini,File src,List<Map<String,Integer>> assignments,Map<String,String> mapping,File out,StringBuilder log,String unit)throws Exception{
         List<File> files=new ArrayList<>();logicFiles(src,files,0);StringBuilder why=new StringBuilder();
         if(files.isEmpty()||files.size()>64){log.append("逻辑核心数据：INI 文件数 ").append(files.size()).append("，不写入\n");return null;}
         File dir=new File(out,"logic");check(dir.mkdirs(),"无法创建 logic 目录");List<Object> list=new ArrayList<>();long total=0;List<String> namespaces=new ArrayList<>(),texts=new ArrayList<>();String mainNs=null;
@@ -779,7 +795,7 @@ public final class ModelConverter {
         Map<String,String> table=logicResources(src,files,namespaces,texts);
         List<LogicSection> sections=logicSections(ini,why);if(sections==null){log.append("逻辑核心数据：").append(why).append("，不写入\n");return null;}
         Map<String,LogicSection> byName=new HashMap<>();for(LogicSection x:sections)byName.put(x.name,x);
-        Map<String,Integer> vars0=new LinkedHashMap<>(ini.vars);vars0.put(an.variable,an.values.get(0));Map<String,Resource> rs0=resources(ini,src,vars0);
+        Map<String,Integer> vars0=assignments.get(0);Map<String,Resource> rs0=resources(ini,src,vars0);
         // The vertex-buffer sections that serve every part (no draw, no IB): their hash and the slot they bind.
         String[] hash=new String[3],slot=new String[3];
         for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")){Evaluated e=new Evaluated(ini,s,vars0,rs0);
@@ -790,7 +806,6 @@ public final class ModelConverter {
                 if(hash[k]!=null&&!(hash[k].equals(e.hash)&&slot[k].equals(at))){log.append("逻辑核心数据：").append(streamName(k)).append(" 顶点流由多个段提供，不写入\n");return null;}
                 hash[k]=e.hash;slot[k]=at;}}
         // Every assignment's draws; the parts are the sections that draw in any of them.
-        List<Map<String,Integer>> assignments=new ArrayList<>();for(int v:an.values){Map<String,Integer> vars=new LinkedHashMap<>(ini.vars);vars.put(an.variable,v);assignments.add(vars);}
         List<List<Draw>> drawn=new ArrayList<>();Map<String,Draw> firstDraw=new LinkedHashMap<>();
         for(Map<String,Integer> vars:assignments){List<Draw> ds=new ArrayList<>();for(Draw d:drawCalls(ini,vars,resources(ini,src,vars),mapping))if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part)))){ds.add(d);firstDraw.putIfAbsent(d.part,d);}drawn.add(ds);}
         List<Object> passes=new ArrayList<>();Map<String,Object> fields=new LinkedHashMap<>();Set<String> keys=new HashSet<>();
@@ -817,9 +832,9 @@ public final class ModelConverter {
                 List<Draw> mine=new ArrayList<>();for(Draw d:drawn.get(i))if(d.part.equals(part.part))mine.add(d);
                 String text=logicSignature(mine,skip,byName,table,mainNs,why);if(text==null){log.append("逻辑核心数据：").append(why).append("，不写入\n");return null;}
                 sig.put(part.part,text);}
-            frames.add(Json.of("value",an.values.get(i),"draws",sig));}
-        log.append("逻辑核心数据：").append(files.size()).append(" 个 INI、").append(table.size()).append(" 个资源、").append(passes.size()).append(" 次绘制、").append(frames.size()).append(" 帧的资源记录（实验开关“逻辑核心驱动”使用；关闭时仍按原帧循环）\n");
-        return Json.of("signature",2,"files",list,"resources",table,"passes",passes,"fields",fields,"frames",frames);}
+            frames.add(sig);}
+        log.append("逻辑核心数据：").append(files.size()).append(" 个 INI、").append(table.size()).append(" 个资源、").append(passes.size()).append(" 次绘制、").append(frames.size()).append(" ").append(unit).append("的资源记录（实验开关“逻辑核心驱动”使用；关闭时仍按原来的方式）\n");
+        return Json.of("signature",2,"main",mainNs,"files",list,"resources",table,"passes",passes,"fields",fields,"choices",frames);}
     private static File convertAnimation(Ini ini,File src,List<Bones> bones,Map<String,String> mapping,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log,Animation animation)throws Exception {
         if(o.animationBoneFallback){for(Bones bone:bones)check(!bone.synthetic,"动画骨骼兼容需要完整骨骼库或本 MOD 已保存的完整骨骼记录，不能用未知的索引上限判断哪些关联可忽略");
             for(Section section:ini.sections.values()){String n=lower(section.name);check(!n.startsWith("customshader")&&!n.startsWith("shaderoverride"),"动画骨骼兼容暂不支持自定义着色器；需要先实现其矩阵资源和蒙皮规则");
@@ -949,6 +964,7 @@ public final class ModelConverter {
                 check(vars.size()<=16,"款式变量过多");manifest.put("variants",Json.of("vars",vars,"default",defaults));
                 log.append("款式变量：").append(shown).append("，").append(product).append(" 种取值组合（游戏内切换，无需重新转换）\n");}
             manifest.putAll(data);
+            if(!shown.isEmpty()){Map<String,Object> logic=logicVariants(ini,src,kept,shown,map,tmp,log);if(logic!=null)manifest.put("logic",logic);}
             if(replaceWhen!=null){manifest.put("version",3);manifest.put("replaceWhen",replaceWhen);log.append("未启用几何替换的款式保留游戏原模型和材质；此模型需要支持格式 3 的 GIBox\n");}
             if(o.sourcePath!=null)manifest.put("source",Json.of("path",o.sourcePath,"signature",o.sourceSignature==null?"":o.sourceSignature));
             write(tmp,"conversion.log",text(log.toString()));

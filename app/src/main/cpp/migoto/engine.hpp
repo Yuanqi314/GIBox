@@ -65,7 +65,7 @@ struct Event {enum Kind {Assign,Branch,Run,Bind,Draw,Skip,Abort,Match,Key,Unport
 class Engine;
 struct RunState;
 // kind: what a command is, for the parser's endif and the import scan (no RTTI: the Android build may not have it).
-enum class Kind {Other,Assign,Else,If,Run,Bind,CustomShader,Unported};
+enum class Kind {Other,Assign,Else,If,Run,Bind,Draw,CustomShader,Unported};
 struct Command {std::string line;virtual ~Command()=default;virtual void run(RunState&)=0;virtual Kind kind()const{return Kind::Other;}};
 using CommandPtr=std::shared_ptr<Command>;
 struct CommandList {std::vector<CommandPtr> commands;bool post=false;std::string section;};
@@ -219,10 +219,10 @@ struct Bind:Command {Kind kind()const override{return Kind::Bind;}std::string ds
   if(dstResource){s.e.customResources[to]=r;if(s.e.trace)s.e.note(Event::Bind,where,to+" = "+src);return;}
   if(!s.draw&&s.bindings==&s.e.contextBindings)s.e.limitation(where,"a slot set outside a draw ("+to+"); Android has no D3D context to keep it bound for later draws");
   (*s.bindings)[to]=r;if(s.e.trace)s.e.note(Event::Bind,where,to+" = "+src);}};
-struct DrawCmd:Command {std::string kind,where;std::vector<Expression> args;bool automatic=false,fromCaller=false;
- void run(RunState& s)override{IssuedDraw d;d.kind=kind;d.where=where;d.automatic=automatic;d.fromCaller=fromCaller;for(auto& a:args)d.args.push_back(a(s));d.bindings=*s.bindings;
-  if(s.e.trace){std::string detail=kind+(automatic?" = auto":fromCaller?" = from_caller":"");for(size_t i=0;i<d.args.size();i++)detail+=(i?",":" = ")+std::to_string(d.args[i]);
-  s.e.note(Event::Draw,where,detail);}if(s.result)s.result->draws.push_back(d);else s.e.limitation(where,kind+" outside a draw: the core records it, nothing is drawn");}};
+struct DrawCmd:Command {Kind kind()const override{return Kind::Draw;}std::string type,where;std::vector<Expression> args;bool automatic=false,fromCaller=false;
+ void run(RunState& s)override{IssuedDraw d;d.kind=type;d.where=where;d.automatic=automatic;d.fromCaller=fromCaller;for(auto& a:args)d.args.push_back(a(s));d.bindings=*s.bindings;
+  if(s.e.trace){std::string detail=type+(automatic?" = auto":fromCaller?" = from_caller":"");for(size_t i=0;i<d.args.size();i++)detail+=(i?",":" = ")+std::to_string(d.args[i]);
+  s.e.note(Event::Draw,where,detail);}if(s.result)s.result->draws.push_back(d);else s.e.limitation(where,type+" outside a draw: the core records it, nothing is drawn");}};
 
 // ------------------------------------------------------------------ context
 inline RunState::RunState(Engine& engine):e(engine){}
@@ -339,7 +339,7 @@ inline bool Engine::parseLine(ListSection& ls,Scope& scope,const Line& line,cons
   limitation(where,key+" is not ported (GPU or frame analysis work)");add(c,explicitList,key=="preset"||key=="exclude_preset"?nullptr:&ls.pre,ls.pre,ls.post);return true;}
  static const std::map<std::string,size_t> drawKinds={{"draw",2},{"drawauto",0},{"drawindexed",3},{"drawindexedinstanced",5},{"drawinstanced",4},{"dispatch",3}};
  auto dk=drawKinds.find(key);
- if(dk!=drawKinds.end()){auto c=std::make_shared<DrawCmd>();c->kind=key;c->where=where;c->line=line.raw;
+ if(dk!=drawKinds.end()){auto c=std::make_shared<DrawCmd>();c->type=key;c->where=where;c->line=line.raw;
   if(key=="draw"&&val=="from_caller")c->fromCaller=true;else if((key=="draw"||key=="drawindexed"||key=="drawindexedinstanced")&&val=="auto")c->automatic=true;
   else if(dk->second){size_t start=0;for(;;){size_t comma=val.find(',',start);c->args.push_back(expression(val.substr(start,comma==std::string::npos?std::string::npos:comma-start),ns,&scope,true));
     if(comma==std::string::npos)break;

@@ -39,10 +39,10 @@ struct LegacyDraw {std::string part,ib,position,blend,texcoord,t0,t1,t2;};
 // The game side: LogicDriver on the converter's logic data (LegacyAnimationDump's fourth argument), against FrameLoop:
 // frame by frame it must show a prebuilt frame whose recorded signatures equal those of FrameLoop's frame.
 static int driverCheck(const fs::path& dir,const ms::AnimationSpec& spec,int frames,std::string& note){
- ms::LogicSpec logic=ms::logicOf(ms::JsonParser(slurp(dir/"model-logic.json")).parse(),dir.string(),spec);ms::LogicDriver d(logic);ms::FrameLoop loop(spec);loop.tick(0);d.tick(0,0);
+ ms::LogicSpec logic=ms::logicOf(ms::JsonParser(slurp(dir/"model-logic.json")).parse(),dir.string(),spec,ms::Variants{});ms::LogicDriver d(logic);ms::FrameLoop loop(spec);loop.tick(0);d.tick(0,0);
  int bad=d.frame()<0?1:0;std::set<int> shown;
  for(int tick=1;tick<=frames&&!bad;tick++){loop.tick(uint32_t(tick));d.tick(uint32_t(tick),tick/60.0);
-  if(d.frame()<0||logic.frames[size_t(d.frame())]!=logic.frames[loop.current]){std::cerr<<"tick "<<tick<<": driver frame "<<d.frame()<<", FrameLoop frame "<<loop.current<<(d.miss.empty()?"":"; miss "+d.miss)<<"\n";bad++;}
+  if(d.frame()<0||logic.choices[size_t(d.frame())]!=logic.choices[loop.current]){std::cerr<<"tick "<<tick<<": driver frame "<<d.frame()<<", FrameLoop frame "<<loop.current<<(d.miss.empty()?"":"; miss "+d.miss)<<"\n";bad++;}
   else shown.insert(spec.frames[size_t(d.frame())].value);}
  if(bad&&!d.miss.empty())std::cerr<<"miss: "<<d.miss<<"\n";
  note="\n  game side: LogicDriver on the converter's data: "+d.summary()+"; "+std::to_string(frames)+" frames, "+(bad?"MISMATCH":"same signatures as FrameLoop every frame")+", "+std::to_string(shown.size())+" distinct frames shown, "+std::to_string(d.stats.changes)+" frame changes, "+std::to_string(d.stats.misses)+" misses, "+std::to_string(d.stats.presents?d.stats.stepUs/d.stats.presents:0)+" us per frame on this host (max "+std::to_string(d.stats.maxStepUs)+")";

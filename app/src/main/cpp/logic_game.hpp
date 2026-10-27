@@ -33,7 +33,7 @@ public:
   for(auto& r:engine.resources)if(!spec.resources.count(r.first))unknown.push_back(r.second.name);
   for(auto& p:spec.passes){migoto::Session::Pass x;x.name=p.name;for(auto& b:p.bindings)x.draw.bindings[b.first]=migoto::Ref::game(b.second);x.draw.checks=p.checks;x.draw.call=p.call;passes.push_back(std::move(x));}
   draws();}
- // The prebuilt frame the current selection matches; -1 when it matches none.
+ // The prebuilt choice (animation frame or outfit) the current selection matches; -1 when it matches none.
  int frame()const{return matched;}
  // engineFrame: the game's frame counter (Time.frameCount); seconds: a monotonic clock. Returns true when the
  // matched frame changed. The first call only starts the clock; a jump of more than 240 frames is not replayed.
@@ -62,13 +62,21 @@ public:
     out+=f.name+"="+identity(ref)+";";}
    out+="|";}
   return out;}
+ // An outside choice (the App's outfit selection, until keys reach the core): the variable as the main INI names it.
+ // False when the logic has no such variable. The next tick's draws see it.
+ bool set(const std::string& name,int value){std::string low=name;for(auto& c:low)if(c>='A'&&c<='Z')c=char(c-'A'+'a');migoto::Var* v=engine.global(low,spec.mainNs);if(!v)return false;
+  if(v->value!=float(value)){v->value=float(value);if(v->flags&migoto::VarPersist)engine.persistDirty=true;}return true;}
+ // Draws again now (after set), without a Present; true when the matched choice changed.
+ bool reselect(){int before=matched;draws();if(matched!=before)stats.changes++;return matched!=before;}
+ // The finite-state analysis of the loaded logic (it sets variables while it runs and puts them back).
+ migoto::ImportScan scan(){return migoto::ImportScan(engine);}
  std::string miss;            // why the last miss matched nothing: per differing part, what the closest frame has and what is selected
  std::vector<std::string> unknown;   // [Resource] sections the core has that the converter did not list
  Stats stats;
  const migoto::Diagnostics& diagnostics()const{return engine.diag;}
  const migoto::Engine& core()const{return engine;}
  std::string summary()const{size_t lim=engine.diag.count(migoto::Diagnostic::Limitation),warn=engine.diag.count(migoto::Diagnostic::Warning);
-  return std::to_string(spec.files.size())+" INI, "+std::to_string(engine.globals.size())+" globals, "+std::to_string(spec.resources.size())+" resources, "+std::to_string(passes.size())+" draws per frame, "+std::to_string(spec.frames.size())+" prebuilt frames; "
+  return std::to_string(spec.files.size())+" INI, "+std::to_string(engine.globals.size())+" globals, "+std::to_string(spec.resources.size())+" resources, "+std::to_string(passes.size())+" draws per frame, "+std::to_string(spec.choices.size())+" prebuilt choices; "
    +std::to_string(warn)+" warnings, "+std::to_string(lim)+" limitations";}
 private:
  const LogicSpec& spec;migoto::Engine engine;std::vector<migoto::Session::Pass> passes;
@@ -84,13 +92,13 @@ private:
   for(auto& p:passes)current[p.name]=engine.draw(p.draw);
   // The frame shown now stays while it still matches (identical frames are common); else the first that matches.
   std::map<std::string,std::string> now;for(auto& d:spec.parts)now[d.first]=signature(d.first);
-  auto fits=[&](size_t f){for(auto& d:spec.frames[f])if(now[d.first]!=d.second)return false;return true;};
+  auto fits=[&](size_t f){for(auto& d:spec.choices[f])if(now[d.first]!=d.second)return false;return true;};
   if(matched>=0&&fits(size_t(matched)))return;
-  for(size_t f=0;f<spec.frames.size();f++)if(fits(f)){matched=int(f);return;}
+  for(size_t f=0;f<spec.choices.size();f++)if(fits(f)){matched=int(f);return;}
   // No frame has this selection: name the closest frame (most parts equal) and each part that differs.
-  stats.misses++;size_t best=0,bestSame=0;for(size_t f=0;f<spec.frames.size();f++){size_t same=0;for(auto& d:spec.frames[f])same+=now[d.first]==d.second;if(same>bestSame||f==0){best=f;bestSame=same;}}
+  stats.misses++;size_t best=0,bestSame=0;for(size_t f=0;f<spec.choices.size();f++){size_t same=0;for(auto& d:spec.choices[f])same+=now[d.first]==d.second;if(same>bestSame||f==0){best=f;bestSame=same;}}
   miss="closest prebuilt frame index "+std::to_string(best)+" ("+std::to_string(bestSame)+" of "+std::to_string(now.size())+" parts equal)";
-  if(!spec.frames.empty())for(auto& d:spec.frames[best])if(now[d.first]!=d.second){auto shorten=[](const std::string& t){return t.size()>400?t.substr(0,400)+"...":t;};miss+="; "+d.first+": prebuilt "+shorten(d.second)+" selected "+shorten(now[d.first]);}}
+  if(!spec.choices.empty())for(auto& d:spec.choices[best])if(now[d.first]!=d.second){auto shorten=[](const std::string& t){return t.size()>400?t.substr(0,400)+"...":t;};miss+="; "+d.first+": prebuilt "+shorten(d.second)+" selected "+shorten(now[d.first]);}}
 };
 
 }  // namespace ms

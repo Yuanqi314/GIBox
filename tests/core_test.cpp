@@ -26,8 +26,12 @@ int main(int argc,char**argv){
  if(argc==2){std::string p=argv[1];auto m=loadModelFile(p);auto s=readSummary(p);assert(m->parts.size()==s.parts.size()&&!m->parts.empty()&&m->variants.combos.empty());
   for(auto& part:m->parts){assert(!part.draws.empty());for(auto& d:part.draws)assert(m->materials.count(d.row.name));std::vector<Submesh> subs;std::vector<Material> rows;activeDraws(part.draws,m->variants.defaults,subs,rows);assert(!subs.empty());}
   if(m->animation.present())for(size_t i=0;i<m->animation.frames.size();i++){auto frame=loadModelFile(p,false,false,int(i),m->generation);assert(frame->parts.size()==m->parts.size());}
-  if(m->logic.present()){LogicDriver d(m->logic);assert(d.frame()>=0);FrameLoop loop(m->animation);loop.tick(0);d.tick(0,0);
-   for(uint32_t t=1;t<=60;t++){loop.tick(t);d.tick(t,t/60.0);if(m->logic.frames[size_t(d.frame())]!=m->logic.frames[loop.current]){std::cerr<<"logic frame "<<d.frame()<<" vs FrameLoop "<<loop.current<<" at "<<t<<"\n";return 1;}}
+  if(m->logic.present()&&!m->animation.present()){LogicDriver d(m->logic);
+   for(size_t i=0;i<m->logic.assignments.size();i++){for(auto& kv:m->logic.assignments[i])assert(d.set(kv.first,kv.second));d.reselect();
+    if(d.frame()<0||m->logic.choices[size_t(d.frame())]!=m->logic.choices[i]){std::cerr<<"logic outfit "<<i<<": driver picked "<<d.frame()<<"; "<<d.miss<<"\n";return 1;}}
+   std::cout<<"Native logic: "<<d.summary()<<"; every outfit picked when its values are set\n";}
+  if(m->logic.present()&&m->animation.present()){LogicDriver d(m->logic);assert(d.frame()>=0);FrameLoop loop(m->animation);loop.tick(0);d.tick(0,0);
+   for(uint32_t t=1;t<=60;t++){loop.tick(t);d.tick(t,t/60.0);if(m->logic.choices[size_t(d.frame())]!=m->logic.choices[loop.current]){std::cerr<<"logic frame "<<d.frame()<<" vs FrameLoop "<<loop.current<<" at "<<t<<"\n";return 1;}}
    std::cout<<"Native logic: "<<d.summary()<<"; 60 frames as FrameLoop\n";}
   if(exists(p+"/learned.json"))learnedOf(JsonParser(text(p+"/learned.json")).parse());
   return 0;}
@@ -177,13 +181,13 @@ int main(int argc,char**argv){
    std::string message;fixture::writeModel(root+"/"+name,spec);try{loadModelFile(root+"/"+name);}catch(const std::exception& ex){message=ex.what();}
    if(message.find(why)==std::string::npos){std::cerr<<"expected \""<<why<<"\", got \""<<message<<"\"\n";assert(false);}};
   auto ibs=std::vector<std::string>{"file:a.ib","file:b.ib","file:c.ib"};
-  logicRefused("logic-static",fixture::withLogic(Spec(),fixture::logicJson(ibs)),"logic: only for animation models");
+  logicRefused("logic-static",fixture::withLogic(Spec(),fixture::logicJson(ibs)),"logic: only for animation or outfit models");
   logicRefused("logic-path",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/../x.ini")),"logic: file name");
   logicRefused("logic-missing",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/7.ini")),"Cannot read");
   logicRefused("logic-pass",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/0.ini","Skin")),"logic: Part ib");
   logicRefused("logic-frames",fixture::withLogic(fixture::animated(),fixture::logicJson({"file:a.ib","file:b.ib"})),"Invalid \"frames\" list");
   {fixture::writeLogicModel(root+"/logic-ok",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs)));auto m=loadModelFile(root+"/logic-ok");
-   assert(m->logic.present()&&m->logic.files[0].text==fixture::logicIni&&m->logic.passes[0].bindings.at("ib")==0xaaaa0001u&&m->logic.frames.size()==3);
+   assert(m->logic.present()&&m->logic.files[0].text==fixture::logicIni&&m->logic.passes[0].bindings.at("ib")==0xaaaa0001u&&m->logic.choices.size()==3);
    LogicDriver d(m->logic);assert(d.frame()==0&&d.signature("Part")==fixture::logicSignature("file:a.ib"));
    FrameLoop loop(m->animation);loop.tick(0);d.tick(0,0);for(uint32_t t=1;t<=12;t++){loop.tick(t);d.tick(t,t/60.0);assert(d.frame()==int(loop.current));}}
   // Signature 2: what a part's draws select, matched to prebuilt frames by resource identity, range, order and state.
@@ -193,7 +197,7 @@ int main(int argc,char**argv){
     std::string dir=root+"/"+name,files,fr;std::filesystem::create_directories(dir+"/logic");
     for(size_t i=0;i<inis.size();i++){write(dir+"/logic/"+std::to_string(i)+".ini",inis[i].second);files+=(i?",":"")+std::string("{\"namespace\":")+quote(inis[i].first)+",\"file\":\"logic/"+std::to_string(i)+".ini\"}";}
     for(size_t i=0;i<frames.size();i++){std::string d;for(auto& kv:frames[i])d+=(d.empty()?"":",")+quote(kv.first)+":"+quote(kv.second);fr+=(i?",":"")+std::string("{\"value\":")+std::to_string(i)+",\"draws\":{"+d+"}}";}
-    fixture::writeModel(dir,fixture::withLogic(fixture::animated(),"{\"signature\":2,\"files\":["+files+"],\"resources\":"+resources+",\"passes\":"+passes+",\"fields\":"+fields+",\"frames\":["+fr+"]}"));
+    fixture::writeModel(dir,fixture::withLogic(fixture::animated(),"{\"signature\":2,\"main\":"+quote(inis[0].first)+",\"files\":["+files+"],\"resources\":"+resources+",\"passes\":"+passes+",\"fields\":"+fields+",\"frames\":["+fr+"]}"));
     return loadModelFile(dir);};
    auto own=[](const std::string& part){std::string f;for(std::string x:{"ib","position","blend","texcoord","ps-t0","ps-t1","ps-t2"})f+=(f.empty()?"":",")+("\""+x+"\":[\""+part+"\",\""+(x=="ib"||x.rfind("ps-",0)==0?x:std::string("vb0"))+"\"]");return "{"+f+"}";};
    auto pass=[](const std::string& part,const std::string& hash){return "{\"name\":\""+part+"\",\"bindings\":{\"ib\":\""+hash+"\"},\"checks\":[\"ib\"]}";};
@@ -217,6 +221,14 @@ int main(int argc,char**argv){
    std::string states=cycle+"[TextureOverridePart]\nhash = aaaa0001\nif $frame == 0\n handling = skip\nelif $frame == 2\n handling = skip\n ib = ResourceA\n drawindexed = auto\nendif\n[ResourceA]\nfilename = a.ib\n";
    auto shown=model("logic-states",{{"Mods\\Logic\\a.ini",states}},table,"["+pass("Part","aaaa0001")+"]","{\"Part\":"+own("Part")+"}",{{{"Part","hidden"}},{{"Part","original"}},{{"Part",fixture::logicDraw("file:a.ib")}}});
    {LogicDriver d(shown->logic);assert(follows(d,shown->animation)&&d.stats.misses==0);}
+   // An animation whose logic also has an outfit variable: frames were converted with $dress = 0 only, so $dress = 1
+   // selects what no frame has; the frame shown stays and the miss says what differs.
+   std::string dressed=cycle+"[Constants]\nglobal $dress = 0\n[TextureOverridePart]\nhash = aaaa0001\nhandling = skip\nif $dress == 1\n ib = ResourceB\nelse\n ib = ResourceA\nendif\ndrawindexed = auto\n[ResourceA]\nfilename = a.ib\n[ResourceB]\nfilename = b.ib\n";
+   auto both=model("logic-dress",{{"Mods\\Logic\\a.ini",dressed}},"{\"resource\\\\mods\\\\logic\\\\a.ini\\\\a\":\"file:a.ib\",\"resource\\\\mods\\\\logic\\\\a.ini\\\\b\":\"file:b.ib\"}","["+pass("Part","aaaa0001")+"]","{\"Part\":"+own("Part")+"}",
+    std::vector<std::map<std::string,std::string>>(3,{{"Part",fixture::logicDraw("file:a.ib")}}));
+   {LogicDriver d(both->logic);assert(d.frame()==0&&d.set("$dress",1));d.reselect();assert(d.frame()==0&&d.stats.misses==1&&d.miss.find("selected "+fixture::logicDraw("file:b.ib"))!=std::string::npos);
+    // One engine frame is one Present however many renderers ask: the same frame number again does nothing.
+    d.tick(10,0.1);d.tick(11,0.2);d.tick(11,0.2);d.tick(11,0.25);assert(d.stats.presents==1);}
    // Logic data of 0.7.34 loads (the model is fine) and is refused by the driver, with the reason.
    fixture::writeModel(root+"/logic-old",fixture::withLogic(fixture::animated(),"{\"files\":[{\"namespace\":\"Mods\\\\Logic\\\\a.ini\",\"file\":\"logic/0.ini\"}],\"passes\":[],\"reads\":{},\"frames\":[]}"));
    auto old=loadModelFile(root+"/logic-old");std::string why;try{LogicDriver d(old->logic);}catch(const std::exception& ex){why=ex.what();}

@@ -159,7 +159,8 @@ static void selection(){
  CHECK_EQ(s.tick({{"sel",d}},0.0).size(),size_t(1));CHECK_EQ(s.tick({{"sel",d}},0.1).size(),size_t(0));
  e.globals["$\\mods\\s\\s.ini\\sel"].value=1;auto changed=s.tick({{"sel",d}},0.2);CHECK_EQ(changed.size(),size_t(1));
  CHECK(s.last["sel"].bindings["vb0"]=="ResourceB");
- ImportScan scan(e);CHECK_EQ(scan.resources.size(),size_t(3));CHECK(scan.finiteStates);CHECK_EQ(scan.states,uint64_t(1));}
+ ImportScan scan(e);CHECK_EQ(scan.resources.size(),size_t(3));CHECK(!scan.finiteStates);   // ResourceSave = ref ps-t0: what it holds is the game's
+ bool game=false;for(auto& r:scan.reasons)game|=r.find("uses a game resource")!=std::string::npos;CHECK(game);}
 
 // An outfit set a key cycles: three styles with consecutive file names and a drawindexed each. It is finite (every
 // write is a key value or a constant), so the importer may prepare all three; nothing about it is an animation.
@@ -174,6 +175,59 @@ static void outfits(){
  e.keyDown("KeyDress");s.tick({{"body",d}},0.2);CHECK_EQ(s.tick({{"body",d}},0.3).size(),size_t(1));CHECK(s.last["body"].draws[0].find("ResourceBodyIB.1")!=std::string::npos);
  CHECK_EQ(e.persistent().at("$\\mods\\dress\\dress.ini\\dress"),1.0f);CHECK(e.persistDirty);
  Engine again;again.load({{"Mods\\Dress\\dress.ini",o.str()}});again.start(e.persistent());CHECK_EQ(var(again,"$\\mods\\dress\\dress.ini\\dress"),1.0f);}
+
+// ImportScan: which variables what is drawn depends on, and whether their values are a fixed set. Through if
+// conditions, draw arguments, assignments from other variables and the ifs around them, locals; a counter, the
+// clock, random() and a texture filter are not finite.
+static ImportScan scanOf(const std::string& ini){Engine e=loaded({{"Mods\\S\\s.ini",ini}});return ImportScan(e);}
+static bool reason(const ImportScan& s,const std::string& text){for(auto& r:s.reasons)if(r.find(text)!=std::string::npos)return true;return false;}
+static void finiteness(){
+ const std::string head="[Constants]\nglobal $a = 0\nglobal $b = 0\nglobal $n = 3\nglobal $t = 0\n[ResourceA]\nfilename = a.ib\n[ResourceB]\nfilename = b.ib\n";
+ std::string k="\\mods\\s\\s.ini\\";
+ // A draw count read straight from a variable that a key sets: finite, its values are the key's and the initial one.
+ {auto s=scanOf(head+"[KeyN]\nkey = 1\ntype = cycle\n$n = 3,6\n[TextureOverrideP]\nhash = 1\nhandling = skip\nib = ResourceA\ndrawindexed = $n,0,0\n");
+  CHECK(s.finiteStates);CHECK(s.vars["$"+k+"n"].readByDraws);CHECK(s.vars["$"+k+"n"].values==std::set<float>({3,6}));CHECK_EQ(s.states,uint64_t(2));}
+ // $b decides the draw; Present copies $a + 1 into $b under if $t: $a and $t become draw variables too.
+ {auto s=scanOf(head+"[KeyA]\nkey = 1\ntype = cycle\n$a = 0,1,2\n[KeyT]\nkey = 2\ntype = toggle\n$t = 1\n[Present]\nif $t\n $b = $a + 1\nendif\n"
+   "[TextureOverrideP]\nhash = 1\nif $b == 2\n ib = ResourceB\nendif\n");
+  CHECK(s.finiteStates);CHECK(s.vars["$"+k+"a"].readByDraws);CHECK(s.vars["$"+k+"t"].readByDraws);CHECK(s.vars["$"+k+"b"].values==std::set<float>({0,1,2,3}));CHECK_EQ(s.states,uint64_t(3*2*4));}
+ // A local that carries a value into the draw decision.
+ {auto s=scanOf(head+"[KeyA]\nkey = 1\ntype = cycle\n$a = 0,1\n[CommandListPick]\nlocal $pick\n$pick = $a * 2\nif $pick == 2\n ib = ResourceB\nendif\n[TextureOverrideP]\nhash = 1\nrun = CommandListPick\n");
+  auto& pick=s.vars["CommandList\\Mods\\S\\s.ini\\Pick local $pick"];CHECK(s.finiteStates);CHECK(pick.readByDraws);CHECK(pick.values==std::set<float>({0,2}));}
+ // A counter, even one that wraps: not provable here, so not finite.
+ {auto s=scanOf(head+"[Present]\nif $a < 20\n $a = $a + 1\nelse\n $a = 0\nendif\n[TextureOverrideP]\nhash = 1\nif $a == 3\n ib = ResourceB\nendif\n");
+  CHECK(!s.finiteStates);CHECK(!s.vars["$"+k+"a"].finite);CHECK(reason(s,"a counter"));}
+ // The clock, random() and a texture filter make the decision depend on what is outside the mod.
+ {auto s=scanOf(head+"[Present]\n$b = time\n[TextureOverrideP]\nhash = 1\nif $b > 5\n ib = ResourceB\nendif\n");CHECK(!s.finiteStates);CHECK(reason(s,"reads time"));}
+ {auto s=scanOf(head+"[Present]\n$b = random(3)\n[TextureOverrideP]\nhash = 1\nif $b > 1\n ib = ResourceB\nendif\n");CHECK(!s.finiteStates);CHECK(reason(s,"random()"));}
+ {auto s=scanOf(head+"[TextureOverrideP]\nhash = 1\nif ps-t0 == 1\n ib = ResourceB\nendif\n");CHECK(!s.finiteStates);CHECK(reason(s,"texture filter ps-t0"));}
+ // A transition passes through values in between.
+ {auto s=scanOf(head+"[KeyA]\nkey = 1\n$a = 1\ntransition = 100\n[TextureOverrideP]\nhash = 1\nif $a == 1\n ib = ResourceB\nendif\n");CHECK(!s.finiteStates);CHECK(reason(s,"transition"));}
+ // A variable only Present uses (not what is drawn) does not count.
+ {auto s=scanOf(head+"[Present]\n$t = $t + 1\n[KeyA]\nkey = 1\ntype = cycle\n$a = 0,1\n[TextureOverrideP]\nhash = 1\nif $a == 1\n ib = ResourceB\nendif\n");CHECK(s.finiteStates);CHECK(!s.vars["$"+k+"t"].readByDraws);CHECK_EQ(s.states,uint64_t(2));}
+ // A long else-if chain (a merged animation's frame lists): every branch is reached, once; walking every path is
+ // exponential in the chain's length and never finishes.
+ {std::ostringstream o;o<<head<<"[KeyA]\nkey = 1\ntype = cycle\n$a = ";for(int i=0;i<64;i++)o<<(i?",":"")<<i;o<<"\n[CommandListPick]\n";
+  for(int i=0;i<64;i++)o<<(i?"else if":"if")<<" $a == "<<i<<"\n ib = ResourceF"<<i<<"\n";
+  o<<"endif\n[TextureOverrideP]\nhash = 1\nrun = CommandListPick\n[TextureOverrideQ]\nhash = 2\nrun = CommandListPick\n";for(int i=0;i<64;i++)o<<"[ResourceF"<<i<<"]\nfilename = f"<<i<<".ib\n";
+  auto s=scanOf(o.str());CHECK(s.finiteStates);CHECK_EQ(s.states,uint64_t(64));CHECK_EQ(s.resources.size(),size_t(64));CHECK_EQ(s.bindings.size(),size_t(64));}
+ // Deeper than the scan follows: refused with a reason, never cut short as if the rest did not exist.
+ {std::ostringstream o;o<<head<<"[TextureOverrideP]\nhash = 1\n";for(int i=0;i<1100;i++)o<<(i?"else if":"if")<<" $a == "<<i<<"\n ib = ResourceA\n";o<<"endif\n";
+  auto s=scanOf(o.str());CHECK(!s.finiteStates);CHECK(reason(s,"nested too deep"));}
+ // A list reached under different conditions keeps both: the write in CommandListSet depends on $c and on $d.
+ {std::string h=head;h.replace(h.find("[ResourceA]"),0,"global $c = 0\nglobal $d = 0\n");auto s=scanOf(h+"[KeyC]\nkey = 1\ntype = toggle\n$c = 1\n[KeyD]\nkey = 2\ntype = toggle\n$d = 1\n"
+   "[Present]\nif $d\n run = CommandListSet\nendif\nif $c\n run = CommandListSet\nendif\n[CommandListSet]\n$b = 1\n[TextureOverrideP]\nhash = 1\nif $b == 1\n ib = ResourceB\nendif\n");
+  CHECK(s.finiteStates);CHECK(s.vars["$"+k+"c"].readByDraws);CHECK(s.vars["$"+k+"d"].readByDraws);CHECK(s.vars["$"+k+"b"].values==std::set<float>({0,1}));}
+ // What is drawn repeats for 100 frames, then a counter opens a new branch: the repetition is no proof of a cycle,
+ // and the scan does not take the counter for finite.
+ {std::string ini=head+"[Present]\n$t = $t + 1\n[TextureOverrideP]\nhash = 1\nif $t > 100\n ib = ResourceB\nelse\n ib = ResourceA\nendif\n";
+  Engine e=loaded({{"Mods\\S\\s.ini",ini}});Session run(e);std::vector<Session::Pass> passes{{"p",drawOf({{"ib",Ref::game(1)}},{"ib"})}};
+  std::map<std::string,Session::Selection> sel;std::set<std::string> early;
+  for(int f=0;f<100;f++){run.tick(passes,f/60.0,&sel);early.insert(sel["p"].bindings["ib"]);}
+  CHECK_EQ(early.size(),size_t(1));
+  for(int f=100;f<103;f++)run.tick(passes,f/60.0,&sel);
+  CHECK(sel["p"].bindings["ib"]!=*early.begin());
+  ImportScan scan(e);CHECK(!scan.finiteStates);CHECK(!scan.vars["$"+k+"t"].finite);CHECK(reason(scan,"a counter"));}}
 
 // The Present frame loop of a merged GIMI animation (as in the uploaded Traveler MOD, three frames here), run by
 // the core and by the old path (model.hpp FrameLoop with the values the old converter extracts), side by side.
@@ -205,8 +259,8 @@ static void animation(){
   ImportScan scan(e);CHECK(!scan.finiteStates);CHECK(!scan.vars["$\\mods\\anim\\anim.ini\\swapvar"].finite);CHECK_EQ(scan.resources.size(),size_t(3*frames));}}
 
 int main(){
- expressions();namespaces();conditions();prePost();timing();keys();matching();postRematch();selection();outfits();animation();
+ expressions();namespaces();conditions();prePost();timing();keys();matching();postRematch();selection();outfits();finiteness();animation();
  if(failures){std::cerr<<failures<<" failure(s)\n";return 1;}
  std::cout<<"3DMigoto logic core: PASS (float expressions and precedence, namespaces, nested if / else if / locals, run and pre/post placement, abort, "
   "Present / input / transition order, keys: cycle, toggle, hold, condition, transition; TextureOverride draw matching and order, texture filters, "
-  "resource selection and change detection, finite outfit cycle and persist, Present frame loop vs the old FrameLoop; simulated, not a game run)\n";}
+  "resource selection and change detection, finite outfit cycle and persist, finite-state analysis (draw arguments, assignment and control dependencies, locals, counters, clock, random, texture filters, transitions), Present frame loop vs the old FrameLoop; simulated, not a game run)\n";}

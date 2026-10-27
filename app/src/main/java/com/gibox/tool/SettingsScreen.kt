@@ -173,8 +173,8 @@ fun SettingsScreen(state: AppState) {
                     }
                     SettingsSwitch(
                         state = logic,
-                        title = { Text("由 MOD 自己的 INI 逻辑决定显示哪一帧") },
-                        subtitle = { Text("3DMigoto 逻辑核心在游戏里执行 [Constants]、[Present]、TextureOverride，按选中的资源找已转换的帧；需要重新转换过的 MOD，否则或出错时仍按原帧循环。日志看 logic-") },
+                        title = { Text("由 MOD 自己的 INI 逻辑决定显示哪一帧、哪套款式") },
+                        subtitle = { Text("3DMigoto 逻辑核心在游戏里执行 [Constants]、[Present]、TextureOverride，按选中的资源找已转换的帧或款式；款式的选择作为逻辑的输入。需要用 0.7.36 重新转换的 MOD，否则或出错时仍按原来的方式。日志看 logic-") },
                         shapes = ListItemDefaults.segmentedShapes(1, 2),
                         onCheckedChange = { state.setExperiment("logicCore", it) },
                     )
