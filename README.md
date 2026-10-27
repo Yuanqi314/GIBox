@@ -1,6 +1,6 @@
 # GIBox
 
-![license](https://img.shields.io/badge/license-MIT-blue)
+![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 ![android](https://img.shields.io/badge/Android-8.0%2B-3DDC84)
 ![abi](https://img.shields.io/badge/ABI-arm64--v8a-informational)
 ![lsposed](https://img.shields.io/badge/LSPosed-module-orange)

@@ -1,3 +1,35 @@
+GIBox licensing
+===============
+
+This repository contains code ported from 3DMigoto (XXMI fork): the INI
+command-list logic core in app/src/main/cpp/migoto/. 3DMigoto is licensed
+under the GNU General Public License, version 3. The combined work, GIBox as
+built from this repository from that point on, is therefore distributed under
+the GNU General Public License, version 3. The full text is in COPYING.
+
+Where the ported code came from, at which upstream commit, and what was changed
+is recorded in third_party/3dmigoto/README.md, together with the upstream
+license statement (third_party/3dmigoto/COPYING.txt) and author list
+(third_party/3dmigoto/AUTHORS.txt).
+
+GIBox code contributed before the port (up to and including commit 971cb16)
+was contributed under the MIT License reproduced below. That notice is kept
+unchanged and still applies to those contributions; anyone may continue to use
+those parts on their own under the MIT terms, provided the notice is kept. The
+MIT License is compatible with the GPLv3, so it does not restrict distributing
+the combined work under the GPLv3. Contributions made after the port are made
+under the GPLv3.
+
+A release (APK or other binary) built from this repository must be accompanied
+by, or offer, the complete corresponding source: this repository at the
+release's commit, including the build scripts (Gradle and CMake files, tools/)
+and the third-party sources or the exact versions the build fetches, as listed
+in THIRD_PARTY.md (GPLv3 section 6).
+
+----------------------------------------------------------------------------
+Original GIBox license notice (unchanged)
+----------------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2026 GIBox contributors
