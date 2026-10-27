@@ -178,7 +178,7 @@ struct Runtime::Impl {
   Ptr animationOwner=0;Ptr originMesh=0,originMaterials=0;RestoreBackup* backup=nullptr;
   Owned dynamicRoots;std::map<std::string,Ptr> dynamicArrays;std::string dynamicShape;std::vector<int> boneMapping,targetParents;Bytes targetBinds;
   int bindable=-1;};  // last incoming bone-name hash count compatibility, for log suppression; origin pair pinned by the set
- struct AnimationRun {std::string error;FrameLoop loop;std::unique_ptr<LogicDriver> logic;bool logicFailed=false,logicFresh=false;uint64_t logicMisses=0;std::string logicMissLogged;int mode=0;uint64_t token=0,started=0,lastStats=0,lastMark=0,updates=0,applyUs=0,maxApplyUs=0;size_t preparing=0,buildPart=0,backPart=0,applied=0;bool loading=false,ready=false,stopped=false;
+ struct AnimationRun {std::string error;FrameLoop loop;std::unique_ptr<LogicDriver> logic;bool logicFailed=false,logicFresh=false,logicNoted=false;uint64_t logicMisses=0;std::string logicMissLogged;int mode=0;uint64_t token=0,started=0,lastStats=0,lastMark=0,updates=0,applyUs=0,maxApplyUs=0;size_t preparing=0,buildPart=0,backPart=0,applied=0;bool loading=false,ready=false,stopped=false;
   std::vector<std::shared_ptr<ModelFile>> cpu;std::vector<std::vector<Ptr>> meshes;std::vector<std::vector<Ptr>> owned;std::vector<Ptr> back;
  };
  uint64_t animationToken=0;
@@ -1067,6 +1067,7 @@ struct Runtime::Impl {
  // experiments.logicCore: the logic core of a set that has logic data starts with the switch (its first selection must
  // match a prebuilt frame) and stops with it; any failure drops it for good and FrameLoop carries on from the frame shown.
  void logicSwitch(Set& s){auto& a=s.animation;
+  if(ctl.exp.logicCore&&!s.logicSpec.present()&&!a.logicNoted){a.logicNoted=true;log("logic-unavailable",s.name+": converted without logic data (before 0.7.34, or the converter could not state it: see its conversion log); FrameLoop plays it");}
   if(!ctl.exp.logicCore||!s.logicSpec.present()){if(a.logic){a.logic.reset();a.loop.current=a.applied;a.loop.clock=false;log("logic-off",s.name+": FrameLoop from frame value "+std::to_string(a.loop.spec.frames[a.applied].value));}return;}
   if(a.logic||a.logicFailed)return;
   try{auto d=std::make_unique<LogicDriver>(s.logicSpec);
