@@ -197,6 +197,11 @@ class AppState(private val activity: Activity) {
         dismiss = dismiss,
     )
     fun setVariable(mod: Importer.Mod, variable: String, value: Int) = save("保存") { Control.setVariable(game, mod.name, variable, value) }
+    /** A [Key] of the mod's INI logic, pressed in the game by the logic core (experiments.logicCore). */
+    fun pressKey(mod: Importer.Mod, key: ModelManifest.Key) = save("按键") {
+        Control.pressKey(game, mod.name, key.file, key.section)
+        AppLog.info(game, LOGGER, "按键 ${mod.name} ${key.section}")
+    }
     /** Material experiments (debug): read back on every recomposition through `revision`. */
     fun experiment(key: String): Boolean = Control.experiment(game, key)
     fun experimentMs(): Int = Control.experimentMs(game)

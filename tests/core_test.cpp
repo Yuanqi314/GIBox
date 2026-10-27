@@ -186,6 +186,25 @@ int main(int argc,char**argv){
   logicRefused("logic-missing",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/7.ini")),"Cannot read");
   logicRefused("logic-pass",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/0.ini","Skin")),"logic: Part ib");
   logicRefused("logic-frames",fixture::withLogic(fixture::animated(),fixture::logicJson({"file:a.ib","file:b.ib"})),"Invalid \"frames\" list");
+  logicRefused("logic-key",fixture::withLogic(fixture::animated(),[&]{auto j=fixture::logicJson(ibs);j.insert(j.rfind('}'),",\"keys\":[{\"file\":0,\"section\":\"KeyA\",\"type\":\"hold\"}]");return j;}()),"logic: key type hold");
+  // Keys through the driver: a namespaced [Key], its conditions (one per cycle preset, as upstream), its run list's pre (on) and post (off), two presses
+  // before one Present both dispatched in order; persist values by full name, restored into a new driver.
+  {LogicSpec k;k.mainNs="Mods\\K\\a.ini";k.files.push_back({k.mainNs,"logic/0.ini","[Constants]\nglobal persist $look = 0\nglobal $armed = 1\n[KeyLook]\nkey = VK_UP\ntype = cycle\ncondition = $armed == 1, $armed == 1, $armed == 1\n$look = 0,1,2\n"
+    "[KeyStep]\nkey = VK_DOWN\ntype = toggle\nrun = CommandListStep\n[CommandListStep]\npre $look = 2\npost $look = 0\n"
+    "[TextureOverridePart]\nhash = aaaa0001\nhandling = skip\nif $look == 0\n ib = ResourceL0\nelif $look == 1\n ib = ResourceL1\nelse\n ib = ResourceL2\nendif\ndrawindexed = auto\n[ResourceL0]\nfilename = l0.ib\n[ResourceL1]\nfilename = l1.ib\n[ResourceL2]\nfilename = l2.ib\n"});
+   for(int i=0;i<3;i++){k.resources["resource\\mods\\k\\a.ini\\l"+std::to_string(i)]="file:l"+std::to_string(i)+".ib";k.choices.push_back({{"Part",fixture::logicDraw("file:l"+std::to_string(i)+".ib")}});k.assignments.push_back({{"$look",i}});}
+   LogicSpec::Pass pass;pass.name="Part";pass.bindings["ib"]=0xaaaa0001u;pass.checks={"ib"};k.passes.push_back(pass);
+   for(auto& f:logicFields())k.parts["Part"].push_back({f,"Part",f=="ib"||f.rfind("ps-",0)==0?f:std::string("vb0")});
+   k.keys={{0,"KeyLook","cycle"},{0,"KeyStep","toggle"}};LogicSpec::Key wrong{0,"KeyLook","toggle"},none{0,"KeyNone","cycle"},other{1,"KeyLook","cycle"};
+   LogicDriver d(k);d.tick(0,0);assert(d.frame()==0&&!d.press(wrong)&&!d.press(none)&&!d.press(other));
+   assert(d.press(k.keys[0])&&d.press(k.keys[0])&&d.frame()==0);d.tick(1,1/60.0);assert(d.frame()==2&&d.stats.keys==2);   // 0 -> 1 -> 2 in one Present
+   assert(d.press(k.keys[1]));d.tick(2,2/60.0);assert(d.frame()==2);assert(d.press(k.keys[1]));d.tick(3,3/60.0);assert(d.frame()==0);   // pre, then post
+   assert(d.set("$armed",0));assert(d.press(k.keys[0]));d.tick(4,4/60.0);assert(d.frame()==0);   // condition not met
+   assert(d.set("$armed",1));assert(d.press(k.keys[0]));d.tick(5,5/60.0);assert(d.frame()==1&&d.persistChanged()&&!d.persistChanged());
+   auto saved=d.persistent();assert(saved.size()==1&&saved.at("$\\mods\\k\\a.ini\\look")==1);
+   saved["$\\mods\\k\\a.ini\\armed"]=0;   // not persist: ignored, as upstream ignores it in d3dx_user.ini
+   LogicDriver back(k,saved);assert(back.frame()==1&&back.restoredCount()==1&&back.restoredVar("$look")&&!back.restoredVar("$armed")&&!back.persistChanged());
+   assert(back.press(k.keys[0]));back.tick(0,0);assert(back.frame()==1);back.tick(1,1/60.0);assert(back.frame()==2);}   // no Present on the first tick; smart cycle goes on from the restored 1
   {fixture::writeLogicModel(root+"/logic-ok",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs)));auto m=loadModelFile(root+"/logic-ok");
    assert(m->logic.present()&&m->logic.files[0].text==fixture::logicIni&&m->logic.passes[0].bindings.at("ib")==0xaaaa0001u&&m->logic.choices.size()==3);
    LogicDriver d(m->logic);assert(d.frame()==0&&d.signature("Part")==fixture::logicSignature("file:a.ib"));

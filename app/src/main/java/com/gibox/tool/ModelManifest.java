@@ -29,6 +29,10 @@ public final class ModelManifest {
     /** A part's target is a lower level of detail (converted against a skeleton library recorded while the character was
      *  still loading, before 0.6.5): the bone indices do not fit the full model, it has to be converted again. Else "". */
     public String lodMesh = "";
+    /** A [Key] of the model's INI logic the App can press (model.json "logic.keys", 0.7.37): with the logic core on, a
+     *  press goes to the core as a key event. */
+    public static final class Key { public int file; public String section = "", type = ""; }
+    public final List<Key> keys = new ArrayList<>();
 
     /** A lower level of detail by mesh name (Body_LOD1, Body_LOD3 …); the plain name and _LOD0 are the full mesh (core.hpp lowerLod). */
     public static boolean lowerLod(String mesh) {
@@ -95,6 +99,15 @@ public final class ModelManifest {
             Map<String, Object> l = Json.obj(Json.read(learned, 1L << 20), "learned.json");
             if ("gibox-learned".equals(l.get("format")) && l.get("id") != null) { int id = (int) Json.integer(l.get("id"), "learned.id", 0, 10001999); if (id == 0 || id >= 10000000) r.learnedId = id; }
         } catch (Exception ignored) {}
+        // Older models have no keys; a list the runtime would refuse is not offered.
+        try {
+            Object logic = m.get("logic");
+            if (logic instanceof Map && ((Map<?, ?>) logic).get("keys") != null) for (Object x : Json.arr(((Map<?, ?>) logic).get("keys"), "logic.keys", 0, 256)) {
+                Map<String, Object> e = Json.obj(x, "logic.keys"); Key k = new Key();
+                k.file = (int) Json.integer(e.get("file"), "logic.keys.file", 0, 63); k.section = Json.str(e.get("section"), "logic.keys.section", 256); k.type = Json.str(e.get("type"), "logic.keys.type", 16);
+                Json.check(k.type.equals("cycle") || k.type.equals("toggle"), "logic.keys.type"); r.keys.add(k);
+            }
+        } catch (Exception e) { r.keys.clear(); }
         return r;
     }
 

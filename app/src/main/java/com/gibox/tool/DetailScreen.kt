@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LargeFlexibleTopAppBar
@@ -55,6 +56,8 @@ fun DetailScreen(state: AppState, name: String) {
             return@Scaffold
         }
         val variants = remember(mod.model, state.revision) { mod.model?.let { Variants.read(it) } }
+        val keys = remember(mod.model, state.revision) { mod.model?.let { runCatching { ModelManifest.read(it).keys.toList() }.getOrNull() }.orEmpty() }
+        val logicCore = remember(state.revision) { state.experiment("logicCore") }
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 24.dp),
@@ -160,6 +163,23 @@ fun DetailScreen(state: AppState, name: String) {
                                         )
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            if (logicCore && keys.isNotEmpty()) item {
+                // The mod's own keys, as on PC: the logic core in the game runs what the key does (its run lists, conditions,
+                // assignments); 款式 above stays the App's own table and its fallback.
+                SettingsGroup(title = { SectionTitle("按键（逻辑核心）") }, verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(0, 1)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("在游戏里按一次；需要模型正在显示，并且逻辑核心在驱动它", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                for (k in keys) AssistChip(
+                                    onClick = { state.pressKey(mod, k) },
+                                    label = { Text(k.section.substring(3) + if (k.type == "toggle") "（开关）" else "（切换）") },
+                                )
                             }
                         }
                     }

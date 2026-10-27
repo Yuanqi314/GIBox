@@ -174,7 +174,7 @@ fun SettingsScreen(state: AppState) {
                     SettingsSwitch(
                         state = logic,
                         title = { Text("由 MOD 自己的 INI 逻辑决定显示哪一帧、哪套款式") },
-                        subtitle = { Text("3DMigoto 逻辑核心在游戏里执行 [Constants]、[Present]、TextureOverride，按选中的资源找已转换的帧或款式；款式的选择作为逻辑的输入。需要用 0.7.36 重新转换的 MOD，否则或出错时仍按原来的方式。日志看 logic-") },
+                        subtitle = { Text("3DMigoto 逻辑核心在游戏里执行 [Constants]、[Present]、TextureOverride，按选中的资源找已转换的帧或款式；款式的选择作为逻辑的输入；MOD 详情里的“按键”按 MOD 自己的 [Key]（切换 / 开关），persist 变量按模型保存。需要用 0.7.36 重新转换的 MOD（按键要 0.7.37），否则或出错时仍按原来的方式。日志看 logic-") },
                         shapes = ListItemDefaults.segmentedShapes(1, 2),
                         onCheckedChange = { state.setExperiment("logicCore", it) },
                     )

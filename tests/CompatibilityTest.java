@@ -37,7 +37,10 @@ public final class CompatibilityTest {
             if(mode==0){List<Object> variants=Json.arr(Json.obj(logicData,"logic").get("variants"),"variants",2,2);
                 ok(Json.obj(Json.obj(variants.get(0),"v").get("assignment"),"a").equals(Json.of("$swapvar",0L))||Json.obj(Json.obj(variants.get(0),"v").get("assignment"),"a").get("$swapvar").equals(0.0),"first outfit: "+variants.get(0));
                 ok(((Number)Json.obj(Json.obj(variants.get(1),"v").get("assignment"),"a").get("$swapvar")).intValue()==4&&Json.obj(Json.obj(variants.get(1),"v").get("draws"),"d").toString().contains("ps-t1=file:otherlightmap.dds"),"the outfit that differs: "+variants.get(1));
-                if(nativeChecker!=null){Process check=new ProcessBuilder(nativeChecker,out.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"the native driver picks every converted outfit");}}
+                if(nativeChecker!=null){Process check=new ProcessBuilder(nativeChecker,out.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"the native driver picks every converted outfit");}
+                // The mod's cycle key is offered to the App, and the App reads the same list back.
+                List<Object> keys=Json.arr(Json.obj(logicData,"logic").get("keys"),"keys",1,8);boolean swap=false;for(Object k:keys)swap|=Json.obj(k,"key").get("section").equals("KeySwap")&&Json.obj(k,"key").get("type").equals("cycle");
+                ok(swap&&ModelManifest.read(out).keys.size()==keys.size(),"logic keys: "+keys);}
             if(mode==1)ok(logicData==null&&log.toString().contains("用了 TexFx / ORFix 兼容转换"),"ORFix's NNFix convention is not something the logic core can state: "+log);
             for(int state=0;state<5;state++)for(Object raw:Fixtures.draws(out,0,Fixtures.set("$swapvar",state))){
                 Map<String,Object> draw=Json.obj(raw,"draw"),m=Fixtures.material(out,(String)draw.get("material"));
@@ -208,9 +211,17 @@ public final class CompatibilityTest {
         ok(body0.equals("kind=drawindexed;count=3;start=0;base=0;ib="+body+common+"kind=drawindexed;count=3;start=3;base=0;ib="+body+common),"two draws, ranges from $half, in command order: "+body0);
         ok(body1.equals("kind=drawindexed;count=6;start=0;base=0;ib="+body+common)&&head0.equals("kind=drawindexed;count=auto;start=0;base=0;ib="+head+common),"frame 1 and the auto draw: "+body1+" / "+head0);}
     private static String nativeChecker;   // tools/test_host.py passes build/host/core_test
+    // The [Key] sections the App may press: cycle and toggle with a key= or back=; the first type= counts; a hold, an
+    // activate (no type), a section without a key, a commented-out type and a name 3DMigoto would not take are left out.
+    static void logicKeys(){
+        String a="[KeyA]\r\nkey = 1\r\ntype = cycle\r\ntype = hold\r\n$x = 0,1\r\n[KeyB]\nback = 2\ntype = Toggle\n$x = 1\n[KeyHold]\nkey = 3\ntype = hold\n$x = 1\n"
+            +"[KeyPlain]\nkey = 4\n$x = 1\n[KeyNone]\ntype = cycle\n$x = 0,1\n[KeyNote]\nkey = 5\n;type = cycle\n[Key]\nkey = 6\ntype = cycle\n[TextureOverrideKey]\nkey = 7\ntype = cycle\n";
+        List<Object> keys=ModelConverter.logicKeys(Arrays.asList(a,"[keyC]\nkey = 8\ntype = toggle\n"));
+        ok(keys.equals(Arrays.asList(Json.of("file",0,"section","KeyA","type","cycle"),Json.of("file",0,"section","KeyB","type","toggle"),Json.of("file",1,"section","keyC","type","toggle"))),"logic keys: "+keys);
+    }
     public static void main(String[] args)throws Exception{
         nativeChecker=args.length>0?args[0]:null;File base=Files.createTempDirectory("gibox-compatibility-").toFile();
-        try{legacy(base);hohe(base);animation(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (logic core data for animations, face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
+        try{logicKeys();legacy(base);hohe(base);animation(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (logic core data for animations and outfits, App keys (cycle / toggle), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
         finally{ModelConverter.remove(base);}
     }
 }

@@ -833,8 +833,22 @@ public final class ModelConverter {
                 String text=logicSignature(mine,skip,byName,table,mainNs,why);if(text==null){log.append("逻辑核心数据：").append(why).append("，不写入\n");return null;}
                 sig.put(part.part,text);}
             frames.add(sig);}
-        log.append("逻辑核心数据：").append(files.size()).append(" 个 INI、").append(table.size()).append(" 个资源、").append(passes.size()).append(" 次绘制、").append(frames.size()).append(" ").append(unit).append("的资源记录（实验开关“逻辑核心驱动”使用；关闭时仍按原来的方式）\n");
-        return Json.of("signature",2,"main",mainNs,"files",list,"resources",table,"passes",passes,"fields",fields,"choices",frames);}
+        List<Object> keyList=logicKeys(texts);
+        log.append("逻辑核心数据：").append(files.size()).append(" 个 INI、").append(table.size()).append(" 个资源、").append(passes.size()).append(" 次绘制、").append(frames.size()).append(" ").append(unit).append("的资源记录、").append(keyList.size()).append(" 个可在 App 里按的按键（实验开关“逻辑核心驱动”使用；关闭时仍按原来的方式）\n");
+        return Json.of("signature",2,"main",mainNs,"files",list,"resources",table,"passes",passes,"fields",fields,"choices",frames,"keys",keyList);}
+    /** The [Key] sections of the logic files the App can press as buttons: cycle and toggle (a hold needs a release the
+     *  App does not send; activate is left for later). The file's index, the section as the file writes it, its type
+     *  (the first type= line counts, as in 3DMigoto). A section without key= or back= is not a key there either. */
+    static List<Object> logicKeys(List<String> texts){List<Object> out=new ArrayList<>();Set<String> seen=new HashSet<>();
+        for(int i=0;i<texts.size();i++){String section=null,type=null;boolean bound=false;
+            for(String raw:(texts.get(i)+"\n[]").split("\r?\n")){String line=raw.trim();
+                if(line.startsWith("[")&&line.endsWith("]")){
+                    String t=type==null?"activate":type;
+                    if(section!=null&&bound&&(t.equals("cycle")||t.equals("toggle"))&&out.size()<256&&seen.add(i+"|"+lower(section)))out.add(Json.of("file",i,"section",section,"type",t));
+                    String n=line.substring(1,line.length()-1).trim();section=n.length()>3&&lower(n).startsWith("key")&&n.length()<=256&&!n.matches(".*[\\\\\\[\\]].*")?n:null;type=null;bound=false;continue;}
+                if(section==null||line.startsWith(";"))continue;int eq=line.indexOf('=');if(eq<0)continue;String k=lower(line.substring(0,eq).trim());
+                if(k.equals("type")&&type==null)type=lower(line.substring(eq+1).trim());else if(k.equals("key")||k.equals("back"))bound=true;}}
+        return out;}
     private static File convertAnimation(Ini ini,File src,List<Bones> bones,Map<String,String> mapping,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log,Animation animation)throws Exception {
         if(o.animationBoneFallback){for(Bones bone:bones)check(!bone.synthetic,"动画骨骼兼容需要完整骨骼库或本 MOD 已保存的完整骨骼记录，不能用未知的索引上限判断哪些关联可忽略");
             for(Section section:ini.sections.values()){String n=lower(section.name);check(!n.startsWith("customshader")&&!n.startsWith("shaderoverride"),"动画骨骼兼容暂不支持自定义着色器；需要先实现其矩阵资源和蒙皮规则");

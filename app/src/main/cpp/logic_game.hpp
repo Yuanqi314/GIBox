@@ -12,6 +12,7 @@
 #include "model.hpp"
 #include <algorithm>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,12 +25,15 @@ namespace ms {
 
 class LogicDriver {
 public:
- struct Stats {uint64_t presents=0,gaps=0,misses=0,changes=0,stepUs=0,maxStepUs=0;};
+ struct Stats {uint64_t presents=0,gaps=0,misses=0,changes=0,keys=0,stepUs=0,maxStepUs=0;};
  // Refuses logic data it cannot match by (spec.unsupported); the runtime then keeps FrameLoop and logs why.
- explicit LogicDriver(const LogicSpec& s):spec(s){
+ // persisted: the persist variables saved for this model, by full name (persistent()); others are ignored, as upstream
+ // ignores d3dx_user.ini lines for variables that are not persist.
+ explicit LogicDriver(const LogicSpec& s,const std::map<std::string,float>& persisted={}):spec(s){
   if(!spec.unsupported.empty())throw std::runtime_error(spec.unsupported);
   std::vector<migoto::IniFile> files;for(auto& f:spec.files)files.push_back({f.ns,f.text});
-  engine.load(files);engine.start();
+  engine.load(files);engine.start(persisted);
+  for(auto& p:persisted){auto g=engine.globals.find(p.first);if(g!=engine.globals.end()&&(g->second.flags&migoto::VarPersist))restored.insert(p.first);}
   for(auto& r:engine.resources)if(!spec.resources.count(r.first))unknown.push_back(r.second.name);
   for(auto& p:spec.passes){migoto::Session::Pass x;x.name=p.name;for(auto& b:p.bindings)x.draw.bindings[b.first]=migoto::Ref::game(b.second);x.draw.checks=p.checks;x.draw.call=p.call;passes.push_back(std::move(x));}
   draws();}
@@ -66,6 +70,22 @@ public:
  // False when the logic has no such variable. The next tick's draws see it.
  bool set(const std::string& name,int value){std::string low=name;for(auto& c:low)if(c>='A'&&c<='Z')c=char(c-'A'+'a');migoto::Var* v=engine.global(low,spec.mainNs);if(!v)return false;
   if(v->value!=float(value)){v->value=float(value);if(v->flags&migoto::VarPersist)engine.persistDirty=true;}return true;}
+ // A press of a [Key] the model lists (cycle or toggle): down and up, dispatched in the next Present after its pre list,
+ // as upstream dispatches input; the key's condition, run lists, transitions and assignments are the core's. False
+ // when the model lists no such key. Presses before the next Present all go in, in order.
+ bool press(const LogicSpec::Key& k){if(k.file>=spec.files.size())return false;std::string full=k.section,ns;
+  {std::string out;if(migoto::namespacedSection(k.section,spec.files[k.file].ns,out))ns=out;}
+  for(auto& key:engine.keys){std::string low=migoto::lower(key.name);if(low!=migoto::lower(ns)&&low!=migoto::lower(full))continue;
+   if(key.type!=k.type)return false;
+   engine.keyDown(key.name);engine.keyUp(key.name);stats.keys++;return true;}
+  return false;}
+ // Persist variables by full name, with their current values (what the runtime saves); changed(): one of them
+ // changed since the last call.
+ std::map<std::string,float> persistent()const{return engine.persistent();}
+ size_t restoredCount()const{return restored.size();}
+ bool persistChanged(){bool d=engine.persistDirty;engine.persistDirty=false;return d;}
+ // Whether a variable the main INI names got its value from the saved persist values at start.
+ bool restoredVar(const std::string& name){migoto::Var* v=engine.global(migoto::lower(name),spec.mainNs);if(v)for(auto& g:engine.globals)if(&g.second==v)return restored.count(g.first)>0;return false;}
  // Draws again now (after set), without a Present; true when the matched choice changed.
  bool reselect(){int before=matched;draws();if(matched!=before)stats.changes++;return matched!=before;}
  // The finite-state analysis of the loaded logic (it sets variables while it runs and puts them back).
@@ -80,7 +100,7 @@ public:
    +std::to_string(warn)+" warnings, "+std::to_string(lim)+" limitations";}
 private:
  const LogicSpec& spec;migoto::Engine engine;std::vector<migoto::Session::Pass> passes;
- std::map<std::string,migoto::DrawResult> current;int matched=-1;bool clock=false;uint32_t last=0;
+ std::map<std::string,migoto::DrawResult> current;int matched=-1;bool clock=false;uint32_t last=0;std::set<std::string> restored;
  static std::string number(float v){if(v==float(int64_t(v))&&std::fabs(v)<1e15f)return std::to_string(int64_t(v));char b[32];std::snprintf(b,sizeof b,"%.9g",double(v));return b;}
  // What the converter calls a ref: a [Resource] by its identity (file and layout; aliases of one file are one), a game
  // resource by its hash, "null", or "-" when nothing is bound.

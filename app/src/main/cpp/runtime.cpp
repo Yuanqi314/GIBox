@@ -40,13 +40,17 @@ std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static
 //                  picture and the draw count (rebuilds the model)
 //   logicCore      a model's own INI logic (3DMigoto logic core, logic_game.hpp) picks the animation frame or the
 //                  outfit shown, by what its draws select (an outfit model's logic must be finite; the App's outfit
-//                  values are its input); FrameLoop or the App's choice when there is no logic data or it fails
+//                  values are its input; the App's key presses, control.json "keys", are its key events, and its
+//                  persist variables are kept in logic-persist/); FrameLoop or the App's choice when there is no logic
+//                  data or it fails
 struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glowTrace=false,separateDraws=false,logicCore=false;int firstRefreshMs=0,slotTextures=0,animationMode=0;
  std::string meshKey(bool animated=false)const{return std::string(neutralColors?"c":"-")+(noUv2?"u":"-")+(separateDraws?"s":"-")+(animated?"a"+std::to_string(animationMode):"");}
  bool operator==(const Experiments& o)const{return gameMaterials==o.gameMaterials&&neutralColors==o.neutralColors&&noUv2==o.noUv2&&glowTrace==o.glowTrace&&separateDraws==o.separateDraws&&firstRefreshMs==o.firstRefreshMs&&slotTextures==o.slotTextures&&animationMode==o.animationMode&&logicCore==o.logicCore;}
  bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||separateDraws||firstRefreshMs||slotTextures||animationMode||logicCore;}
  std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off")+" animationMode="+std::to_string(animationMode)+" logicCore="+(logicCore?"on":"off");}};
-struct ControlState {Experiments exp;bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;};
+// keys: the App's presses of a model's [Key] sections (model.json logic.keys), numbered; each is taken once, by number.
+struct KeyPress {long long seq=0;size_t file=0;std::string section;bool operator==(const KeyPress& o)const{return seq==o.seq&&file==o.file&&section==o.section;}};
+struct ControlState {Experiments exp;bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;std::map<std::string,std::vector<KeyPress>> keys;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"Control JSON object");ControlState s;
  const auto& a=c.at("selected");require(a.type==Json::Array&&a.array.size()<=128,"Selected list");
@@ -59,6 +63,10 @@ ControlState parseControl(const std::string& raw){
  if(s.refreshBones){s.refreshBonesCharacter=unsigned(refreshId);}
  const auto& vars=c.at("variables");require(vars.type==Json::Object||vars.type==Json::Null,"Variables object");
  for(auto& model:vars.object){require(model.second.type==Json::Object,"Variables object");for(auto& kv:model.second.object){require(kv.first.size()>1&&kv.first[0]=='$',"Variable name");auto n=integerOf(kv.second);require(std::abs(n)<=1000000,"Variable value");s.variables[model.first][kv.first]=int(n);}}
+ const auto& keys=c.at("keys");require(keys.type==Json::Object||keys.type==Json::Null,"Keys object");
+ for(auto& model:keys.object){require(model.second.type==Json::Array&&model.second.array.size()<=32,"Key presses of a model");
+  for(auto& k:model.second.array){require(k.type==Json::Object,"Key press");KeyPress x;x.seq=integerOf(k.at("seq"));auto file=integerOf(k.at("file"));require(x.seq>0&&file>=0&&file<64,"Key press number / file");x.file=size_t(file);
+   require(k.at("section").type==Json::String&&!k.at("section").string.empty()&&k.at("section").string.size()<=256,"Key press section");x.section=k.at("section").string;s.keys[model.first].push_back(x);}}
  s.logLevel=logThreshold(c);
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
   s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");s.exp.logicCore=flag("logicCore");
@@ -183,7 +191,7 @@ struct Runtime::Impl {
   std::vector<std::shared_ptr<ModelFile>> cpu;std::vector<std::vector<Ptr>> meshes;std::vector<std::vector<Ptr>> owned;std::vector<Ptr> back;
  };
  // experiments.logicCore: the set's own INI logic, picking its animation frame or its outfit (logic_game.hpp).
- struct LogicRun {std::unique_ptr<LogicDriver> driver;bool failed=false,fresh=false,noted=false;uint64_t misses=0,lastStats=0;unsigned missLines=0;std::string missLogged;std::map<std::string,int> pushed;Assignment want;};   // want: the outfit it picked (applyVariant may wait for textures)
+ struct LogicRun {std::unique_ptr<LogicDriver> driver;bool failed=false,fresh=false,noted=false;uint64_t misses=0,lastStats=0;unsigned missLines=0;std::string missLogged;std::map<std::string,int> pushed;Assignment want;bool persistDue=false;uint64_t persistAt=0,persistSaves=0;};   // want: the outfit it picked (applyVariant may wait for textures)
  uint64_t animationToken=0;
  struct Set:Owned {std::string name,path,generation;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;AnimationRun animation;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false,mergeDraws=true;std::vector<TextureSwap> swaps;LogicSpec logicSpec;LogicRun logic;Assignment assignment;uint64_t used=0,bytes=0;};  // bytes: estimated memory of the built set
  // source: for a renderer the game created from one of ours (adopted), the renderer whose material clones it shows.
@@ -222,7 +230,7 @@ struct Runtime::Impl {
  Owned handoffTypeRoots;uint64_t handoffTypeRetry=0;
  // Last scan, for the wait reason: world character's renderers, FindObjectsOfType results (-1: not run), renderers left
  // out because an attach failed on them; scanCount numbers the scans. Per model: scan number, reason, details logged, time.
- int scanWorld=0,scanAll=-1;unsigned scanSkipped=0;uint64_t scanCount=0;unsigned shownCharacter=~0u;uint64_t idleMs=60000,idleBudget=256ull<<20;bool controlSeen=false;std::string exportWait;
+ int scanWorld=0,scanAll=-1;unsigned scanSkipped=0;uint64_t scanCount=0;unsigned shownCharacter=~0u;uint64_t idleMs=60000,idleBudget=256ull<<20;bool controlSeen=false;std::map<std::string,long long> keySeen;std::string exportWait;
  struct WaitWhy {uint64_t scan=~0ull;std::string reason,context;bool plain=false;std::string logged;uint64_t loggedAt=0;};std::map<std::string,WaitWhy> waitWhy,targetWaitWhy;
  struct LegacyLodProbe {std::string stamp,note;uint64_t at=0;};std::map<std::string,LegacyLodProbe> legacyLodProbes;
  std::unique_ptr<renderprobe::UnityReader> renderReader;std::unique_ptr<renderprobe::Recorder> renderRecorder;
@@ -1082,16 +1090,46 @@ struct Runtime::Impl {
    auto seen=L.pushed.find(var.first);if(seen!=L.pushed.end()&&seen->second==value)continue;
    if(!L.driver->set(var.first,value)){ok=false;missing=var.first;continue;}L.pushed[var.first]=value;}
   return ok;}
- void stopLogic(Set& s,const std::string& state,const std::string& why){auto& L=s.logic;L.driver.reset();L.pushed.clear();L.want.clear();
+ void stopLogic(Set& s,const std::string& state,const std::string& why){auto& L=s.logic;if(L.driver){try{if(L.driver->persistChanged()||L.persistDue)savePersist(s);}catch(const std::exception& ex){log("logic-persist-error",s.name+": "+ex.what());}}
+  L.driver.reset();L.pushed.clear();L.want.clear();L.persistDue=false;
   if(animated(s)){s.animation.loop.current=s.animation.applied;s.animation.loop.clock=false;}log(state,s.name+": "+why+"; "+fallback(s)+" from here ("+shownText(s)+")");}
+ // persist: logic-persist/<model>.json beside control.json, the model's persist variables by full name (namespace
+ // included, as 3DMigoto writes d3dx_user.ini) and the main INI's namespace they belong to; another INI under the same
+ // model name does not get them. Written whole to a temporary file and renamed; at most once a second while they
+ // change, and when the logic stops.
+ std::string persistFile(const Set& s)const{return shared+"/logic-persist/"+s.name+".json";}
+ std::map<std::string,float> loadPersist(const Set& s){std::map<std::string,float> out;auto file=persistFile(s);if(!exists(file))return out;
+  try{Json j=JsonParser(text(file)).parse();require(j.type==Json::Object&&j.at("format").type==Json::String&&j.at("format").string=="gibox-logic-persist","not a persist file");
+   const auto& main=j.at("main");if(main.type!=Json::String||main.string!=s.logicSpec.mainNs){log("logic-persist",s.name+": the saved values belong to another INI ("+(main.type==Json::String?main.string:std::string("?"))+"); not restored");return out;}
+   const auto& v=j.at("values");require(v.type==Json::Object&&v.object.size()<=4096,"values");
+   for(auto& kv:v.object){require(kv.first.size()>1&&kv.first[0]=='$'&&kv.second.type==Json::Number&&std::isfinite(kv.second.number),"value "+kv.first);out[kv.first]=float(kv.second.number);}}
+  catch(const std::exception& ex){out.clear();log("logic-persist-error",s.name+": "+file+": "+ex.what()+"; not restored");}
+  return out;}
+ void savePersist(Set& s){auto& L=s.logic;auto values=L.driver->persistent();L.persistDue=false;if(values.empty())return;
+  std::string body="{\"format\":\"gibox-logic-persist\",\"version\":1,\"main\":"+quote(s.logicSpec.mainNs)+",\"values\":{";bool first=true;
+  for(auto& kv:values){if(!std::isfinite(kv.second))continue;char b[32];std::snprintf(b,sizeof b,"%.9g",double(kv.second));body+=(first?"":",")+quote(kv.first)+":"+b;first=false;}
+  body+="}}\n";auto dir=shared+"/logic-persist",file=persistFile(s);
+  worker.post([dir,file,body]{try{std::filesystem::create_directories(dir);writeAtomic(file,body);}catch(...){}});
+  log(L.persistSaves++?"logic-persist-saved":"logic-persist",s.name+": "+std::to_string(values.size())+" persist values saved");}
+ // The App's key presses for this model since the last ones taken: each goes to the core once, as a key event of the
+ // next Present; a press while the core does not run the model is dropped (and said so), not kept for later.
+ void logicKeys(Set& s){auto it=ctl.keys.find(s.name);if(it==ctl.keys.end())return;long long& seen=keySeen[s.name];
+  for(auto& k:it->second){if(k.seq<=seen)continue;seen=k.seq;
+   if(!s.logic.driver){log("logic-key",s.name+": "+k.section+" not pressed: the logic core does not run this model (logicCore off, no logic data, or it stopped)");continue;}
+   const LogicSpec::Key* key=nullptr;for(auto& x:s.logicSpec.keys)if(x.file==k.file&&x.section==k.section)key=&x;
+   if(!key||!s.logic.driver->press(*key)){log("logic-key",s.name+": "+k.section+" is not a cycle or toggle key of this model; not pressed");continue;}
+   log("logic-key",s.name+": "+k.section+" ("+key->type+") pressed, press "+std::to_string(k.seq));}}
  void logicSwitch(Set& s){auto& L=s.logic;
   if(ctl.exp.logicCore&&!s.logicSpec.present()&&!L.noted){L.noted=true;log("logic-unavailable",s.name+": converted without logic data (before 0.7.34 for animations, 0.7.36 for outfits, or the converter could not state it: see its conversion log); "+fallback(s)+" plays it");}
   if(!ctl.exp.logicCore||!s.logicSpec.present()){if(L.driver)stopLogic(s,"logic-off","switched off");return;}
   if(L.driver||L.failed)return;
   if(!s.logicSpec.unsupported.empty()){L.failed=true;log("logic-unavailable",s.name+": "+s.logicSpec.unsupported+"; "+fallback(s)+" plays it");return;}
-  try{L.driver=std::make_unique<LogicDriver>(s.logicSpec);auto& d=*L.driver;
+  try{auto saved=loadPersist(s);L.driver=std::make_unique<LogicDriver>(s.logicSpec,saved);auto& d=*L.driver;
+   if(!saved.empty())log("logic-persist",s.name+": "+std::to_string(d.restoredCount())+" of "+std::to_string(saved.size())+" saved values restored (persist variables of this INI)");
    auto scan=d.scan();std::string scanText=scan.finiteStates?"finite, "+std::to_string(scan.states)+" states":"not finite";
    if(!animated(s)){std::string why;if(!scan.finiteStates){for(auto& r:scan.reasons)why+=(why.empty()?"":"; ")+r;L.driver.reset();L.failed=true;log("logic-unavailable",s.name+": the outfit logic is not shown to be finite ("+why.substr(0,600)+"); the App's outfit choice stays");return;}
+    // A restored persist value stands over the App's table at the start; the App's next change of it goes in.
+    for(auto& var:s.variants.vars)if(d.restoredVar(var.first)){auto c=appChoice(s).find(var.first);L.pushed[var.first]=c!=appChoice(s).end()?c->second:s.variants.defaults.at(var.first);}
     std::string missing;if(!pushChoice(s,missing)){L.driver.reset();L.failed=true;log("logic-error",s.name+": the outfit variable "+missing+" is not in the INI logic; the App's outfit choice stays");return;}d.reselect();}
    if(d.frame()<0){std::string miss=d.miss;L.driver.reset();L.failed=true;log("logic-error",s.name+": what the draws select at the start matches no prebuilt "+(animated(s)?"frame":"outfit")+"; "+fallback(s)+" kept. "+miss);return;}
    size_t notes=0;if(!d.unknown.empty()){std::string list;for(auto& u:d.unknown)list+=(list.empty()?"":", ")+u;log("logic-note",s.name+": resources the converter did not list (bindings to them match nothing): "+list.substr(0,600));}
@@ -1106,6 +1144,8 @@ struct Runtime::Impl {
   if(!animated(s)){std::string missing;size_t before=L.pushed.size();auto old=L.pushed;if(!pushChoice(s,missing))throw std::runtime_error("the outfit variable "+missing+" is not in the INI logic");
    if(old!=L.pushed||before!=L.pushed.size())changed|=d.reselect();}
   changed|=d.tick(frame,double(now)/1000.0);changed|=L.fresh;L.fresh=false;
+  if(d.persistChanged())L.persistDue=true;
+  if(L.persistDue&&now>=L.persistAt){L.persistAt=now+1000;savePersist(s);}
   // A miss is logged when what is selected differs from the last one logged; eight per set, then only counted.
   if(d.stats.misses>L.misses){L.misses=d.stats.misses;if(d.miss!=L.missLogged&&L.missLines<=8){L.missLogged=d.miss;
     log("logic-miss",s.name+(++L.missLines>8?": more selections match nothing prebuilt; not logged further (counted in the stats)":": the draws select what nothing prebuilt has; "+shownText(s)+" stays. "+d.miss));}}
@@ -1835,14 +1875,16 @@ struct Runtime::Impl {
   for(auto& m:models){auto g=learnedGen.find(m.path);if(g==learnedGen.end()||g->second!=m.generation){learned.erase(m.path);learnedId.erase(m.path);staleNote.erase(m.path);learnedGen[m.path]=m.generation;for(auto it=missingLogged.lower_bound(m.path+"|");it!=missingLogged.end()&&it->first.compare(0,m.path.size()+1,m.path+"|")==0;)it=missingLogged.erase(it);}
    auto l=learned.find(m.path);if(l!=learned.end())for(auto& p:m.parts){auto t=l->second.find(p.name);if(t!=l->second.end()&&t->second.bones<p.minBones)l->second.erase(t);}}
   // A bone export is a request made while the game runs: the count found at start-up is not one.
-  if(c&&!controlSeen){controlSeen=true;exportSeen=c->exportBones;}
+  if(c&&!controlSeen){controlSeen=true;exportSeen=c->exportBones;
+   // Key presses already in control.json were made before this game start: taken as done, never replayed.
+   for(auto& kv:c->keys)for(auto& k:kv.second)keySeen[kv.first]=std::max(keySeen[kv.first],k.seq);}
   if(c&&c->exportBones!=exportSeen&&c->exportBones!=ctl.exportBones){boneCandidate.clear();manualRetryAt=0;manualWait.clear();}
   if(c&&c->refreshBones&&(c->refreshBones!=ctl.refreshBones||c->refreshBonesCharacter!=ctl.refreshBonesCharacter)&&
      (c->refreshBones!=boneRefreshDone||c->refreshBonesCharacter!=boneRefreshDoneId)){
    auto id=c->refreshBonesCharacter;library.erase(id);libraryRead.erase(id);libraryRetry[id]=0;libraryError.erase(id);
    boneCandidate.clear();boneBadList.clear();boneBadStreak=0;exportWait.clear();boneFullSearchAt=0;libraryWait.erase(id);log("bone-refresh-request",std::to_string(id)+": request "+std::to_string(c->refreshBones));
   }
-  if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel);
+  if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel||c->keys!=ctl.keys);
    if(!renderControlSeen){renderControlSeen=true;renderMarkSeen=c->renderMark;}
    if(c->logLevel!=int(Level::Debug))renderMarkSeen=c->renderMark;
    bool expMaterials=c->exp.gameMaterials!=ctl.exp.gameMaterials||c->exp.slotTextures!=ctl.exp.slotTextures;if(!(c->exp==ctl.exp))log("experiments",c->exp.text());
@@ -1896,6 +1938,7 @@ struct Runtime::Impl {
     live.clear();for(auto* m:wanted)if(Set* s=liveSet(*m))live.push_back(s);}  // a moved target releases its set
    prepareBindingTargets();
    // Variant choice from control.json, applied in place on built sets.
+   for(Set* s:live)logicKeys(*s);
    for(Set* s:live)try{if(s->logic.driver&&!animated(*s)){if(!s->logic.want.empty())applyVariant(*s,s->logic.want);continue;}auto v=ctl.variables.find(s->name);applyVariant(*s,pick(s->variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second));}catch(const std::exception& ex){log("variant-error",s->name+": "+ex.what());}
    bool budget=true;std::vector<std::string> active,errors,building;std::string waiting,animationWaiting;bool stale=false;
    for(auto* m:wanted){

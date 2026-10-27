@@ -82,6 +82,15 @@ public final class Control {
         JSONObject j = load(pkg); JSONObject all = j.optJSONObject("variables"); if (all == null) all = new JSONObject();
         JSONObject m = all.optJSONObject(model); if (m == null) m = new JSONObject(); for (java.util.Map.Entry<String, Integer> e : values.entrySet()) m.put(e.getKey(), (int) e.getValue()); all.put(model, m); j.put("variables", all); save(pkg, j);
     }
+    /** A press of a model's [Key] (model.json logic.keys), read by the runtime from control.json "keys": numbered from
+     *  "keySeq", the last 16 per model kept; the runtime takes each number once and ignores the ones there at game start. */
+    public static synchronized void pressKey(String pkg, String model, int file, String section) throws Exception {
+        JSONObject j = load(pkg); long seq = j.optLong("keySeq", 0) + 1; j.put("keySeq", seq);
+        JSONObject all = j.optJSONObject("keys"); if (all == null) all = new JSONObject();
+        JSONArray old = all.optJSONArray(model), keep = new JSONArray(); if (old != null) for (int i = Math.max(0, old.length() - 15); i < old.length(); i++) { JSONObject x = old.optJSONObject(i); if (x != null) keep.put(x); }
+        JSONObject p = new JSONObject(); p.put("seq", seq); p.put("file", file); p.put("section", section); keep.put(p);
+        all.put(model, keep); j.put("keys", all); save(pkg, j);
+    }
     public static int variable(String pkg, String model, String var, int fallback) {
         JSONObject all = load(pkg).optJSONObject("variables"); JSONObject m = all == null ? null : all.optJSONObject(model); return m == null ? fallback : m.optInt(var, fallback);
     }
