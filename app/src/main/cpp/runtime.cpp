@@ -187,7 +187,7 @@ struct Runtime::Impl {
   Ptr animationOwner=0;Ptr originMesh=0,originMaterials=0;RestoreBackup* backup=nullptr;
   Owned dynamicRoots;std::map<std::string,Ptr> dynamicArrays;std::string dynamicShape;std::vector<int> boneMapping,targetParents;Bytes targetBinds;
   int bindable=-1;};  // last incoming bone-name hash count compatibility, for log suppression; origin pair pinned by the set
- struct AnimationRun {std::string error;FrameLoop loop;int mode=0;uint64_t token=0,started=0,lastStats=0,lastMark=0,updates=0,applyUs=0,maxApplyUs=0;size_t preparing=0,buildPart=0,backPart=0,applied=0;bool loading=false,ready=false,stopped=false;
+ struct AnimationRun {std::string error;bool waiting=false;FrameLoop loop;int mode=0;uint64_t token=0,started=0,lastStats=0,lastMark=0,updates=0,applyUs=0,maxApplyUs=0;size_t preparing=0,buildPart=0,backPart=0,applied=0;bool loading=false,ready=false,stopped=false;
   std::vector<std::shared_ptr<ModelFile>> cpu;std::vector<std::vector<Ptr>> meshes;std::vector<std::vector<Ptr>> owned;std::vector<Ptr> back;
  };
  // experiments.logicCore: the set's own INI logic, picking its animation frame or its outfit (logic_game.hpp).
@@ -1018,9 +1018,14 @@ struct Runtime::Impl {
 
  const char* animationMode(const Set& s)const{return s.animation.mode==0?"cached":s.animation.mode==1?"dynamic":"paused";}
  bool animationMesh(const Set& s,size_t part,Ptr mesh)const{const auto& a=s.animation;if(part>=a.owned.size())return false;const auto& list=a.owned[part];return std::find(list.begin(),list.end(),mesh)!=list.end();}
+ // The renderer the frames are built for. While the character is away (a switch, loading) there is none: that is a
+ // wait, not a failure (TemplateWait), and preparing goes on once it is back.
+ struct TemplateWait:std::runtime_error {using std::runtime_error::runtime_error;};
  Seen animationTemplate(Set& s,size_t part){auto& bp=s.parts.at(part);Seen tpl;tpl.renderer=bp.animationOwner;
   if(!alive(tpl.renderer))for(auto& kv:attachments)if(kv.second->set==&s&&kv.second->part==part&&alive(kv.first)){tpl.renderer=kv.first;break;}
-  require(alive(tpl.renderer)&&bp.backup&&alive(bp.backup->mesh),"Animation template not available; wait for the character");tpl.mesh=bp.backup->mesh;return tpl;}
+  if(!(alive(tpl.renderer)&&bp.backup&&alive(bp.backup->mesh)))throw TemplateWait("the character's renderer for part "+std::to_string(part)+" is not there (switched away or loading)");
+  if(s.animation.waiting){s.animation.waiting=false;log("animation-wait",s.name+" mode="+animationMode(s)+" prepare goes on: the character is back");}
+  tpl.mesh=bp.backup->mesh;return tpl;}
  void remapAnimation(Set& s,ModelFile& data){require(data.parts.size()==s.parts.size(),"Animation part count changed");
   for(size_t i=0;i<data.parts.size();i++){auto& p=data.parts[i];auto& bp=s.parts[i];std::vector<int> mapping;
    if(p.sourceBones.empty()){mapping.assign(p.spec.bones,-1);for(size_t n=0;n<mapping.size()&&n<bp.bones.size();n++)mapping[n]=int(n);}
@@ -1052,7 +1057,8 @@ struct Runtime::Impl {
     a.meshes[frame].push_back(part.mesh);a.owned[i].push_back(part.mesh);a.buildPart++;
     auto us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-before).count();log("animation-build",s.name+" frame="+std::to_string(a.loop.spec.frames[frame].value)+" part="+std::to_string(i)+" us="+std::to_string(us));
     if(a.buildPart==s.parts.size()){a.buildPart=0;a.cpu[frame].reset();a.preparing++;}
-   }catch(const std::exception& ex){a.stopped=true;a.error=ex.what();log("animation-error",s.name+" mode="+animationMode(s)+" prepare: "+ex.what());}
+   }catch(const TemplateWait& ex){if(!a.waiting){a.waiting=true;log("animation-wait",s.name+" mode="+animationMode(s)+" prepare waits: "+ex.what());}continue;}
+   catch(const std::exception& ex){a.stopped=true;a.error=ex.what();log("animation-error",s.name+" mode="+animationMode(s)+" prepare: "+ex.what());}
   }}
  Ptr animationArray(BuiltPart& bp,const std::string& key,Ptr cls,const void* data,unsigned count,unsigned stride){auto it=bp.dynamicArrays.find(key);Ptr array=it==bp.dynamicArrays.end()?0:it->second;
   require(!array||length(array,model::maxIndices)==count,"Animation managed array shape");if(!array){if(data)array=arrayOf(bp.dynamicRoots,cls,data,count,stride);else{require(cls&&load<uint16_t>(cls+0xba)==stride,"Animation array element size");array=e.call<Ptr>(abi::arrayNew,cls,uint64_t(count));require(array!=0,"Animation array allocation failed");pin(bp.dynamicRoots,array);}bp.dynamicArrays[key]=array;}

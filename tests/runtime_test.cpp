@@ -962,7 +962,12 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   Ptr renderer=f->renderer(original);f->world(renderer);f->scene={renderer};int revision=0;
   auto control=[&](int mode,bool on=true){write(sharedA+"/control.json","{\"enabled\":"+std::string(on?"true":"false")+",\"selected\":[\"Animated\"],\"logLevel\":\"debug\",\"revision\":"+std::to_string(++revision)+",\"experiments\":{\"animationMode\":"+std::to_string(mode)+"}}");};
   auto log=[&]{return text(sharedA+"/GIBox Log.txt");};Runtime animated(e,pkg,root+"/animation-private",mediaA,false);control(0);uint64_t now=5000000;
-  for(int n=0;n<25;n++){animated.tick(now);now+=120;}assert(log().find("animation-ready Animated mode=cached")!=std::string::npos&&log().find("animation-error")==std::string::npos);
+  // The character's renderer gone while the frames are being built (a switch, loading): preparing waits, then goes on
+  // on the renderer the character gets.
+  for(int n=0;n<2;n++){animated.tick(now);now+=120;}destroy(renderer,0);
+  for(int n=0;n<6;n++){animated.tick(now);now+=120;}assert(log().find("animation-wait Animated mode=cached prepare waits: the character's renderer for part 0 is not there")!=std::string::npos&&log().find("animation-error")==std::string::npos);
+  renderer=f->renderer(original);f->world(renderer);f->scene={renderer};
+  for(int n=0;n<25;n++){animated.tick(now);now+=120;}assert(log().find("animation-ready Animated mode=cached")!=std::string::npos&&log().find("animation-error")==std::string::npos&&log().find("prepare goes on: the character is back")!=std::string::npos);
   std::set<Ptr> cached;for(int n=0;n<15;n++){animated.tick(now++);cached.insert(meshOf(renderer));}assert(cached.size()==3);unsigned allocations=f->weightAllocs;
   for(int n=0;n<15;n++){animated.tick(now++);}assert(f->weightAllocs==allocations);
   control(1);now+=200;for(int n=0;n<25;n++){animated.tick(now);now+=120;}assert(log().find("animation-ready Animated mode=dynamic")!=std::string::npos&&log().find("animation-error")==std::string::npos);
