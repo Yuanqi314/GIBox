@@ -126,7 +126,8 @@ public final class CompatibilityTest {
     static String runNative(String flag,String request,File base)throws Exception{File req=File.createTempFile("native-",".json",base);Files.write(req.toPath(),request.getBytes("UTF-8"));
         Process p=new ProcessBuilder(nativeChecker,flag,req.getAbsolutePath()).redirectErrorStream(true).start();java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();byte[] chunk=new byte[65536];
         for(int n;(n=p.getInputStream().read(chunk))>0;)bytes.write(chunk,0,n);String reply=new String(bytes.toByteArray(),"UTF-8").trim();ok(p.waitFor()==0,"native tool "+flag+": "+reply);return reply;}
-    // The 3DMigoto backend for a static model: the logic core runs the INI and its draws are converted. A standard GIMI
+    // The 3DMigoto backend: the logic core runs the INI and its draws are converted (a static model, an outfit model, a
+    // frame animation). A standard GIMI
     // mod gives the same model as the converter's own evaluation; with an IB-level drawindexed = auto and a part's own
     // draw, 3DMigoto draws both for that part (the old evaluation only the part's own), and the log names it; a core
     // that cannot run leaves the converter's own evaluation, with the reason.
@@ -145,6 +146,18 @@ public final class CompatibilityTest {
         long ic=0,id=0;for(Object x:Json.arr(Json.obj(Json.read(new File(c,"model.json"),4L<<20),"m").get("parts"),"parts",1,4))ic+=Fixtures.number(Json.obj(x,"p"),"indices");
         for(Object x:Json.arr(Json.obj(Json.read(new File(d,"model.json"),4L<<20),"m").get("parts"),"parts",1,4))id+=Fixtures.number(Json.obj(x,"p"),"indices");
         ok(both.toString().contains("与转换器自己的求值不同，按 3dm 后端转换")&&both.toString().contains("3dm 后端有、旧求值没有：CitlaliBody count=auto start=0 ib=CitlaliBody.ib")&&ic==id+6,"the IB-level auto draw is drawn for the part too, as on PC: "+ic+" vs "+id+"\n"+both);
+        // An outfit model (every outfit) and a frame animation (every frame): the same model either way, and the
+        // logic data the game side matches against.
+        String outfit=GimiPatternsTest.ini("global $look = 0\n","if $look == 1\nvb0 = ResourceNextPosition\nendif\n","","")+"[ResourceNextPosition]\nstride = 40\nfilename = Next.buf\n[KeyLook]\nkey = 1\ntype = cycle\n$look = 0,1\n";
+        String program="[Present]\nif $counter % $speed == 0\nif $frame < $last\n$frame = $frame + 1\nelse\n$frame = $first\nendif\nendif\npost $counter = $counter + 1\n";
+        String animated=GimiPatternsTest.ini("global $speed = 0.5\nglobal $counter = 0\nglobal $frame = 0\nglobal $first = 0\nglobal $last = 2\n","if $frame == 1\nvb0 = ResourceNextPosition\nendif\n","","")+"[ResourceNextPosition]\nstride = 40\nfilename = Next.buf\n"+program;
+        for(String[] k:new String[][]{{"backend-outfit",outfit,"2 次"},{"backend-animation",animated,"6 次"}}){File m=GimiPatternsTest.mod(base,k[0],k[1]);byte[] next=Files.readAllBytes(new File(m,"CitlaliPosition.buf").toPath());ByteBuffer.wrap(next).order(ByteOrder.LITTLE_ENDIAN).putFloat(0,99);GimiPatternsTest.put(m,"Next.buf",next);
+            File x=new File(base,k[0]+"-plain"),y=new File(base,k[0]+"-core");StringBuilder lx=new StringBuilder(),ly=new StringBuilder();
+            ModelConverter.convert(m,null,x,10000107,new ModelConverter.Options().variants(true),DECODE,lx);ModelConverter.convert(m,null,y,10000107,new ModelConverter.Options().variants(true).core(core),DECODE,ly);
+            ok(ly.toString().contains("与转换器自己的求值一致")&&Arrays.equals(Files.readAllBytes(new File(x,"model.bin").toPath()),Files.readAllBytes(new File(y,"model.bin").toPath())),k[0]+": the same model through the backend: "+ly);
+            Map<String,Object> jx=Json.obj(Json.read(new File(x,"model.json"),4L<<20),"m"),jy=Json.obj(Json.read(new File(y,"model.json"),4L<<20),"m");
+            ok(String.valueOf(jx.get("parts")).equals(String.valueOf(jy.get("parts")))&&String.valueOf(jx.get("logic")).equals(String.valueOf(jy.get("logic")))&&jy.get("logic")!=null,k[0]+": parts and logic data the same");
+            Process check=new ProcessBuilder(nativeChecker,y.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,k[0]+": the native driver follows it");}
         StringBuilder failed=new StringBuilder();ModelConverter.convert(src,null,new File(base,"backend-failed"),10000107,new ModelConverter.Options().core(r->"{\"ok\":false,\"reason\":\"no core\"}"),DECODE,failed);
         ok(failed.toString().contains("3dm 后端未用于本次转换：逻辑核心不能运行这个 INI：no core；按转换器自己的求值"),"a core that cannot run leaves the converter's own evaluation: "+failed);
     }
@@ -306,7 +319,7 @@ public final class CompatibilityTest {
     }
     public static void main(String[] args)throws Exception{
         nativeChecker=args.length>0?args[0]:null;File base=Files.createTempDirectory("gibox-compatibility-").toFile();
-        try{logicKeys();legacy(base);hohe(base);animation(base);rehearsedAnimation(base);drivenOutfits(base);staticBackend(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (3dm backend for static models, logic core data for animations and outfits, rehearsed Present programs, driven outfits, switched-off schemes, App keys (cycle / toggle / back), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
+        try{logicKeys();legacy(base);hohe(base);animation(base);rehearsedAnimation(base);drivenOutfits(base);staticBackend(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (3dm backend for static, outfit and animated models, logic core data for animations and outfits, rehearsed Present programs, driven outfits, switched-off schemes, App keys (cycle / toggle / back), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
         finally{ModelConverter.remove(base);}
     }
 }

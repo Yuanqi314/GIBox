@@ -862,13 +862,14 @@ public final class ModelConverter {
         data.put("variants",variants);return data;}
     /** What frames and outfits share: files, resources, the draws replayed, fields; per assignment the signatures
      *  ("choices", taken out by the callers). unit names the choices in the log. */
-    /** The 3DMigoto backend: for each assignment, the logic core runs the mod's INIs as XXMI loads them and replays
+    /** The 3DMigoto backend: for each assignment (a static model's one, every outfit, every animation frame), the
+     *  logic core runs the mod's INIs as XXMI loads them and replays
      *  the game's draws (layout's passes); what each part's draws bind and their ranges become the draws converted,
      *  in place of the converter's own evaluation, which stays as the comparison. Any difference is logged, and the
      *  core's draws are used. When the core cannot state them (a resource of another INI, a draw kind or base vertex
      *  this converter does not build), the converter's own are used and the log says why. */
     static void coreDraws(Ini ini,File src,List<Map<String,Integer>> assignments,Map<String,String> mapping,CoreDraws core,StringBuilder log)throws Exception{
-        StringBuilder why=new StringBuilder();LogicLayout L=layout(ini,src,assignments,mapping,why);
+        StringBuilder why=new StringBuilder();ini.coreDraws=null;LogicLayout L=layout(ini,src,assignments,mapping,why);
         if(L==null){log.append("3dm 后端未用于本次转换：").append(why).append("；按转换器自己的求值\n");return;}
         Map<Map<String,Integer>,List<Draw>> out=new HashMap<>();List<String> differ=new ArrayList<>();int count=0;
         for(int i=0;i<assignments.size();i++){Map<String,Integer> vars=assignments.get(i);List<Draw> ds;
@@ -944,7 +945,9 @@ public final class ModelConverter {
                 if(hash[k]!=null&&!(hash[k].equals(e.hash)&&slot[k].equals(at))){why.append(streamName(k)).append(" 顶点流由多个段提供");return null;}
                 hash[k]=e.hash;slot[k]=at;}}
         // Every assignment's draws; the parts are the sections that draw in any of them.
-        for(Map<String,Integer> vars:assignments){List<Draw> ds=new ArrayList<>();for(Draw d:drawCalls(ini,vars,resources(ini,src,vars),mapping))if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part)))){ds.add(d);L.firstDraw.putIfAbsent(d.part,d);}L.drawn.add(ds);}
+        // The draws converted: the 3DMigoto backend's once it ran (the logic data then records what the core in the game
+        // will select), else the converter's own.
+        for(Map<String,Integer> vars:assignments){List<Draw> ds=new ArrayList<>();List<Draw> core=ini.coreDraws==null?null:ini.coreDraws.get(vars);for(Draw d:core!=null?core:drawCalls(ini,vars,resources(ini,src,vars),mapping))if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part)))){ds.add(d);L.firstDraw.putIfAbsent(d.part,d);}L.drawn.add(ds);}
         Set<String> keys=new HashSet<>();
         if(hash[0]!=null||hash[1]!=null){Map<String,Object> b=new LinkedHashMap<>();List<Object> checks=new ArrayList<>();
             for(int k=0;k<2;k++)if(hash[k]!=null){if(b.containsKey(slot[k])){why.append("Position 和 Blend 在同一槽位");return null;}b.put(slot[k],hash[k]);checks.add(slot[k]);}
@@ -1004,6 +1007,7 @@ public final class ModelConverter {
         else log.append("模型动画：").append(animation.values.size()).append(" 帧，由逻辑核心预演 Present 程序得出（不是固定的取余循环）；无按键时的顺序 ").append(animation.sequence.size()).append(" 步，从第 ").append(animation.loop).append(" 步起循环；").append(animation.rehearsal).append("\n");
         log.append("动画骨骼兼容：").append(o.animationBoneFallback?"开启（实验）：忽略库外关联，保留每个顶点自身的有效权重并重新归一化；可能改变运动，不保证与 PC 等价":"关闭：越界的有效权重仍会拒绝转换").append('\n');
         try{
+            if(o.core!=null){List<Map<String,Integer>> each=new ArrayList<>();for(int fi=0;fi<animation.values.size();fi++)each.add(animation.vars(ini,fi));coreDraws(ini,src,each,mapping,o.core,log);}
             Build registry=new Build();Map<String,WeightOrder> weights=new HashMap<>();List<Object> frames=new ArrayList<>(),firstParts=null;String layout=null;
             try(BlobWriter blob=new BlobWriter(new File(tmp,"model.bin"))){
                 for(int fi=0;fi<animation.values.size();fi++){int frame=animation.values.get(fi);Map<String,Integer> vars=animation.vars(ini,fi);memoryBudget(ini,src,bones,mapping,Collections.singletonList(vars),o.fallback,log);
@@ -1044,8 +1048,8 @@ public final class ModelConverter {
          *  the App); null: such programs are refused as before. */
         public Rehearsal rehearsal=null;
         public Options rehearsal(Rehearsal r){rehearsal=r;return this;}
-        /** The 3DMigoto backend (NativeBridge.draws in the App): the logic core decides what a static model draws;
-         *  null: the converter's own evaluation, as before. */
+        /** The 3DMigoto backend (NativeBridge.draws in the App): the logic core decides what every outfit and frame
+         *  draws; null: the converter's own evaluation, as before. */
         public CoreDraws core=null;
         public Options core(CoreDraws c){core=c;return this;}
         public String mapping="",fallback=null,sourcePath=null,sourceSignature=null;public File ini=null;
@@ -1108,7 +1112,7 @@ public final class ModelConverter {
         check(!dest.getName().isEmpty()&&dest.getName().getBytes(StandardCharsets.UTF_8).length<=255,"模型名过长："+dest.getName());
         File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
         try{
-            if(o.core!=null&&kept.size()==1)coreDraws(ini,src,kept,map,o.core,log);
+            if(o.core!=null)coreDraws(ini,src,kept,map,o.core,log);
             memoryBudget(ini,src,bones,map,kept,o.fallback,log);Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
             check(!b.groups.isEmpty(),"所选 INI "+ini.file.getName()+" 没有可转换的模型绘制："+(o.variants?"已开启款式枚举；请检查是否为纯贴图配置、部件全部跳过或依赖未支持的外部绘制命令":"当前只转换默认款式；可在手动转换中开启‘转换全部款式’，并检查部件映射及外部绘制命令"));
             Set<String> shown=new LinkedHashSet<>();
