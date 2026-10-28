@@ -127,7 +127,7 @@ public final class CompatibilityTest {
     // no order to rehearse, so every outfit its draws can show is converted and the logic data is "driven"; without
     // the rehearsal it is refused as before. Its cycle key with back = is listed with "back".
     // A scheme shipped switched off (disabled/Q.ini, paths relative to the mod folder as on PC once moved up) is
-    // offered beside the one XXMI loads, converted from the folder it would be switched on in, and its logic data
+    // offered beside the one XXMI loads (not a DISABLED... file, not a copy), converted from the folder it would be switched on in, and its logic data
     // leaves the other scheme out.
     private static void drivenOutfits(File base)throws Exception{
         if(nativeChecker==null)return;
@@ -147,10 +147,11 @@ public final class CompatibilityTest {
         Process check=new ProcessBuilder(nativeChecker,out.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"the native driver picks every converted outfit of a driven model");
         // Switched-off scheme.
         File off=new File(src,"disabled");off.mkdirs();GimiPatternsTest.put(off,"Q.ini",text.replace("global $start = -100\n","global $start = -100\nglobal $only_q = 1\n"));
-        GimiPatternsTest.put(src,"DISABLED copy.ini",text);   // an exact copy of the enabled one: not a scheme
+        GimiPatternsTest.put(off,"Q copy.ini",text);   // an exact copy of the enabled one: not a scheme
+        GimiPatternsTest.put(src,"DISABLED old.ini",text.replace("global $look = 0\n","global $look = 0\nglobal $old = 1\n"));   // a switched-off file: a backup, not a scheme
         File q=new File(off,"Q.ini");List<String> schemes=ModLibrary.schemes(src);
         ok(schemes.equals(Arrays.asList("Citlali.ini","disabled/Q.ini"))&&Importer.scheme(src).equals("Citlali.ini"),"the switched-off scheme is offered, the loaded one stays in effect: "+schemes);
-        ok(ModConfig.switchedOn(src,q).getCanonicalFile().equals(src.getCanonicalFile())&&ModConfig.switchedOn(src,new File(src,"DISABLED copy.ini")).getCanonicalFile().equals(src.getCanonicalFile()),"a switched-off scheme is read from where it is switched on");
+        ok(ModConfig.switchedOn(src,q).getCanonicalFile().equals(src.getCanonicalFile())&&ModConfig.switchedOn(src,new File(src,"DISABLED old.ini")).getCanonicalFile().equals(src.getCanonicalFile()),"a switched-off scheme is read from where it is switched on");
         File outQ=new File(base,"driven-q");ModelConverter.convert(src,null,outQ,10000107,new ModelConverter.Options().variants(true).rehearsal(native_).ini(q),DECODE,new StringBuilder());
         List<Object> files=Json.arr(Json.obj(Json.obj(Json.read(new File(outQ,"model.json"),4L<<20),"model").get("logic"),"logic").get("files"),"files",1,1);
         ok(Json.obj(files.get(0),"file").get("namespace").equals("Mods\\driven\\Q.ini")&&new String(Files.readAllBytes(new File(outQ,"logic/0.ini").toPath()),"UTF-8").contains("$only_q"),"the logic data is the chosen scheme only: "+files);

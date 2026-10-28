@@ -37,9 +37,10 @@ final class ModConfig {
         }
         return vertex && draw;
     }
-    /** The schemes to offer: every model INI XXMI would load, then the ones a mod ships switched off (in a "disabled"
-     *  folder or file, a common way to package an alternative), except exact copies of one already listed. Picking
-     *  one of those stands for switching it on and the others off, as a PC user would. */
+    /** The schemes to offer: every model INI XXMI would load, then the ones a mod ships switched off in a "disabled"
+     *  folder (a common way to package an alternative), except exact copies of one already listed. Picking one of
+     *  those stands for switching it on and the others off, as a PC user would. A file named "DISABLED..." is not
+     *  offered: that is how old versions and backups are kept. */
     static List<File> schemeInis(File dir) {
         List<File> out = geometryInis(dir); Set<String> seen = new HashSet<>(); for (File f : out) seen.add(source(f));
         List<File> off = new ArrayList<>(); disabled(dir, off, 0, false);
@@ -58,8 +59,8 @@ final class ModConfig {
     }
     private static void disabled(File dir, List<File> out, int depth, boolean under) {
         File[] all = dir.listFiles(); if (all == null || depth > 4) return; Arrays.sort(all, Comparator.comparing(File::getName));
-        for (File f : all) { String n = f.getName().toLowerCase(Locale.ROOT); if (n.startsWith(".")) continue; boolean off = under || n.startsWith("disabled");
-            if (f.isDirectory()) disabled(f, out, depth + 1, off); else if (off && n.endsWith(".ini")) out.add(f); }
+        for (File f : all) { String n = f.getName().toLowerCase(Locale.ROOT); if (n.startsWith(".")) continue;
+            if (f.isDirectory()) disabled(f, out, depth + 1, under || n.startsWith("disabled")); else if (under && !n.startsWith("disabled") && n.endsWith(".ini")) out.add(f); }
     }
     /** Every INI with model geometry under dir (several = alternative schemes of one package). */
     static List<File> geometryInis(File dir) { List<File> out = new ArrayList<>(); for (File f : allInis(dir)) if (geometry(f)) out.add(f); return out; }

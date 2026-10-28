@@ -1,5 +1,7 @@
 package com.gibox.tool
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -114,8 +116,9 @@ fun PickScreen(state: AppState, pick: Screen.Pick) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (scheme == null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // Many schemes must not push the character list off the screen: the chips scroll in a bounded area.
                 FlowRow(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 168.dp).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     for (s in schemes) FilterChip(selected = s == scheme, onClick = { scheme = s }, label = { Text(schemeLabel(s, schemes)) })
