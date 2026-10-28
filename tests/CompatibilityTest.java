@@ -148,8 +148,9 @@ public final class CompatibilityTest {
         // the default. A per-mod opt-in can retain supported associations, with provenance and no geometry loss.
         File library=new File(base,"animation-library/10000107");library.mkdirs();Fixtures.skeleton(library,10000107,"Scene/Avatar_Girl_Catalyst_Citlali",new String[]{"Body"},new String[]{"BoneA","BoneB"},Collections.singletonMap("Body",Fixtures.target("Body",6,2,2)));
         for(int i=0;i<6;i++){skin.putFloat(i*32,1).putFloat(i*32+4,1).putInt(i*32+16,119).putInt(i*32+20,i%2);}GimiPatternsTest.put(src,"CitlaliBlend.buf",skin.array());
-        rejected=false;try{ModelConverter.convert(src,library,out,10000107,new ModelConverter.Options().replace(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("骨骼索引越界");}
-        ok(rejected&&generation.equals(ModelManifest.read(out).generation),"strict animated import must retain the previous working model");
+        rejected=false;try{ModelConverter.convert(src,library,out,10000107,new ModelConverter.Options().replace(true),DECODE,new StringBuilder());}
+        catch(IllegalArgumentException e){rejected=e.getMessage().contains("骨骼索引越界")&&e.getMessage().contains("6 个顶点里 6 个引用骨骼库外的骨骼（编号 119..119，库内 0..1）；其中 6 个去掉这些关联后其余权重总和仍为 1，0 个")&&e.getMessage().contains("忽略越界骨骼关联");}
+        ok(rejected&&generation.equals(ModelManifest.read(out).generation),"strict animated import must retain the previous working model, and say how much is outside and where the experiment is");
         rejected=false;try{ModelConverter.convert(src,null,out,10000107,new ModelConverter.Options().replace(true).animationBoneFallback(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){rejected=e.getMessage().contains("需要完整骨骼库");}
         ok(rejected&&generation.equals(ModelManifest.read(out).generation),"fallback cannot guess a palette's valid boundary");
         byte[] originalBlend=skin.array().clone();StringBuilder fallbackLog=new StringBuilder();ModelConverter.convert(src,library,out,10000107,new ModelConverter.Options().replace(true).animationBoneFallback(true),DECODE,fallbackLog);

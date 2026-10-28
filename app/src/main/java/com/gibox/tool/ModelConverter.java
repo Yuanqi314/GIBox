@@ -511,9 +511,22 @@ public final class ModelConverter {
     private static Vertex vertex(Resource position,Resource blend,Resource tex,byte[] p,byte[] b,byte[] t,int i,int boneCount,ExtraBoneFallback fallback){
         check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);v.uv=uv(t,to+4);for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(t,to+k));v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);}
         if(fallback!=null)fallback.apply(w,ids,boneCount,blend.file.getName(),i);
-        try{v.trimmedWeights=cleanWeights(w,ids,boneCount);}catch(IllegalArgumentException ex){float[] originalWeights=new float[4];int[] originalIndices=new int[4];for(int k=0;k<4;k++){originalWeights[k]=bi.getFloat(bo+4*k);originalIndices[k]=bi.getInt(bo+16+4*k);}throw new IllegalArgumentException(ex.getMessage()+" ["+blend.file.getName()+" vertex="+i+" rawWeights="+Arrays.toString(originalWeights)+" rawIndices="+Arrays.toString(originalIndices)+"]",ex);}
+        try{v.trimmedWeights=cleanWeights(w,ids,boneCount);}catch(IllegalArgumentException ex){float[] originalWeights=new float[4];int[] originalIndices=new int[4];for(int k=0;k<4;k++){originalWeights[k]=bi.getFloat(bo+4*k);originalIndices[k]=bi.getInt(bo+16+4*k);}
+            String whole=ex.getMessage()!=null&&ex.getMessage().startsWith("骨骼索引越界")?"；"+outOfRange(b,boneCount):"";
+            throw new IllegalArgumentException(ex.getMessage()+" ["+blend.file.getName()+" vertex="+i+" rawWeights="+Arrays.toString(originalWeights)+" rawIndices="+Arrays.toString(originalIndices)+"]"+whole,ex);}
         boolean weighted=false;for(float x:w)weighted|=x>0;if(weighted)tidy(w,ids,wo);else v.unweighted=true;for(byte[] channel:Arrays.asList(v.pos,v.norm,v.tangent)){ByteBuffer c=buf(channel);for(int k=0;k<channel.length;k+=4)check(Float.isFinite(c.getFloat(k)),"非法几何数值");}return v;
     }
+    /** For a strict refusal: every vertex of the Blend buffer whose effective weights reach past the skeleton, the
+     *  indices, and how many still sum to 1 without those links (links added on top of a complete set, as weights 1 and
+     *  1; if they have no effect on PC, leaving them out is what PC shows), and how many have nothing left. */
+    static String outOfRange(byte[] b,int boneCount){ByteBuffer bi=buf(b);int n=b.length/32,bad=0,whole=0,none=0,min=Integer.MAX_VALUE,max=-1;
+        for(int i=0;i<n;i++){float total=0,kept=0;boolean out=false;
+            for(int k=0;k<4;k++){float x=bi.getFloat(i*32+4*k);if(Float.isFinite(x)&&x>0)total+=x;}
+            if(!(total>0)||!Float.isFinite(total))continue;
+            for(int k=0;k<4;k++){float x=bi.getFloat(i*32+4*k);int id=bi.getInt(i*32+16+4*k);if(!(Float.isFinite(x)&&x/total>WEIGHT_EPSILON))continue;
+                if(id<0||id>=boneCount){out=true;min=Math.min(min,id);max=Math.max(max,id);}else kept+=x;}
+            if(!out)continue;bad++;if(kept==0)none++;else if(Math.abs(kept-1)<=1e-3f)whole++;}
+        return "此 Blend 文件 "+n+" 个顶点里 "+bad+" 个引用骨骼库外的骨骼（编号 "+min+".."+max+"，库内 0.."+(boneCount-1)+"）；其中 "+whole+" 个去掉这些关联后其余权重总和仍为 1，"+none+" 个的有效权重全在库外";}
     /** One vertex's four weights: the same bone listed twice added together, largest first, summing to 1; empty slots 0 on bone 0. */
     static void tidy(float[] w,int[] ids,ByteBuffer out){
         float[] tw=new float[4];int[] ti=new int[4];int n=0;
@@ -861,7 +874,11 @@ public final class ModelConverter {
             Build registry=new Build();Map<String,WeightOrder> weights=new HashMap<>();List<Object> frames=new ArrayList<>(),firstParts=null;String layout=null;
             try(BlobWriter blob=new BlobWriter(new File(tmp,"model.bin"))){
                 for(int frame:animation.values){Map<String,Integer> vars=new LinkedHashMap<>(ini.vars);vars.put(animation.variable,frame);memoryBudget(ini,src,bones,mapping,Collections.singletonList(vars),o.fallback,log);
-                    Build b=new Build();b.animationBoneFallback=o.animationBoneFallback;b.materials.putAll(registry.materials);collect(ini,src,bones,mapping,vars,0,b,log,o.fallback);check(!b.groups.isEmpty(),"动画帧没有有效模型绘制："+frame);
+                    Build b=new Build();b.animationBoneFallback=o.animationBoneFallback;b.materials.putAll(registry.materials);
+                    try{collect(ini,src,bones,mapping,vars,0,b,log,o.fallback);}
+                    catch(IllegalArgumentException ex){if(o.animationBoneFallback||ex.getMessage()==null||!ex.getMessage().startsWith("骨骼索引越界"))throw ex;
+                        throw new IllegalArgumentException(ex.getMessage()+"。手机上这个角色的骨骼里没有这些编号；如果它们在 PC 上本就不起作用，可在设置里把日志级别设为“调试”，到此 MOD 详情的“动画转换实验”打开“忽略越界骨骼关联”再重新转换（实验：去掉库外关联、其余权重重新归一化，不保证与 PC 等价）",ex);}
+                    check(!b.groups.isEmpty(),"动画帧没有有效模型绘制："+frame);
                     for(Group g:b.groups.values())if(g.extraBones.vertices>0)log.append("animation-bone-fallback frame=").append(frame).append(' ').append(g.name).append(": ").append(g.extraBones.summary()).append('\n');
                     Variation one=new Variation(ini,new ArrayList<>(),new ArrayList<>());for(Group g:b.groups.values()){fixUnweighted(g);WeightOrder order=weights.get(g.name);if(order==null)weights.put(g.name,new WeightOrder(g.vertices));else if(!order.align(g))animation.stableWeights=false;g.draws=drawTable(g,one,new int[]{0},1,new HashSet<>());g.compact.clear();g.ranges.clear();}b.cache.clear();
                     List<Object> parts=emitParts(b,blob);StringBuilder key=new StringBuilder();for(Object raw:parts){Map<String,Object> p=Json.obj(raw,"part");key.append(p.get("name")).append('|').append(p.get("renderer")).append('|').append(p.get("vertices")).append('|').append(p.get("bones")).append(Json.obj(p.get("data"),"data").keySet());
