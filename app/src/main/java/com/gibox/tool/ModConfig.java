@@ -37,6 +37,30 @@ final class ModConfig {
         }
         return vertex && draw;
     }
+    /** The schemes to offer: every model INI XXMI would load, then the ones a mod ships switched off (in a "disabled"
+     *  folder or file, a common way to package an alternative), except exact copies of one already listed. Picking
+     *  one of those stands for switching it on and the others off, as a PC user would. */
+    static List<File> schemeInis(File dir) {
+        List<File> out = geometryInis(dir); Set<String> seen = new HashSet<>(); for (File f : out) seen.add(source(f));
+        List<File> off = new ArrayList<>(); disabled(dir, off, 0, false);
+        for (File f : off) if (geometry(f) && seen.add(source(f))) out.add(f);
+        return out;
+    }
+    /** Where a scheme sits once switched on: a switched-off one (its file, or a folder on its path, named "disabled...")
+     *  is moved out of the switched-off folder by a PC user, so its paths are relative to the folder that holds that
+     *  folder (to its own folder for a "DISABLED x.ini" file). */
+    static File switchedOn(File mod, File ini) {
+        try { File root = mod.getCanonicalFile(), f = ini.getCanonicalFile(), on = f.getParentFile();
+            for (File d = f.getParentFile(); d != null && !d.equals(root) && d.getPath().startsWith(root.getPath()); d = d.getParentFile())
+                if (d.getName().toLowerCase(Locale.ROOT).startsWith("disabled")) on = d.getParentFile();
+            return on;
+        } catch (IOException e) { return ini.getParentFile(); }
+    }
+    private static void disabled(File dir, List<File> out, int depth, boolean under) {
+        File[] all = dir.listFiles(); if (all == null || depth > 4) return; Arrays.sort(all, Comparator.comparing(File::getName));
+        for (File f : all) { String n = f.getName().toLowerCase(Locale.ROOT); if (n.startsWith(".")) continue; boolean off = under || n.startsWith("disabled");
+            if (f.isDirectory()) disabled(f, out, depth + 1, off); else if (off && n.endsWith(".ini")) out.add(f); }
+    }
     /** Every INI with model geometry under dir (several = alternative schemes of one package). */
     static List<File> geometryInis(File dir) { List<File> out = new ArrayList<>(); for (File f : allInis(dir)) if (geometry(f)) out.add(f); return out; }
     /** The scheme's path as stored in modelswap.txt ("ini"): relative to the mod folder, with forward slashes. */

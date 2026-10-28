@@ -6,7 +6,9 @@
 // Request: {"main": namespace of the main INI, "files": [{"namespace", "text"}], "limits": {"presents", "states",
 // "frames", "ms"} (each optional)}. Reply: {"ok": true, "frames": [{"$var": value}], "sequence": [frame per Present
 // from the start], "loop": index the sequence repeats from, "states", "presents", "keyFrames", "keys", "phases":
-// [{"var", "modulus"}], "notes", "us"} or {"ok": false, "reason"}.
+// [{"var", "modulus"}], "notes", "us"} or {"ok": false, "external", "reason"}; external: what is drawn
+// follows the game (its clock, its draws), so no order can be rehearsed, but the converted outfits can still be picked
+// in the game by the core.
 #pragma once
 #include "json.hpp"
 #include "migoto/rehearsal.hpp"
@@ -25,7 +27,7 @@ inline std::string rehearseJson(const std::string& request){
    take("presents",lim.presents,1u<<20);take("states",lim.states,1u<<20);take("frames",lim.frames,256);take("ms",lim.ms,60000);}
   migoto::Engine e;e.load(files);e.start();migoto::Rehearsal r(e,main.string,lim);
   auto number=[](double v){char b[32];std::snprintf(b,sizeof b,"%.9g",v);return std::string(b);};
-  if(!r.ok)return "{\"ok\":false,\"reason\":"+quote(r.reason)+",\"us\":"+std::to_string(r.us)+"}";
+  if(!r.ok)return "{\"ok\":false,\"external\":"+std::string(r.external?"true":"false")+",\"reason\":"+quote(r.reason)+",\"us\":"+std::to_string(r.us)+"}";
   std::string out="{\"ok\":true,\"frames\":[";
   for(size_t i=0;i<r.frames.size();i++){out+=i?",{":"{";bool first=true;for(auto& kv:r.frames[i]){out+=(first?"":",")+quote(kv.first)+":"+std::to_string(kv.second);first=false;}out+="}";}
   out+="],\"sequence\":[";for(size_t i=0;i<r.sequence.size();i++)out+=(i?",":"")+std::to_string(r.sequence[i]);

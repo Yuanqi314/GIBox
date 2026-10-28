@@ -36,7 +36,7 @@ struct RehearsalLimits {uint64_t presents=65536,states=65536,frames=64,ms=3000,b
 struct Rehearsal {
  using Limits=RehearsalLimits;
  struct Phase {std::string var;double modulus=0;};
- bool ok=false;std::string reason;
+ bool ok=false,external=false;std::string reason;   // external: refused because what is drawn follows the game (clock, its draws), not for a limit
  std::vector<std::map<std::string,int>> frames;   // each frame: the draw variables by their name in the main INI
  std::vector<size_t> sequence;size_t loop=0;      // no input: the frame of the start, then of each Present; after the last, from loop again
  std::vector<Phase> phases;                       // counters kept as their phase
@@ -45,12 +45,12 @@ struct Rehearsal {
 
  Rehearsal(Engine& engine,const std::string& mainNs,Limits limits={}):e(engine),lim(limits){
   auto started=std::chrono::steady_clock::now();
-  try{run(mainNs,started);ok=true;}catch(const Refused& r){reason=r.why;frames.clear();sequence.clear();}
+  try{run(mainNs,started);ok=true;}catch(const Refused& r){reason=r.why;external=r.external;frames.clear();sequence.clear();}
   us=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count());}
 
 private:
- struct Refused {std::string why;};
- [[noreturn]] static void refuse(const std::string& why){throw Refused{why};}
+ struct Refused {std::string why;bool external=false;};
+ [[noreturn]] static void refuse(const std::string& why,bool external=false){throw Refused{why,external};}
  Engine& e;Limits lim;
  std::vector<Var*> all;std::vector<Var*> state;std::map<Var*,double> modulus;std::map<Var*,std::string> name;
  std::vector<KeySection*> relevant;std::vector<Preset*> presets;
@@ -115,14 +115,14 @@ private:
 
  void run(const std::string& mainNs,std::chrono::steady_clock::time_point started){
   ImportScan scan(e);
-  if(!scan.inputs.empty())refuse("what is drawn depends on more than the mod's own variables: "+scan.inputs.front());
+  if(!scan.inputs.empty())refuse("what is drawn depends on more than the mod's own variables: "+scan.inputs.front(),true);
   for(auto& r:scan.reasons)if(r.find("nested too deep")!=std::string::npos)refuse(r);
   if(!scan.unported.empty())refuse("commands the logic core does not port: "+scan.unported.front());
   if(!scan.customShaders.empty())refuse("custom shaders run: "+scan.customShaders.front());
   for(auto& g:e.globals)name[&g.second]=g.first;
   for(auto& kv:e.lists)for(auto& v:kv.second->locals)name[&v]=kv.second->name+" local "+v.name;
   for(auto& k:e.keys)for(auto& p:k.presets)if(p.run)for(auto& v:p.run->locals)name[&v]=k.name+" local "+v.name;
-  for(auto& w:scan.writes)if(w.inDraw&&scan.drawVars.count(w.var))refuse("draws change "+name[w.var]+" ("+w.where+"); what that does depends on the game's draw order");
+  for(auto& w:scan.writes)if(w.inDraw&&scan.drawVars.count(w.var))refuse("draws change "+name[w.var]+" ("+w.where+"); what that does depends on the game's draw order",true);
   // What the draws read, by the name the main INI gives it.
   std::string prefix="$\\"+lower(mainNs)+"\\";
   for(auto* v:scan.seeds){auto n=name[v];if(n.empty())continue;

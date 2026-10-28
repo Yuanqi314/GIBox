@@ -53,10 +53,12 @@ public:
  // A part's selection in the converter's signature form (ModelConverter.logicSignature): "hidden" (skipped, no draw
  // of its own), "original" (the game's draw, not replaced), or its issued draws in the order the core issued them,
  // each with its kind, range and the identity of every field; "original|" first when the game's draw is not skipped.
- // A drawindexed of 0 indices draws nothing and is not recorded (the converter's rule, ModelConverter drawCalls).
+ // A drawindexed of 0 indices, or one with ib = null, draws nothing and is not recorded (the converter's rules,
+ // ModelConverter drawCalls).
  std::string signature(const std::string& part)const{auto it=spec.parts.find(part);auto own=current.find(part);if(it==spec.parts.end()||own==current.end())return "?";
   const auto& r=own->second;std::vector<const migoto::IssuedDraw*> drawn;
-  for(auto& d:r.draws)if(!(d.kind=="drawindexed"&&!d.automatic&&!d.args.empty()&&d.args[0]==0))drawn.push_back(&d);
+  for(auto& d:r.draws){if(d.kind=="drawindexed"&&!d.automatic&&!d.args.empty()&&d.args[0]==0)continue;
+   auto ib=d.bindings.find("ib");if(d.kind=="drawindexed"&&ib!=d.bindings.end()&&ib->second.kind==migoto::Ref::Null)continue;drawn.push_back(&d);}
   if(drawn.empty())return r.skip?"hidden":"original";
   std::string out=r.skip?"":"original|";
   for(auto* p:drawn){auto& d=*p;out+="kind="+d.kind+";";
@@ -76,11 +78,13 @@ public:
  // A press of a [Key] the model lists (cycle or toggle): down and up, dispatched in the next Present after its pre list,
  // as upstream dispatches input; the key's condition, run lists, transitions and assignments are the core's. False
  // when the model lists no such key. Presses before the next Present all go in, in order.
- bool press(const LogicSpec::Key& k){if(k.file>=spec.files.size())return false;std::string full=k.section,ns;
+ // back: the key's back event (a cycle's previous preset), for a key the converter lists with back =.
+ bool press(const LogicSpec::Key& k,bool back=false){if(k.file>=spec.files.size()||(back&&!k.back))return false;std::string full=k.section,ns;
   {std::string out;if(migoto::namespacedSection(k.section,spec.files[k.file].ns,out))ns=out;}
   for(auto& key:engine.keys){std::string low=migoto::lower(key.name);if(low!=migoto::lower(ns)&&low!=migoto::lower(full))continue;
    if(key.type!=k.type)return false;
-   engine.keyDown(key.name);engine.keyUp(key.name);stats.keys++;return true;}
+   if(back)engine.keyBack(key.name);else{engine.keyDown(key.name);engine.keyUp(key.name);}
+   stats.keys++;return true;}
   return false;}
  // Persist variables by full name, with their current values (what the runtime saves); changed(): one of them
  // changed since the last call.
@@ -89,6 +93,8 @@ public:
  bool persistChanged(){bool d=engine.persistDirty;engine.persistDirty=false;return d;}
  // Whether a variable the main INI names got its value from the saved persist values at start.
  bool restoredVar(const std::string& name){migoto::Var* v=engine.global(migoto::lower(name),spec.mainNs);if(v)for(auto& g:engine.globals)if(&g.second==v)return restored.count(g.first)>0;return false;}
+ // Whether the main INI has this variable (a global).
+ bool has(const std::string& name){return engine.global(migoto::lower(name),spec.mainNs)!=nullptr;}
  // Draws again now (after set), without a Present; true when the matched choice changed.
  bool reselect(){int before=matched;draws();if(matched!=before)stats.changes++;return matched!=before;}
  // The finite-state analysis of the loaded logic (it sets variables while it runs and puts them back).

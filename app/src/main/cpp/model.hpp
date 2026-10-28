@@ -187,7 +187,10 @@ struct LogicSpec {
  std::string mainNs;                                        // the main INI's namespace (variant variables live there)
  // The [Key] sections the App offers as buttons (cycle and toggle; 0.7.37): the file they are in, the section as
  // that file writes it, their type. A press goes to the core as a key event, never straight to a variable.
- struct Key {size_t file=0;std::string section,type;};std::vector<Key> keys;
+ struct Key {size_t file=0;std::string section,type;bool back=false;};std::vector<Key> keys;   // back: a cycle with back = (the App's "previous")
+ // An outfit model whose Present program follows the game (clock, its draws; 0.7.40): the converter could not show
+ // it finite, converted every outfit its draws can show, and the core picks among them by real time and keys.
+ bool driven=false;
  std::string unsupported;
  bool present()const{return !files.empty()||!unsupported.empty();}
 };
@@ -228,7 +231,8 @@ inline LogicSpec logicOf(const Json& m,const std::string& dir,const AnimationSpe
   for(auto& v:jarr(j,"variants",1,256)){const auto& a=jfield(v,"assignment");require(a.type==Json::Object&&a.object.size()==variants.vars.size(),"logic: outfit assignment");Assignment x;
    for(auto& var:variants.vars){const auto& n=a.at(var.first);int value=jint(n,"logic: "+var.first);require(std::find(var.second.begin(),var.second.end(),value)!=var.second.end(),"logic: "+var.first+" = "+std::to_string(value)+" is not a converted value");x[var.first]=value;}
    l.assignments.push_back(x);l.choices.push_back(partsOf(jfield(v,"draws"),"outfit "+std::to_string(l.choices.size())));}}
- const auto& keys=j.at("keys");if(keys.type!=Json::Null)for(auto& k:jarr(j,"keys",0,256)){LogicSpec::Key x;x.file=size_t(juint(k,"file",0,l.files.size()-1));x.section=jstr(k,"section",256);x.type=jstr(k,"type",16);
+ l.driven=jbool(j,"driven",false);require(!l.driven||!animation.present(),"logic: driven is for outfit models");
+ const auto& keys=j.at("keys");if(keys.type!=Json::Null)for(auto& k:jarr(j,"keys",0,256)){LogicSpec::Key x;x.file=size_t(juint(k,"file",0,l.files.size()-1));x.section=jstr(k,"section",256);x.type=jstr(k,"type",16);x.back=jbool(k,"back",false);
   require(x.section.size()>3&&(x.section[0]|32)=='k'&&(x.section[1]|32)=='e'&&(x.section[2]|32)=='y'&&x.section.find_first_of("\\[]\r\n")==std::string::npos,"logic: key section "+x.section);require(x.type=="cycle"||x.type=="toggle","logic: key type "+x.type);l.keys.push_back(std::move(x));}
  return l;}
 struct ModelFile {std::string name,path,generation;unsigned id=0;std::vector<std::string> names;bool originalMaterials=false,diffuseOnly=false;Variants variants;std::vector<PartFile> parts;std::map<std::string,MaterialFile> materials;uint64_t blobSize=0;uint32_t blobCrc=0;AnimationSpec animation;std::vector<TextureSwap> swaps;LogicSpec logic;};

@@ -117,7 +117,10 @@ public final class Importer {
     /** The model INIs to choose from (relative paths); fewer than two: nothing to choose. */
     public static List<String> schemes(File mod) { try { return ModLibrary.schemes(mod); } catch (Exception e) { return new ArrayList<>(); } }
     /** The chosen scheme, or "" when the package has only one. */
-    public static String scheme(File mod) { String s = ModLibrary.overrides(mod).get("ini"); return s == null ? "" : s; }
+    /** The scheme in effect: the one chosen, else the only model INI XXMI would load (the switched-off ones offered
+     *  beside it are a choice, not a question); "" when there is no single one. */
+    public static String scheme(File mod) { String s = ModLibrary.overrides(mod).get("ini"); if (s != null) return s;
+        try { List<File> on = ModConfig.geometryInis(mod); return on.size() == 1 ? ModConfig.relative(mod, on.get(0)) : ""; } catch (Exception e) { return ""; } }
     public static void setScheme(File mod, String rel) throws Exception {
         if (ModConfig.scheme(mod, rel) == null) throw new IllegalArgumentException("不是这个 MOD 里的模型 INI：" + rel);
         ModLibrary.setOverride(mod, "ini", rel);
@@ -126,7 +129,7 @@ public final class Importer {
     public static void setAnimationBoneFallback(File mod, boolean enabled) throws Exception { ModLibrary.setOverride(mod, "animationbones", enabled ? "retain-valid" : null); }
     public static Result convert(File mod, int id, File modelsRoot, File boneRoot, ModelConverter.TextureDecoder decoder, StringBuilder log) throws Exception {
         if (id < 10000000 || id > 10001999) throw new IllegalArgumentException("角色 ID 无效：" + id);
-        File ini = ModLibrary.mainIni(mod), src = ini.getParentFile(); ModLibrary.setOverride(mod, "id", Integer.toString(id));
+        File ini = ModLibrary.mainIni(mod), src = ModConfig.switchedOn(mod, ini); ModLibrary.setOverride(mod, "id", Integer.toString(id));
         Map<String, String> o = ModLibrary.overrides(mod); String name = ModLibrary.modelName(o.containsKey("name") ? o.get("name") : mod.getName());
         ModLibrary.Character recorded = ModLibrary.recorded(boneRoot, id); Characters.Avatar avatar = Characters.byId(id);
         // A record of a lower level of detail (made right after loading, before 0.6.5) has a shorter bone list than the

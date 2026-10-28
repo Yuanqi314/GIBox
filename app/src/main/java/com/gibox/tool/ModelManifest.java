@@ -31,7 +31,10 @@ public final class ModelManifest {
     public String lodMesh = "";
     /** A [Key] of the model's INI logic the App can press (model.json "logic.keys", 0.7.37): with the logic core on, a
      *  press goes to the core as a key event. */
-    public static final class Key { public int file; public String section = "", type = ""; }
+    public static final class Key { public int file; public String section = "", type = ""; public boolean back; }
+    /** The logic data says the mod's own program picks the outfit (logic.driven): with the logic core on, the 款式 table
+     *  is not its input. */
+    public boolean driven;
     public final List<Key> keys = new ArrayList<>();
 
     /** A lower level of detail by mesh name (Body_LOD1, Body_LOD3 …); the plain name and _LOD0 are the full mesh (core.hpp lowerLod). */
@@ -102,10 +105,11 @@ public final class ModelManifest {
         // Older models have no keys; a list the runtime would refuse is not offered.
         try {
             Object logic = m.get("logic");
+            if (logic instanceof Map) r.driven = Json.bool(((Map<?, ?>) logic).get("driven"), "logic.driven", false);
             if (logic instanceof Map && ((Map<?, ?>) logic).get("keys") != null) for (Object x : Json.arr(((Map<?, ?>) logic).get("keys"), "logic.keys", 0, 256)) {
                 Map<String, Object> e = Json.obj(x, "logic.keys"); Key k = new Key();
                 k.file = (int) Json.integer(e.get("file"), "logic.keys.file", 0, 63); k.section = Json.str(e.get("section"), "logic.keys.section", 256); k.type = Json.str(e.get("type"), "logic.keys.type", 16);
-                Json.check(k.type.equals("cycle") || k.type.equals("toggle"), "logic.keys.type"); r.keys.add(k);
+                Json.check(k.type.equals("cycle") || k.type.equals("toggle"), "logic.keys.type"); k.back = Json.bool(e.get("back"), "logic.keys.back", false); r.keys.add(k);
             }
         } catch (Exception e) { r.keys.clear(); }
         return r;

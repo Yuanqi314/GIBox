@@ -123,6 +123,38 @@ public final class CompatibilityTest {
         try{ModelConverter.convert(src,null,new File(base,"rehearsed-counter"),10000107,new ModelConverter.Options().variants(true).rehearsal(native_),DECODE,new StringBuilder());}catch(IllegalArgumentException e){refused=e.getMessage().contains("逻辑核心预演也不能确定")&&e.getMessage().contains("does not repeat");}
         ok(refused,"a counter that opens a branch later is refused, with the rehearsal's reason");
     }
+    // A program that follows the clock (NahidaPoS's Qswap: Q shows the locked outfit for a while, ] / [ select):
+    // no order to rehearse, so every outfit its draws can show is converted and the logic data is "driven"; without
+    // the rehearsal it is refused as before. Its cycle key with back = is listed with "back".
+    // A scheme shipped switched off (disabled/Q.ini, paths relative to the mod folder as on PC once moved up) is
+    // offered beside the one XXMI loads, converted from the folder it would be switched on in, and its logic data
+    // leaves the other scheme out.
+    private static void drivenOutfits(File base)throws Exception{
+        if(nativeChecker==null)return;
+        ModelConverter.Rehearsal native_=request->{File req=File.createTempFile("rehearse-",".json",base);Files.write(req.toPath(),request.getBytes("UTF-8"));
+            Process p=new ProcessBuilder(nativeChecker,"--rehearse",req.getAbsolutePath()).redirectErrorStream(true).start();java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();byte[] chunk=new byte[65536];for(int n;(n=p.getInputStream().read(chunk))>0;)bytes.write(chunk,0,n);String reply=new String(bytes.toByteArray(),"UTF-8").trim();ok(p.waitFor()==0,"rehearsal tool: "+reply);return reply;};
+        String keys="[KeySel]\nkey = ]\nback = [\ntype = cycle\n$sel = 0,1\n[KeyQ]\nkey = q\ntype = cycle\n$press = 1\n";
+        String program="[Present]\nif $press == 1\n$start = time\n$press = 0\nendif\nif time - $start < 3\n$look = 1\nelse\n$look = $sel\nendif\n";
+        String text=GimiPatternsTest.ini("global $look = 0\nglobal persist $sel = 0\nglobal $press = 0\nglobal $start = -100\n","if $look == 1\nvb0 = ResourceNextPosition\nendif\n","","")+"[ResourceNextPosition]\nstride = 40\nfilename = Next.buf\n"+keys+program;
+        File src=GimiPatternsTest.mod(base,"driven",text);byte[] next=Files.readAllBytes(new File(src,"CitlaliPosition.buf").toPath());ByteBuffer.wrap(next).order(ByteOrder.LITTLE_ENDIAN).putFloat(0,99);GimiPatternsTest.put(src,"Next.buf",next);
+        boolean refused=false;try{ModelConverter.convert(src,null,new File(base,"driven-none"),10000107,new ModelConverter.Options().variants(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){refused=e.getMessage().contains("暂不支持这个 Present 动画程序");}
+        ok(refused,"without the rehearsal a program that follows the clock is refused as before");
+        StringBuilder log=new StringBuilder();File out=new File(base,"driven-out");ModelConverter.convert(src,null,out,10000107,new ModelConverter.Options().variants(true).rehearsal(native_),DECODE,log);
+        Map<String,Object> manifest=Json.obj(Json.read(new File(out,"model.json"),4L<<20),"model"),logic=Json.obj(manifest.get("logic"),"logic");ModelManifest read=ModelManifest.read(out);
+        ok(read.vars.get("$look").equals(Arrays.asList(0,1))&&Boolean.TRUE.equals(logic.get("driven"))&&read.driven&&Json.arr(logic.get("variants"),"variants",2,2).size()==2,"every outfit the draws can show, driven: "+read.vars+" "+logic.get("driven"));
+        boolean back=false;for(ModelManifest.Key k:read.keys)back|=k.section.equals("KeySel")&&k.back;ok(back,"the cycle key with back = is listed with back");
+        ok(log.toString().contains("Present 程序跟随游戏")&&log.toString().contains("reads time"),"the conversion log says why and what the core does: "+log);
+        Process check=new ProcessBuilder(nativeChecker,out.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"the native driver picks every converted outfit of a driven model");
+        // Switched-off scheme.
+        File off=new File(src,"disabled");off.mkdirs();GimiPatternsTest.put(off,"Q.ini",text.replace("global $start = -100\n","global $start = -100\nglobal $only_q = 1\n"));
+        GimiPatternsTest.put(src,"DISABLED copy.ini",text);   // an exact copy of the enabled one: not a scheme
+        File q=new File(off,"Q.ini");List<String> schemes=ModLibrary.schemes(src);
+        ok(schemes.equals(Arrays.asList("Citlali.ini","disabled/Q.ini"))&&Importer.scheme(src).equals("Citlali.ini"),"the switched-off scheme is offered, the loaded one stays in effect: "+schemes);
+        ok(ModConfig.switchedOn(src,q).getCanonicalFile().equals(src.getCanonicalFile())&&ModConfig.switchedOn(src,new File(src,"DISABLED copy.ini")).getCanonicalFile().equals(src.getCanonicalFile()),"a switched-off scheme is read from where it is switched on");
+        File outQ=new File(base,"driven-q");ModelConverter.convert(src,null,outQ,10000107,new ModelConverter.Options().variants(true).rehearsal(native_).ini(q),DECODE,new StringBuilder());
+        List<Object> files=Json.arr(Json.obj(Json.obj(Json.read(new File(outQ,"model.json"),4L<<20),"model").get("logic"),"logic").get("files"),"files",1,1);
+        ok(Json.obj(files.get(0),"file").get("namespace").equals("Mods\\driven\\Q.ini")&&new String(Files.readAllBytes(new File(outQ,"logic/0.ini").toPath()),"UTF-8").contains("$only_q"),"the logic data is the chosen scheme only: "+files);
+    }
     private static void animation(File base)throws Exception{
         String program="[Present]\nif $counter % $speed == 0\nif $frame < $last\n$frame = $frame + 1\nelse\n$frame = $first\nendif\nendif\npost $counter = $counter + 1\n";
         String text=GimiPatternsTest.ini("global $speed = 0.5\nglobal $counter = 0\nglobal $frame = 0\nglobal $first = 0\nglobal $last = 2\n",
@@ -243,10 +275,12 @@ public final class CompatibilityTest {
             +"[KeyPlain]\nkey = 4\n$x = 1\n[KeyNone]\ntype = cycle\n$x = 0,1\n[KeyNote]\nkey = 5\n;type = cycle\n[Key]\nkey = 6\ntype = cycle\n[TextureOverrideKey]\nkey = 7\ntype = cycle\n";
         List<Object> keys=ModelConverter.logicKeys(Arrays.asList(a,"[keyC]\nkey = 8\ntype = toggle\n"));
         ok(keys.equals(Arrays.asList(Json.of("file",0,"section","KeyA","type","cycle"),Json.of("file",0,"section","KeyB","type","toggle"),Json.of("file",1,"section","keyC","type","toggle"))),"logic keys: "+keys);
+        List<Object> back=ModelConverter.logicKeys(Arrays.asList("[KeySwap]\nkey = ]\nback = [\ntype = cycle\n$x = 0,1\n"));
+        ok(back.equals(Arrays.asList(Json.of("file",0,"section","KeySwap","type","cycle","back",true))),"a cycle with back = is listed with back: "+back);
     }
     public static void main(String[] args)throws Exception{
         nativeChecker=args.length>0?args[0]:null;File base=Files.createTempDirectory("gibox-compatibility-").toFile();
-        try{logicKeys();legacy(base);hohe(base);animation(base);rehearsedAnimation(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (logic core data for animations and outfits, rehearsed Present programs, App keys (cycle / toggle), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
+        try{logicKeys();legacy(base);hohe(base);animation(base);rehearsedAnimation(base);drivenOutfits(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (logic core data for animations and outfits, rehearsed Present programs, driven outfits, switched-off schemes, App keys (cycle / toggle / back), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
         finally{ModelConverter.remove(base);}
     }
 }

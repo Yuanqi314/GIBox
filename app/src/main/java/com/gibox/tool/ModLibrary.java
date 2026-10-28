@@ -73,7 +73,7 @@ public final class ModLibrary {
     static File mainIni(File mod) { return ModConfig.find(mod, overrides(mod).get("ini")); }
     static File ini(File mod) { return ModConfig.mainIni(mod); }
     /** Alternative model INIs of a package, as paths relative to the mod folder; one entry or none: nothing to choose. */
-    static List<String> schemes(File mod) { List<String> out = new ArrayList<>(); for (File f : ModConfig.geometryInis(mod)) out.add(ModConfig.relative(mod, f)); return out; }
+    static List<String> schemes(File mod) { List<String> out = new ArrayList<>(); for (File f : ModConfig.schemeInis(mod)) out.add(ModConfig.relative(mod, f)); return out; }
     /** A package is usable when it has one model INI, several to choose from, or a single INI (its own error later). */
     static void check(File dir) { if (ModConfig.geometryInis(dir).size() <= 1) ModConfig.find(dir); }
 

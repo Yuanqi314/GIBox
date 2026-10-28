@@ -92,13 +92,26 @@ public final class ModelConverter {
         List<String> active(Section s,Map<String,Integer> v){
             class Branch {boolean parent,taken,enabled,otherwise;Branch(boolean p,boolean e){parent=p;enabled=p&&e;taken=e;} }
             Deque<Branch> stack=new ArrayDeque<>();List<String> out=new ArrayList<>();boolean on=true;
-            for(String l:s.lines){String a=lower(l);if(a.startsWith("if ")){Branch b=new Branch(on,new Expr(l.substring(3),v).eval()!=0);stack.push(b);on=b.enabled;}
+            for(int i=0;i<s.lines.size();i++){String l=s.lines.get(i),a=lower(l);
+                if(a.startsWith("if ")){boolean yes;try{yes=new Expr(l.substring(3),v).eval()!=0;}
+                    // A condition on the clock or the game (time - $lastload < 1.5) cannot be evaluated here. When its
+                    // whole block only sets variables, nothing the converter reads depends on it: the block is left out.
+                    catch(IllegalArgumentException ex){int end=onlyAssigns(s.lines,i);if(end<0)throw ex;i=end;continue;}
+                    Branch b=new Branch(on,yes);stack.push(b);on=b.enabled;}
                 else if(a.startsWith("else if ")||a.startsWith("elseif ")){check(!stack.isEmpty(),"elseif 缺少 if");Branch b=stack.peek();check(!b.otherwise,"elseif 位于 else 后");boolean yes=new Expr(l.substring(a.startsWith("else if ")?8:7),v).eval()!=0;b.enabled=b.parent&&!b.taken&&yes;b.taken|=yes;on=b.enabled;}
                 else if(a.equals("else")){check(!stack.isEmpty(),"else 缺少 if");Branch b=stack.peek();check(!b.otherwise,"重复 else");b.otherwise=true;b.enabled=b.parent&&!b.taken;b.taken=true;on=b.enabled;}
                 else if(a.equals("endif")){check(!stack.isEmpty(),"endif 缺少 if");stack.pop();on=stack.isEmpty()||stack.peek().enabled;}
                 else if(on)out.add(l);
             }check(stack.isEmpty(),"if 未结束："+s.name);return out;
         }
+        /** The endif of the if at line i when every line of its block sets a variable or is an if / else / endif of
+         *  the same kind; -1 otherwise. */
+        static int onlyAssigns(List<String> lines,int i){int depth=0;
+            for(int k=i;k<lines.size();k++){String a=lower(lines.get(k)).trim();
+                if(a.startsWith("if ")){depth++;continue;}if(a.equals("endif")){if(--depth==0)return k;continue;}
+                if(a.equals("else")||a.startsWith("else if ")||a.startsWith("elseif "))continue;
+                if(!a.replaceFirst("^(pre|post)\\s+","").startsWith("$"))return -1;}
+            return -1;}
         List<Map<String,Integer>> variants(boolean all){List<Map<String,Integer>> o=new ArrayList<>();o.add(new LinkedHashMap<>(vars));if(!all)return o;
             for(String k:vars.keySet()){List<Map<String,Integer>> next=new ArrayList<>();TreeSet<Integer> values=choices.get(k);if(values==null)continue;for(Map<String,Integer> a:o)for(int n:values){Map<String,Integer>b=new LinkedHashMap<>(a);b.put(k,n);next.add(b);check(next.size()<=32,"款式组合超过 32；请关闭枚举或简化变量");}o=next;}return o;
         }
@@ -671,6 +684,9 @@ public final class ModelConverter {
     }
     /** A JSON request in, a JSON reply out (logic_import.hpp). */
     public interface Rehearsal {String run(String request)throws Exception;}
+    /** The Present program follows the game (its clock, its draws), so no order can be rehearsed; what it draws can
+     *  still be converted as outfits, for the logic core to pick in the game. */
+    static final class Driven extends IllegalArgumentException {Driven(String m){super(m);}}
     /** A bounded frame loop, compiled from Present: the counter / modulo / wrap pattern (present-loop), or else what
      *  the logic core's rehearsal of the program finds (present-sequence: frames by the values of what the draws read,
      *  and the order without input). Other dynamic programs fail explicitly. */
@@ -684,12 +700,12 @@ public final class ModelConverter {
             catch(IllegalArgumentException ex){if(r==null||ini.sections.get("present")==null)throw ex;return rehearsed(ini,src,r,ex.getMessage());}}
         /** The program's frames from the logic core; null when what is drawn never changes (an ordinary model then). */
         static Animation rehearsed(Ini ini,File src,Rehearsal r,String why)throws Exception{
-            List<File> files=new ArrayList<>();logicFiles(src,files,0);check(!files.isEmpty()&&files.size()<=64,why+"；逻辑核心预演：INI 文件数 "+files.size());
+            List<File> files=logicSet(ini,src);check(!files.isEmpty()&&files.size()<=64,why+"；逻辑核心预演：INI 文件数 "+files.size());
             List<Object> list=new ArrayList<>();String main=null;
-            for(File f:files){String body=ModConfig.source(f);String ns=logicNamespace(src,f,body);list.add(Json.of("namespace",ns,"text",body));if(f.getCanonicalFile().equals(ini.file.getCanonicalFile()))main=ns;}
+            for(File f:files){String body=ModConfig.source(f);String ns=logicNamespace(src,placed(ini,src,f),body);list.add(Json.of("namespace",ns,"text",body));if(f.getCanonicalFile().equals(ini.file.getCanonicalFile()))main=ns;}
             check(main!=null,why+"；逻辑核心预演：主 INI 不在 XXMI 会加载的文件里");
             Map<String,Object> j=Json.obj(Json.parse(r.run(Json.write(Json.of("main",main,"files",list)))),"预演结果");
-            if(!Boolean.TRUE.equals(j.get("ok")))throw new IllegalArgumentException(why+"；逻辑核心预演也不能确定："+j.get("reason"));
+            if(!Boolean.TRUE.equals(j.get("ok"))){String m=why+"；逻辑核心预演也不能确定："+j.get("reason");if(Boolean.TRUE.equals(j.get("external")))throw new Driven(m);throw new IllegalArgumentException(m);}
             Animation a=new Animation();
             for(Object x:Json.arr(j.get("frames"),"预演 frames",1,64)){Map<String,Integer> m=new LinkedHashMap<>();for(Map.Entry<String,Object> e:Json.obj(x,"预演 frame").entrySet()){check(e.getKey().startsWith("$"),"预演变量："+e.getKey());m.put(e.getKey(),(int)Json.integer(e.getValue(),e.getKey(),-1000000,1000000));}a.assignments.add(m);}
             if(a.assignments.size()<2)return null;
@@ -749,6 +765,14 @@ public final class ModelConverter {
     }
     /** The INI files XXMI loads for a mod (include_recursive with exclude_recursive = DISABLED*): every .ini under the
      *  folder except DISABLED* and desktop.ini, a folder's files (case-insensitive order) before its subfolders. */
+    /** The INIs XXMI loads with this scheme switched on: what it loads from the mod folder, with the converted INI in
+     *  and the other model INIs (the other schemes) out, as a PC user switches one scheme on and the rest off. */
+    static List<File> logicSet(Ini ini,File src)throws Exception{List<File> files=new ArrayList<>();logicFiles(src,files,0);File main=ini.file.getCanonicalFile();boolean in=false;
+        for(Iterator<File> it=files.iterator();it.hasNext();){File f=it.next().getCanonicalFile();if(f.equals(main)){in=true;continue;}if(ModConfig.geometry(f))it.remove();}
+        if(!in)files.add(ini.file);return files;}
+    /** Where XXMI sees an INI of the set: the converted one at the folder it is switched on in (its namespace and its
+     *  relative paths as on PC once moved there), the others where they are. */
+    static File placed(Ini ini,File src,File f)throws Exception{return f.getCanonicalFile().equals(ini.file.getCanonicalFile())?new File(ModConfig.switchedOn(src,f),f.getName()):f;}
     private static void logicFiles(File dir,List<File> out,int depth){File[] all=dir.listFiles();if(all==null||depth>8)return;
         List<File> files=new ArrayList<>(),dirs=new ArrayList<>();for(File f:all){String n=lower(f.getName());if(n.startsWith("disabled")||n.equals("desktop.ini")||n.startsWith("."))continue;
             if(f.isDirectory())dirs.add(f);else if(n.endsWith(".ini"))files.add(f);}
@@ -833,15 +857,15 @@ public final class ModelConverter {
     /** What frames and outfits share: files, resources, the draws replayed, fields; per assignment the signatures
      *  ("choices", taken out by the callers). unit names the choices in the log. */
     private static Map<String,Object> logicData(Ini ini,File src,List<Map<String,Integer>> assignments,Map<String,String> mapping,File out,StringBuilder log,String unit)throws Exception{
-        List<File> files=new ArrayList<>();logicFiles(src,files,0);StringBuilder why=new StringBuilder();
+        List<File> files=logicSet(ini,src);StringBuilder why=new StringBuilder();
         if(files.isEmpty()||files.size()>64){log.append("逻辑核心数据：INI 文件数 ").append(files.size()).append("，不写入\n");return null;}
         File dir=new File(out,"logic");check(dir.mkdirs(),"无法创建 logic 目录");List<Object> list=new ArrayList<>();long total=0;List<String> namespaces=new ArrayList<>(),texts=new ArrayList<>();String mainNs=null;
         for(int i=0;i<files.size();i++){File f=files.get(i);String body=ModConfig.source(f);total+=body.length();
             if(total>8L*1024*1024){log.append("逻辑核心数据：INI 合计超过 8 MiB，不写入\n");return null;}
-            write(dir,i+".ini",text(body));String ns=logicNamespace(src,f,body);namespaces.add(ns);texts.add(body);if(f.getCanonicalFile().equals(ini.file.getCanonicalFile()))mainNs=ns;
+            write(dir,i+".ini",text(body));String ns=logicNamespace(src,placed(ini,src,f),body);namespaces.add(ns);texts.add(body);if(f.getCanonicalFile().equals(ini.file.getCanonicalFile()))mainNs=ns;
             list.add(Json.of("namespace",ns,"file","logic/"+i+".ini"));}
         if(mainNs==null){log.append("逻辑核心数据：主 INI 不在 XXMI 会加载的文件里，不写入\n");return null;}
-        Map<String,String> table=logicResources(src,files,namespaces,texts);
+        List<File> seen=new ArrayList<>();for(File f:files)seen.add(placed(ini,src,f));Map<String,String> table=logicResources(src,seen,namespaces,texts);
         List<LogicSection> sections=logicSections(ini,why);if(sections==null){log.append("逻辑核心数据：").append(why).append("，不写入\n");return null;}
         Map<String,LogicSection> byName=new HashMap<>();for(LogicSection x:sections)byName.put(x.name,x);
         Map<String,Integer> vars0=assignments.get(0);Map<String,Resource> rs0=resources(ini,src,vars0);
@@ -887,16 +911,17 @@ public final class ModelConverter {
         return Json.of("signature",2,"main",mainNs,"files",list,"resources",table,"passes",passes,"fields",fields,"choices",frames,"keys",keyList);}
     /** The [Key] sections of the logic files the App can press as buttons: cycle and toggle (a hold needs a release the
      *  App does not send; activate is left for later). The file's index, the section as the file writes it, its type
-     *  (the first type= line counts, as in 3DMigoto). A section without key= or back= is not a key there either. */
+     *  (the first type= line counts, as in 3DMigoto), and "back" for a cycle with back = (its previous preset). A section
+     *  without key= or back= is not a key there either. */
     static List<Object> logicKeys(List<String> texts){List<Object> out=new ArrayList<>();Set<String> seen=new HashSet<>();
-        for(int i=0;i<texts.size();i++){String section=null,type=null;boolean bound=false;
+        for(int i=0;i<texts.size();i++){String section=null,type=null;boolean bound=false,back=false;
             for(String raw:(texts.get(i)+"\n[]").split("\r?\n")){String line=raw.trim();
                 if(line.startsWith("[")&&line.endsWith("]")){
                     String t=type==null?"activate":type;
-                    if(section!=null&&bound&&(t.equals("cycle")||t.equals("toggle"))&&out.size()<256&&seen.add(i+"|"+lower(section)))out.add(Json.of("file",i,"section",section,"type",t));
-                    String n=line.substring(1,line.length()-1).trim();section=n.length()>3&&lower(n).startsWith("key")&&n.length()<=256&&!n.matches(".*[\\\\\\[\\]].*")?n:null;type=null;bound=false;continue;}
+                    if(section!=null&&bound&&(t.equals("cycle")||t.equals("toggle"))&&out.size()<256&&seen.add(i+"|"+lower(section))){Map<String,Object> k=Json.of("file",i,"section",section,"type",t);if(back&&t.equals("cycle"))k.put("back",true);out.add(k);}
+                    String n=line.substring(1,line.length()-1).trim();section=n.length()>3&&lower(n).startsWith("key")&&n.length()<=256&&!n.matches(".*[\\\\\\[\\]].*")?n:null;type=null;bound=false;back=false;continue;}
                 if(section==null||line.startsWith(";"))continue;int eq=line.indexOf('=');if(eq<0)continue;String k=lower(line.substring(0,eq).trim());
-                if(k.equals("type")&&type==null)type=lower(line.substring(eq+1).trim());else if(k.equals("key")||k.equals("back"))bound=true;}}
+                if(k.equals("type")&&type==null)type=lower(line.substring(eq+1).trim());else if(k.equals("key"))bound=true;else if(k.equals("back")){bound=true;back=true;}}}
         return out;}
     private static File convertAnimation(Ini ini,File src,List<Bones> bones,Map<String,String> mapping,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log,Animation animation)throws Exception {
         if(o.animationBoneFallback){for(Bones bone:bones)check(!bone.synthetic,"动画骨骼兼容需要完整骨骼库或本 MOD 已保存的完整骨骼记录，不能用未知的索引上限判断哪些关联可忽略");
@@ -974,7 +999,7 @@ public final class ModelConverter {
         else if(boneDir==null){check((id==0&&!o.names.isEmpty())||(id>=10000000&&id<=10001999),"没有骨骼目录时需要角色 ID 或角色名");bones=new ArrayList<>();for(String r:DEFAULT_RENDERERS)bones.add(new Bones(r));if(o.fallback==null)o.fallback="Body";}
         else{check(id>=10000000&&id<=10001999,"角色 ID 越界");bones=bones(boneDir,id);}Map<String,String> map=new LinkedHashMap<>();
         if(!o.mapping.trim().isEmpty())for(String row:o.mapping.split(";")){String[] a=row.trim().split("=",-1);check(a.length==2&&!a[0].trim().isEmpty()&&!a[1].trim().isEmpty(),"映射格式：部件=渲染器;部件=skip");check(map.put(lower(a[0].trim()),a[1].trim())==null,"重复映射");}
-        Animation animation=Animation.parse(ini,src,o.rehearsal);
+        Animation animation;String driven=null;try{animation=Animation.parse(ini,src,o.rehearsal);}catch(Driven d){animation=null;driven=d.getMessage();}
         if(animation!=null)return convertAnimation(ini,src,bones,map,dest,id,o,decoder,log,animation);
         // Variants: every assignment of the variables that an if of a drawing section reads (not the ones only key or
         // Present sections use), one signature each; the distinct signatures are built, and each draw keeps the values of
@@ -1036,7 +1061,12 @@ public final class ModelConverter {
                 check(vars.size()<=16,"款式变量过多");manifest.put("variants",Json.of("vars",vars,"default",defaults));
                 log.append("款式变量：").append(shown).append("，").append(product).append(" 种取值组合（游戏内切换，无需重新转换）\n");}
             manifest.putAll(data);
-            if(!shown.isEmpty()){Map<String,Object> logic=logicVariants(ini,src,kept,shown,map,tmp,log);if(logic!=null)manifest.put("logic",logic);}
+            // A program that follows the game: every outfit its draws can show is converted, and the logic core picks
+            // among them in the game (real clock, the App's keys). Without outfits to pick it would show only the start.
+            if(driven!=null){check(!shown.isEmpty(),driven+"；也没有可在游戏里选择的款式变量，只能显示初始状态，所以不转换");
+                log.append("Present 程序跟随游戏（时钟、游戏的绘制等），预演不出播放顺序：按款式变量的全部取值转换；打开实验开关“逻辑核心驱动”时，进游戏由逻辑核心按真实时间和 App 里的按键选择款式；关闭时按款式表手动切换。原因：").append(driven).append('\n');}
+            if(!shown.isEmpty()){Map<String,Object> logic=logicVariants(ini,src,kept,shown,map,tmp,log);if(logic!=null){if(driven!=null)logic.put("driven",true);manifest.put("logic",logic);}
+                else if(driven!=null)log.append("逻辑核心数据写不出（见上面的原因）：这套 MOD 只能按款式表手动切换\n");}
             if(replaceWhen!=null){manifest.put("version",3);manifest.put("replaceWhen",replaceWhen);log.append("未启用几何替换的款式保留游戏原模型和材质；此模型需要支持格式 3 的 GIBox\n");}
             if(o.sourcePath!=null)manifest.put("source",Json.of("path",o.sourcePath,"signature",o.sourceSignature==null?"":o.sourceSignature));
             write(tmp,"conversion.log",text(log.toString()));

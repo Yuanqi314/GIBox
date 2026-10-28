@@ -199,16 +199,18 @@ int main(int argc,char**argv){
    refused(root+"/sequence-range",[&](Spec& s){s=sequenced("\"sequence\":[0,3],\"loop\":0");},"animation sequence out of range");
    refused(root+"/sequence-loop",[&](Spec& s){s=sequenced("\"sequence\":[0,1],\"loop\":2");},"\"loop\" out of range");}
   logicRefused("logic-key",fixture::withLogic(fixture::animated(),[&]{auto j=fixture::logicJson(ibs);j.insert(j.rfind('}'),",\"keys\":[{\"file\":0,\"section\":\"KeyA\",\"type\":\"hold\"}]");return j;}()),"logic: key type hold");
-  // A drawindexed of 0 indices before the part's real draw (BarbaraCelestialRose): it draws nothing, the converter does
-  // not record it, and the driver's selection must not have it either.
-  {LogicSpec z;z.mainNs="Mods\\Z\\a.ini";z.files.push_back({z.mainNs,"logic/0.ini","[Constants]\nglobal $look = 0\n[TextureOverridePart]\nhash = aaaa0001\nhandling = skip\nib = ResourceL0\ndrawindexed = 0, 0, 0\ndrawindexed = 3, 0, 0\nif $look == 1\n ib = ResourceL1\n drawindexed = 0, 0, 0\nendif\n[ResourceL0]\nfilename = l0.ib\n[ResourceL1]\nfilename = l1.ib\n"});
+  // A drawindexed of 0 indices before the part's real draw (BarbaraCelestialRose), or draws after ib = null
+  // (NahidaPoS): they draw nothing, the converter does not record them, and the driver's selection must not either.
+  {LogicSpec z;z.mainNs="Mods\\Z\\a.ini";z.files.push_back({z.mainNs,"logic/0.ini","[Constants]\nglobal $look = 0\n[TextureOverridePart]\nhash = aaaa0001\nhandling = skip\nib = ResourceL0\nif $look == 2\n ib = null\nendif\ndrawindexed = 0, 0, 0\ndrawindexed = 3, 0, 0\nif $look == 1\n ib = ResourceL1\n drawindexed = 0, 0, 0\nendif\n[ResourceL0]\nfilename = l0.ib\n[ResourceL1]\nfilename = l1.ib\n"});
    z.resources["resource\\mods\\z\\a.ini\\l0"]="file:l0.ib";z.resources["resource\\mods\\z\\a.ini\\l1"]="file:l1.ib";
    z.choices.push_back({{"Part",fixture::logicDraw("file:l0.ib","count=3;start=0;base=0;")}});z.assignments.push_back({{"$look",0}});
    z.choices.push_back({{"Part",fixture::logicDraw("file:l0.ib","count=3;start=0;base=0;")}});z.assignments.push_back({{"$look",1}});   // the second 0 draw adds nothing
+   z.choices.push_back({{"Part","hidden"}});z.assignments.push_back({{"$look",2}});   // ib = null: the draws issued after it draw nothing (NahidaPoS outfit 1)
    LogicSpec::Pass pass;pass.name="Part";pass.bindings["ib"]=0xaaaa0001u;pass.checks={"ib"};z.passes.push_back(pass);
    for(auto& f:logicFields())z.parts["Part"].push_back({f,"Part",f=="ib"||f.rfind("ps-",0)==0?f:std::string("vb0")});
    LogicDriver d(z);assert(d.frame()==0&&d.signature("Part")==fixture::logicDraw("file:l0.ib","count=3;start=0;base=0;"));
-   assert(d.set("$look",1));d.reselect();assert(d.frame()==0&&d.stats.misses==0);}
+   assert(d.set("$look",1));d.reselect();assert(d.frame()==0&&d.stats.misses==0);
+   assert(d.set("$look",2));d.reselect();assert(d.frame()==2&&d.signature("Part")=="hidden"&&d.stats.misses==0);}
   // Keys through the driver: a namespaced [Key], its conditions (one per cycle preset, as upstream), its run list's pre (on) and post (off), two presses
   // before one Present both dispatched in order; persist values by full name, restored into a new driver.
   {LogicSpec k;k.mainNs="Mods\\K\\a.ini";k.files.push_back({k.mainNs,"logic/0.ini","[Constants]\nglobal persist $look = 0\nglobal $armed = 1\n[KeyLook]\nkey = VK_UP\ntype = cycle\ncondition = $armed == 1, $armed == 1, $armed == 1\n$look = 0,1,2\n"

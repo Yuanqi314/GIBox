@@ -56,7 +56,9 @@ fun DetailScreen(state: AppState, name: String) {
             return@Scaffold
         }
         val variants = remember(mod.model, state.revision) { mod.model?.let { Variants.read(it) } }
-        val keys = remember(mod.model, state.revision) { mod.model?.let { runCatching { ModelManifest.read(it).keys.toList() }.getOrNull() }.orEmpty() }
+        val manifest = remember(mod.model, state.revision) { mod.model?.let { runCatching { ModelManifest.read(it) }.getOrNull() } }
+        val keys = manifest?.keys?.toList().orEmpty()
+        val driven = manifest?.driven == true
         val logicCore = remember(state.revision) { state.experiment("logicCore") }
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -174,12 +176,20 @@ fun DetailScreen(state: AppState, name: String) {
                 SettingsGroup(title = { SectionTitle("按键（逻辑核心）") }, verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                     SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(0, 1)) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("在游戏里按一次；需要模型正在显示，并且逻辑核心在驱动它", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                "在游戏里按一次；需要模型正在显示，并且逻辑核心在驱动它" +
+                                    if (driven) "。这套 MOD 由自己的程序（时间、按键）选款式，逻辑核心运行时上面的款式表不起作用" else "",
+                                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                for (k in keys) AssistChip(
-                                    onClick = { state.pressKey(mod, k) },
-                                    label = { Text(k.section.substring(3) + if (k.type == "toggle") "（开关）" else "（切换）") },
-                                )
+                                for (k in keys) {
+                                    val name = k.section.substring(3)
+                                    AssistChip(
+                                        onClick = { state.pressKey(mod, k) },
+                                        label = { Text(name + if (k.type == "toggle") "（开关）" else if (k.back) "（下一个）" else "（切换）") },
+                                    )
+                                    if (k.back) AssistChip(onClick = { state.pressKey(mod, k, true) }, label = { Text("$name（上一个）") })
+                                }
                             }
                         }
                     }

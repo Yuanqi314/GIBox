@@ -49,7 +49,7 @@ struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glo
  bool any()const{return gameMaterials||neutralColors||noUv2||glowTrace||separateDraws||firstRefreshMs||slotTextures||animationMode||logicCore;}
  std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off")+" animationMode="+std::to_string(animationMode)+" logicCore="+(logicCore?"on":"off");}};
 // keys: the App's presses of a model's [Key] sections (model.json logic.keys), numbered; each is taken once, by number.
-struct KeyPress {long long seq=0;size_t file=0;std::string section;bool operator==(const KeyPress& o)const{return seq==o.seq&&file==o.file&&section==o.section;}};
+struct KeyPress {long long seq=0;size_t file=0;std::string section;bool back=false;bool operator==(const KeyPress& o)const{return seq==o.seq&&file==o.file&&section==o.section&&back==o.back;}};
 struct ControlState {Experiments exp;bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;std::map<std::string,std::vector<KeyPress>> keys;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"Control JSON object");ControlState s;
@@ -66,7 +66,7 @@ ControlState parseControl(const std::string& raw){
  const auto& keys=c.at("keys");require(keys.type==Json::Object||keys.type==Json::Null,"Keys object");
  for(auto& model:keys.object){require(model.second.type==Json::Array&&model.second.array.size()<=32,"Key presses of a model");
   for(auto& k:model.second.array){require(k.type==Json::Object,"Key press");KeyPress x;x.seq=integerOf(k.at("seq"));auto file=integerOf(k.at("file"));require(x.seq>0&&file>=0&&file<64,"Key press number / file");x.file=size_t(file);
-   require(k.at("section").type==Json::String&&!k.at("section").string.empty()&&k.at("section").string.size()<=256,"Key press section");x.section=k.at("section").string;s.keys[model.first].push_back(x);}}
+   require(k.at("section").type==Json::String&&!k.at("section").string.empty()&&k.at("section").string.size()<=256,"Key press section");x.section=k.at("section").string;x.back=k.at("back").type==Json::Bool&&k.at("back").boolean;s.keys[model.first].push_back(x);}}
  s.logLevel=logThreshold(c);
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
   s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");s.exp.logicCore=flag("logicCore");
@@ -1118,8 +1118,8 @@ struct Runtime::Impl {
    if(!s.logic.driver){const char* why=!ctl.exp.logicCore?"logicCore is off":!s.logicSpec.present()?"the model has no logic data (convert it again)":s.logic.failed?"it stopped or did not start; the logic-error / logic-unavailable line above says why":"it has not started yet (the model is not shown)";
     log("logic-key",s.name+": "+k.section+" not pressed: the logic core does not run this model ("+why+")");continue;}
    const LogicSpec::Key* key=nullptr;for(auto& x:s.logicSpec.keys)if(x.file==k.file&&x.section==k.section)key=&x;
-   if(!key||!s.logic.driver->press(*key)){log("logic-key",s.name+": "+k.section+" is not a cycle or toggle key of this model; not pressed");continue;}
-   log("logic-key",s.name+": "+k.section+" ("+key->type+") pressed, press "+std::to_string(k.seq));}}
+   if(!key||!s.logic.driver->press(*key,k.back)){log("logic-key",s.name+": "+k.section+(k.back?" back":"")+" is not a cycle or toggle key of this model"+(k.back?" with back =":"")+"; not pressed");continue;}
+   log("logic-key",s.name+": "+k.section+" ("+key->type+(k.back?", back":"")+") pressed, press "+std::to_string(k.seq));}}
  void logicSwitch(Set& s){auto& L=s.logic;
   if(ctl.exp.logicCore&&!s.logicSpec.present()&&!L.noted){L.noted=true;log("logic-unavailable",s.name+": converted without logic data (before 0.7.34 for animations, 0.7.36 for outfits, or the converter could not state it: see its conversion log); "+fallback(s)+" plays it");}
   if(!ctl.exp.logicCore||!s.logicSpec.present()){if(L.driver)stopLogic(s,"logic-off","switched off");return;}
@@ -1128,7 +1128,11 @@ struct Runtime::Impl {
   try{auto saved=loadPersist(s);L.driver=std::make_unique<LogicDriver>(s.logicSpec,saved);auto& d=*L.driver;
    if(!saved.empty())log("logic-persist",s.name+": "+std::to_string(d.restoredCount())+" of "+std::to_string(saved.size())+" saved values restored (persist variables of this INI)");
    auto scan=d.scan();std::string scanText=scan.finiteStates?"finite, "+std::to_string(scan.states)+" states":"not finite";
-   if(!animated(s)){std::string why;if(!scan.finiteStates){for(auto& r:scan.reasons)why+=(why.empty()?"":"; ")+r;L.driver.reset();L.failed=true;log("logic-unavailable",s.name+": the outfit logic is not shown to be finite ("+why.substr(0,600)+"); the App's outfit choice stays");return;}
+   // A driven outfit model (the converter: its Present program follows the game) is not finite by design: its
+   // program picks among the converted outfits by the clock and the keys, and the App's table is not its input.
+   if(!animated(s)&&s.logicSpec.driven){for(auto& var:s.variants.vars)if(!d.has(var.first)){L.driver.reset();L.failed=true;log("logic-error",s.name+": the outfit variable "+var.first+" is not in the INI logic; the App's outfit choice stays");return;}
+    scanText="driven by its own program (clock, keys): the App's outfit table is not pushed while the core runs";}
+   else if(!animated(s)){std::string why;if(!scan.finiteStates){for(auto& r:scan.reasons)why+=(why.empty()?"":"; ")+r;L.driver.reset();L.failed=true;log("logic-unavailable",s.name+": the outfit logic is not shown to be finite ("+why.substr(0,600)+"); the App's outfit choice stays");return;}
     // A restored persist value stands over the App's table at the start; the App's next change of it goes in.
     for(auto& var:s.variants.vars)if(d.restoredVar(var.first)){auto c=appChoice(s).find(var.first);L.pushed[var.first]=c!=appChoice(s).end()?c->second:s.variants.defaults.at(var.first);}
     std::string missing;if(!pushChoice(s,missing)){L.driver.reset();L.failed=true;log("logic-error",s.name+": the outfit variable "+missing+" is not in the INI logic; the App's outfit choice stays");return;}d.reselect();}
@@ -1142,7 +1146,7 @@ struct Runtime::Impl {
  // Returns the choice to show, or -1 for no change.
  int logicStep(Set& s,uint32_t frame,uint64_t now){auto& L=s.logic;auto& d=*L.driver;
   bool changed=false;
-  if(!animated(s)){std::string missing;size_t before=L.pushed.size();auto old=L.pushed;if(!pushChoice(s,missing))throw std::runtime_error("the outfit variable "+missing+" is not in the INI logic");
+  if(!animated(s)&&!s.logicSpec.driven){std::string missing;size_t before=L.pushed.size();auto old=L.pushed;if(!pushChoice(s,missing))throw std::runtime_error("the outfit variable "+missing+" is not in the INI logic");
    if(old!=L.pushed||before!=L.pushed.size())changed|=d.reselect();}
   changed|=d.tick(frame,double(now)/1000.0);changed|=L.fresh;L.fresh=false;
   if(d.persistChanged())L.persistDue=true;

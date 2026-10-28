@@ -84,11 +84,11 @@ public final class Control {
     }
     /** A press of a model's [Key] (model.json logic.keys), read by the runtime from control.json "keys": numbered from
      *  "keySeq", the last 16 per model kept; the runtime takes each number once and ignores the ones there at game start. */
-    public static synchronized void pressKey(String pkg, String model, int file, String section) throws Exception {
+    public static synchronized void pressKey(String pkg, String model, int file, String section, boolean back) throws Exception {
         JSONObject j = load(pkg); long seq = j.optLong("keySeq", 0) + 1; j.put("keySeq", seq);
         JSONObject all = j.optJSONObject("keys"); if (all == null) all = new JSONObject();
         JSONArray old = all.optJSONArray(model), keep = new JSONArray(); if (old != null) for (int i = Math.max(0, old.length() - 15); i < old.length(); i++) { JSONObject x = old.optJSONObject(i); if (x != null) keep.put(x); }
-        JSONObject p = new JSONObject(); p.put("seq", seq); p.put("file", file); p.put("section", section); keep.put(p);
+        JSONObject p = new JSONObject(); p.put("seq", seq); p.put("file", file); p.put("section", section); if (back) p.put("back", true); keep.put(p);
         all.put(model, keep); j.put("keys", all); save(pkg, j);
     }
     public static int variable(String pkg, String model, String var, int fallback) {
