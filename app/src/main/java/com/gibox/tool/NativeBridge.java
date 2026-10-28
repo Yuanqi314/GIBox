@@ -43,6 +43,12 @@ public final class NativeBridge {
         return new String(rehearseUtf8(request.getBytes(java.nio.charset.StandardCharsets.UTF_8)), java.nio.charset.StandardCharsets.UTF_8);
     }
     private static native byte[] rehearseUtf8(byte[] request);
+    /** The logic core as the converter's 3DMigoto backend: what the INI draws for one assignment (logic_import.hpp drawsJson). */
+    public static synchronized String draws(String request) {
+        if (!loaded) { System.loadLibrary("gibox"); loaded=true; }
+        return new String(drawsUtf8(request.getBytes(java.nio.charset.StandardCharsets.UTF_8)), java.nio.charset.StandardCharsets.UTF_8);
+    }
+    private static native byte[] drawsUtf8(byte[] request);
     public static native void start(String packageName,String privateDir);
     private static native byte[] decodeDds(byte[] dds);
 }

@@ -25,6 +25,7 @@ Spec v2(){Spec s;s.version=2;s.variants="{\"vars\":[{\"name\":\"$halo\",\"values
 int main(int argc,char**argv){
  // The converter's Present rehearsal (called by the Java tests in place of NativeBridge.rehearse): request file in, reply out.
  if(argc==3&&std::string(argv[1])=="--rehearse"){std::cout<<rehearseJson(text(argv[2]))<<"\n";return 0;}
+ if(argc==3&&std::string(argv[1])=="--draws"){std::cout<<drawsJson(text(argv[2]))<<"\n";return 0;}
  // Converter output check (called by the Java tests): the folder must load exactly as the runtime will load it.
  if(argc==2){std::string p=argv[1];auto m=loadModelFile(p);auto s=readSummary(p);assert(m->parts.size()==s.parts.size()&&!m->parts.empty()&&m->variants.combos.empty());
   for(auto& part:m->parts){assert(!part.draws.empty());for(auto& d:part.draws)assert(m->materials.count(d.row.name));std::vector<Submesh> subs;std::vector<Material> rows;activeDraws(part.draws,m->variants.defaults,subs,rows);assert(!subs.empty());}

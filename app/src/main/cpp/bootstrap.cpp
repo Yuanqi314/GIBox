@@ -101,6 +101,10 @@ extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv*
  #endif
  }catch(const std::exception& e){bootStatus(pkg,"error",e.what());}}).detach();
  }catch(const std::exception& e){exception(env,e);} }
+// The converter's 3DMigoto backend: what the INI draws (logic_import.hpp drawsJson), UTF-8 JSON in and out.
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_gibox_tool_NativeBridge_drawsUtf8(JNIEnv* env,jclass,jbyteArray input){try{ms::require(input!=nullptr,"Null draws request");auto n=env->GetArrayLength(input);ms::require(n>0&&n<=16*1024*1024,"Draws request size");
+ std::string request(size_t(n),'\0');env->GetByteArrayRegion(input,0,n,reinterpret_cast<jbyte*>(request.data()));if(env->ExceptionCheck())return nullptr;auto out=ms::drawsJson(request);
+ auto a=env->NewByteArray(jsize(out.size()));if(!a)return nullptr;env->SetByteArrayRegion(a,0,jsize(out.size()),reinterpret_cast<const jbyte*>(out.data()));return a;}catch(const std::exception& e){exception(env,e);return nullptr;}}
 // The converter's Present rehearsal (logic_import.hpp): UTF-8 JSON in, UTF-8 JSON out.
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_gibox_tool_NativeBridge_rehearseUtf8(JNIEnv* env,jclass,jbyteArray input){try{ms::require(input!=nullptr,"Null rehearsal request");auto n=env->GetArrayLength(input);ms::require(n>0&&n<=16*1024*1024,"Rehearsal request size");
  std::string request(size_t(n),'\0');env->GetByteArrayRegion(input,0,n,reinterpret_cast<jbyte*>(request.data()));if(env->ExceptionCheck())return nullptr;auto out=ms::rehearseJson(request);

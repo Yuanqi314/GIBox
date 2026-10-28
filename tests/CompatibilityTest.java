@@ -123,6 +123,31 @@ public final class CompatibilityTest {
         try{ModelConverter.convert(src,null,new File(base,"rehearsed-counter"),10000107,new ModelConverter.Options().variants(true).rehearsal(native_),DECODE,new StringBuilder());}catch(IllegalArgumentException e){refused=e.getMessage().contains("逻辑核心预演也不能确定")&&e.getMessage().contains("does not repeat");}
         ok(refused,"a counter that opens a branch later is refused, with the rehearsal's reason");
     }
+    static String runNative(String flag,String request,File base)throws Exception{File req=File.createTempFile("native-",".json",base);Files.write(req.toPath(),request.getBytes("UTF-8"));
+        Process p=new ProcessBuilder(nativeChecker,flag,req.getAbsolutePath()).redirectErrorStream(true).start();java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();byte[] chunk=new byte[65536];
+        for(int n;(n=p.getInputStream().read(chunk))>0;)bytes.write(chunk,0,n);String reply=new String(bytes.toByteArray(),"UTF-8").trim();ok(p.waitFor()==0,"native tool "+flag+": "+reply);return reply;}
+    // The 3DMigoto backend for a static model: the logic core runs the INI and its draws are converted. A standard GIMI
+    // mod gives the same model as the converter's own evaluation; with an IB-level drawindexed = auto and a part's own
+    // draw, 3DMigoto draws both for that part (the old evaluation only the part's own), and the log names it; a core
+    // that cannot run leaves the converter's own evaluation, with the reason.
+    private static void staticBackend(File base)throws Exception{
+        if(nativeChecker==null)return;ModelConverter.CoreDraws core=r->runNative("--draws",r,base);
+        String text=GimiPatternsTest.ini("global $x = 0\n","","","");File src=GimiPatternsTest.mod(base,"backend",text);
+        StringBuilder plain=new StringBuilder(),log=new StringBuilder();File a=new File(base,"backend-plain"),b=new File(base,"backend-core");
+        ModelConverter.convert(src,null,a,10000107,new ModelConverter.Options(),DECODE,plain);ModelConverter.convert(src,null,b,10000107,new ModelConverter.Options().core(core),DECODE,log);
+        Object pa=Json.obj(Json.read(new File(a,"model.json"),4L<<20),"m").get("parts"),pb=Json.obj(Json.read(new File(b,"model.json"),4L<<20),"m").get("parts");
+        ok(log.toString().contains("3dm 后端：由逻辑核心按 XXMI 的方式运行 INI 决定绘制（2 次），与转换器自己的求值一致")&&!plain.toString().contains("3dm 后端"),"the backend's draws agree on a standard mod: "+log);
+        ok(String.valueOf(pa).equals(String.valueOf(pb))&&Arrays.equals(Files.readAllBytes(new File(a,"model.bin").toPath()),Files.readAllBytes(new File(b,"model.bin").toPath())),"and the converted model is the same, byte for byte");
+        GimiPatternsTest.put(src,"Citlali.ini",text.replace("ps-t0 = ResourceCitlaliBodyDiffuse\n","ps-t0 = ResourceCitlaliBodyDiffuse\ndrawindexed = 3, 0, 0\n"));
+        GimiPatternsTest.put(src,"CitlaliBody.ib",ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).putInt(3).putInt(4).putInt(5).putInt(0).putInt(1).putInt(2).array());   // its own draw: the first 3; auto: all 6
+        StringBuilder both=new StringBuilder(),old=new StringBuilder();File c=new File(base,"backend-both"),d=new File(base,"backend-old");
+        ModelConverter.convert(src,null,c,10000107,new ModelConverter.Options().core(core),DECODE,both);ModelConverter.convert(src,null,d,10000107,new ModelConverter.Options(),DECODE,old);
+        long ic=0,id=0;for(Object x:Json.arr(Json.obj(Json.read(new File(c,"model.json"),4L<<20),"m").get("parts"),"parts",1,4))ic+=Fixtures.number(Json.obj(x,"p"),"indices");
+        for(Object x:Json.arr(Json.obj(Json.read(new File(d,"model.json"),4L<<20),"m").get("parts"),"parts",1,4))id+=Fixtures.number(Json.obj(x,"p"),"indices");
+        ok(both.toString().contains("与转换器自己的求值不同，按 3dm 后端转换")&&both.toString().contains("3dm 后端有、旧求值没有：CitlaliBody count=auto start=0 ib=CitlaliBody.ib")&&ic==id+6,"the IB-level auto draw is drawn for the part too, as on PC: "+ic+" vs "+id+"\n"+both);
+        StringBuilder failed=new StringBuilder();ModelConverter.convert(src,null,new File(base,"backend-failed"),10000107,new ModelConverter.Options().core(r->"{\"ok\":false,\"reason\":\"no core\"}"),DECODE,failed);
+        ok(failed.toString().contains("3dm 后端未用于本次转换：逻辑核心不能运行这个 INI：no core；按转换器自己的求值"),"a core that cannot run leaves the converter's own evaluation: "+failed);
+    }
     // A program that follows the clock (NahidaPoS's Qswap: Q shows the locked outfit for a while, ] / [ select):
     // no order to rehearse, so every outfit its draws can show is converted and the logic data is "driven"; without
     // the rehearsal it is refused as before. Its cycle key with back = is listed with "back".
@@ -281,7 +306,7 @@ public final class CompatibilityTest {
     }
     public static void main(String[] args)throws Exception{
         nativeChecker=args.length>0?args[0]:null;File base=Files.createTempDirectory("gibox-compatibility-").toFile();
-        try{logicKeys();legacy(base);hohe(base);animation(base);rehearsedAnimation(base);drivenOutfits(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (logic core data for animations and outfits, rehearsed Present programs, driven outfits, switched-off schemes, App keys (cycle / toggle / back), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
+        try{logicKeys();legacy(base);hohe(base);animation(base);rehearsedAnimation(base);drivenOutfits(base);staticBackend(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (3dm backend for static models, logic core data for animations and outfits, rehearsed Present programs, driven outfits, switched-off schemes, App keys (cycle / toggle / back), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
         finally{ModelConverter.remove(base);}
     }
 }

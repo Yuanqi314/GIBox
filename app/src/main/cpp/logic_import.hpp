@@ -38,4 +38,33 @@ inline std::string rehearseJson(const std::string& request){
   return out+"],\"us\":"+std::to_string(r.us)+"}";}
  catch(const std::exception& ex){return "{\"ok\":false,\"reason\":"+quote(std::string("the INI could not be rehearsed: ")+ex.what())+"}";}}
 
+// What the mod's INI draws for one assignment, by the core (the converter's 3DMigoto backend, 0.7.42): the INIs
+// are loaded and [Constants] run, the main INI's variables set, then the game's draws (the converter's passes, as in
+// model.json logic.passes) replayed in order. Request: {"main", "files": [{"namespace", "text"}], "vars": {"$var":
+// value}, "passes": [{"name", "bindings": {slot: hash}, "checks", "call"}]}. Reply: {"ok": true, "passes": [{"name",
+// "skip", "bindings": {slot: ref}, "draws": [{"kind", "args", "auto", "bindings": {slot: ref}}]}], "notes"} or
+// {"ok": false, "reason"}; a ref is "mod:<resource key>", "game:<hash>", "null" or "-".
+inline std::string drawsJson(const std::string& request){
+ auto ref=[](const migoto::Ref& r)->std::string{switch(r.kind){case migoto::Ref::None:return "-";case migoto::Ref::Null:return "null";
+   case migoto::Ref::Game:{char b[16];std::snprintf(b,sizeof b,"game:%08x",r.hash);return b;}case migoto::Ref::Mod:return "mod:"+r.resource;}return "-";};
+ auto slots=[&](const std::map<std::string,migoto::Ref>& m){std::string o="{";bool first=true;for(auto& kv:m){o+=(first?"":",")+quote(kv.first)+":"+quote(ref(kv.second));first=false;}return o+"}";};
+ try{Json j=JsonParser(request).parse();require(j.type==Json::Object,"draws request");const auto& main=j.at("main");require(main.type==Json::String&&!main.string.empty(),"draws main");
+  std::vector<migoto::IniFile> files;const auto& list=j.at("files");require(list.type==Json::Array&&!list.array.empty()&&list.array.size()<=64,"draws files");size_t total=0;
+  for(auto& f:list.array){require(f.type==Json::Object&&f.at("namespace").type==Json::String&&f.at("text").type==Json::String,"draws file");total+=f.at("text").string.size();require(total<=8u*1024*1024,"INI files over 8 MiB");files.push_back({f.at("namespace").string,f.at("text").string});}
+  migoto::Engine e;e.load(files);e.start();
+  const auto& vars=j.at("vars");if(vars.type==Json::Object)for(auto& kv:vars.object){require(kv.second.type==Json::Number&&std::isfinite(kv.second.number),"draws var "+kv.first);
+   if(migoto::Var* v=e.global(migoto::lower(kv.first),main.string))v->value=float(kv.second.number);}
+  std::string out="{\"ok\":true,\"passes\":[";const auto& passes=j.at("passes");require(passes.type==Json::Array&&!passes.array.empty()&&passes.array.size()<=256,"draws passes");
+  for(size_t i=0;i<passes.array.size();i++){const auto& p=passes.array[i];require(p.type==Json::Object&&p.at("name").type==Json::String,"draws pass");migoto::DrawInfo d;
+   const auto& b=p.at("bindings");if(b.type==Json::Object)for(auto& kv:b.object){require(kv.second.type==Json::String,"draws binding");d.bindings[kv.first]=migoto::Ref::game(uint32_t(std::stoul(kv.second.string,nullptr,16)));}
+   const auto& c=p.at("checks");if(c.type==Json::Array)for(auto& x:c.array){require(x.type==Json::String,"draws check");d.checks.push_back(x.string);}
+   const auto& call=p.at("call");if(call.type==Json::Object)for(auto& kv:call.object){require(kv.second.type==Json::Number,"draws call");d.call[kv.first]=float(kv.second.number);}
+   auto r=e.draw(d);out+=std::string(i?",":"")+"{\"name\":"+quote(p.at("name").string)+",\"skip\":"+(r.skip?"true":"false")+",\"bindings\":"+slots(r.bindings)+",\"draws\":[";
+   for(size_t k=0;k<r.draws.size();k++){auto& x=r.draws[k];out+=std::string(k?",":"")+"{\"kind\":"+quote(x.kind)+",\"auto\":"+(x.automatic?"true":"false")+",\"args\":[";
+    for(size_t a=0;a<x.args.size();a++){char n[32];std::snprintf(n,sizeof n,"%.9g",double(x.args[a]));out+=std::string(a?",":"")+n;}out+="],\"bindings\":"+slots(x.bindings)+"}";}
+   out+="]}";}
+  out+="],\"notes\":[";size_t n=0;for(auto& d:e.diag.list){if(d.level==migoto::Diagnostic::Notice)continue;if(n>=24)break;out+=(n++?",":"")+quote(d.where+": "+d.message);}
+  return out+"]}";}
+ catch(const std::exception& ex){return "{\"ok\":false,\"reason\":"+quote(std::string("the INI could not be run: ")+ex.what())+"}";}}
+
 }  // namespace ms

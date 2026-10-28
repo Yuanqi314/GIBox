@@ -36,6 +36,8 @@ public final class ModelConverter {
 
     static final class Section { final String name;final List<String> lines=new ArrayList<>(); Section(String n){name=n;} }
     static final class Ini {
+        /** The 3DMigoto backend's draws per assignment (coreDraws); resolve uses them instead of the converter's own. */
+        Map<Map<String,Integer>,List<Draw>> coreDraws=null;
         final LinkedHashMap<String,Section> sections=new LinkedHashMap<>();
         final LinkedHashMap<String,Integer> vars=new LinkedHashMap<>();
         final LinkedHashMap<String,Double> numbers=new LinkedHashMap<>();
@@ -561,7 +563,9 @@ public final class ModelConverter {
     private static LinkedHashMap<Draw,Bones> resolve(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,Map<String,Resource> rs,StringBuilder log,String fallback){
         // The initial state may legitimately have geometry replacement disabled (e.g. Shenhe's $vision=1).
         // Reject a mod only after examining all available assignments, not before its active state is visited.
-        List<Draw> draws=drawCalls(ini,vars,rs,mapping);if(draws.isEmpty())return new LinkedHashMap<>();
+        List<Draw> core=ini.coreDraws==null?null:ini.coreDraws.get(vars);List<Draw> draws=new ArrayList<>();
+        if(core!=null)for(Draw d:core){Draw x=new Draw(d.part,d.bindings,d.count,d.start);x.hash=d.hash;x.issuer=d.issuer;draws.add(x);}else draws=drawCalls(ini,vars,rs,mapping);
+        if(draws.isEmpty())return new LinkedHashMap<>();
         LinkedHashMap<Draw,Bones> targets=new LinkedHashMap<>();Map<String,Bones> byHash=new HashMap<>();List<Draw> pending=new ArrayList<>();
         for(Draw d:draws){if("skip".equalsIgnoreCase(mapping.get(lower(d.part))))continue;try{Bones b=target(d.part,boneRecords,mapping);targets.put(d,b);if(!d.hash.isEmpty()){Bones prev=byHash.putIfAbsent(d.hash,b);check(prev==null||prev==b,"同一 IB hash 的部件映射到了不同渲染器："+d.hash);}}catch(IllegalArgumentException e){if(d.hash.isEmpty()||mapping.containsKey(lower(d.part)))throw e;pending.add(d);}}
         Bones fallbackBones=null;if(fallback!=null)for(Bones b:boneRecords)if(b.name.equalsIgnoreCase(fallback))fallbackBones=b;
@@ -684,6 +688,8 @@ public final class ModelConverter {
     }
     /** A JSON request in, a JSON reply out (logic_import.hpp). */
     public interface Rehearsal {String run(String request)throws Exception;}
+    /** The same for the 3DMigoto backend's draws (logic_import.hpp drawsJson). */
+    public interface CoreDraws {String run(String request)throws Exception;}
     /** The Present program follows the game (its clock, its draws), so no order can be rehearsed; what it draws can
      *  still be converted as outfits, for the logic core to pick in the game. */
     static final class Driven extends IllegalArgumentException {Driven(String m){super(m);}}
@@ -856,18 +862,77 @@ public final class ModelConverter {
         data.put("variants",variants);return data;}
     /** What frames and outfits share: files, resources, the draws replayed, fields; per assignment the signatures
      *  ("choices", taken out by the callers). unit names the choices in the log. */
-    private static Map<String,Object> logicData(Ini ini,File src,List<Map<String,Integer>> assignments,Map<String,String> mapping,File out,StringBuilder log,String unit)throws Exception{
-        List<File> files=logicSet(ini,src);StringBuilder why=new StringBuilder();
-        if(files.isEmpty()||files.size()>64){log.append("逻辑核心数据：INI 文件数 ").append(files.size()).append("，不写入\n");return null;}
-        File dir=new File(out,"logic");check(dir.mkdirs(),"无法创建 logic 目录");List<Object> list=new ArrayList<>();long total=0;List<String> namespaces=new ArrayList<>(),texts=new ArrayList<>();String mainNs=null;
-        for(int i=0;i<files.size();i++){File f=files.get(i);String body=ModConfig.source(f);total+=body.length();
-            if(total>8L*1024*1024){log.append("逻辑核心数据：INI 合计超过 8 MiB，不写入\n");return null;}
-            write(dir,i+".ini",text(body));String ns=logicNamespace(src,placed(ini,src,f),body);namespaces.add(ns);texts.add(body);if(f.getCanonicalFile().equals(ini.file.getCanonicalFile()))mainNs=ns;
-            list.add(Json.of("namespace",ns,"file","logic/"+i+".ini"));}
-        if(mainNs==null){log.append("逻辑核心数据：主 INI 不在 XXMI 会加载的文件里，不写入\n");return null;}
-        List<File> seen=new ArrayList<>();for(File f:files)seen.add(placed(ini,src,f));Map<String,String> table=logicResources(src,seen,namespaces,texts);
-        List<LogicSection> sections=logicSections(ini,why);if(sections==null){log.append("逻辑核心数据：").append(why).append("，不写入\n");return null;}
-        Map<String,LogicSection> byName=new HashMap<>();for(LogicSection x:sections)byName.put(x.name,x);
+    /** The 3DMigoto backend: for each assignment, the logic core runs the mod's INIs as XXMI loads them and replays
+     *  the game's draws (layout's passes); what each part's draws bind and their ranges become the draws converted,
+     *  in place of the converter's own evaluation, which stays as the comparison. Any difference is logged, and the
+     *  core's draws are used. When the core cannot state them (a resource of another INI, a draw kind or base vertex
+     *  this converter does not build), the converter's own are used and the log says why. */
+    static void coreDraws(Ini ini,File src,List<Map<String,Integer>> assignments,Map<String,String> mapping,CoreDraws core,StringBuilder log)throws Exception{
+        StringBuilder why=new StringBuilder();LogicLayout L=layout(ini,src,assignments,mapping,why);
+        if(L==null){log.append("3dm 后端未用于本次转换：").append(why).append("；按转换器自己的求值\n");return;}
+        Map<Map<String,Integer>,List<Draw>> out=new HashMap<>();List<String> differ=new ArrayList<>();int count=0;
+        for(int i=0;i<assignments.size();i++){Map<String,Integer> vars=assignments.get(i);List<Draw> ds;
+            try{ds=coreDrawsOf(L,vars,core);}catch(Exception ex){log.append("3dm 后端未用于本次转换：").append(ex.getMessage()).append("；按转换器自己的求值\n");return;}
+            for(Draw d:ds)if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part))))count++;
+            Map<String,Resource> rs=resources(ini,src,vars);List<String> mine=new ArrayList<>(),theirs=new ArrayList<>();
+            for(Draw d:L.drawn.get(i))mine.add(drawText(d,rs));for(Draw d:ds)if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part))))theirs.add(drawText(d,rs));
+            if(!mine.equals(theirs)){List<String> a=new ArrayList<>(mine),b=new ArrayList<>(theirs);a.removeAll(theirs);b.removeAll(mine);
+                for(String x:a)differ.add("旧求值有、3dm 后端没有："+x);for(String x:b)differ.add("3dm 后端有、旧求值没有："+x);if(a.isEmpty()&&b.isEmpty())differ.add("绘制顺序不同："+theirs);}
+            out.put(new LinkedHashMap<>(vars),ds);}
+        ini.coreDraws=out;
+        if(differ.isEmpty())log.append("3dm 后端：由逻辑核心按 XXMI 的方式运行 INI 决定绘制（").append(count).append(" 次），与转换器自己的求值一致\n");
+        else{log.append("3dm 后端：由逻辑核心按 XXMI 的方式运行 INI 决定绘制（").append(count).append(" 次），与转换器自己的求值不同，按 3dm 后端转换：\n");for(int k=0;k<differ.size()&&k<8;k++)log.append("    ").append(differ.get(k)).append('\n');if(differ.size()>8)log.append("    …共 ").append(differ.size()).append(" 处\n");}}
+    /** One draw as the comparison sees it: the part, its range and the file of every field. */
+    private static String drawText(Draw d,Map<String,Resource> rs){StringBuilder t=new StringBuilder(d.part).append(" count=").append(d.count<0?"auto":Integer.toString(d.count)).append(" start=").append(d.start);
+        String[] names={"ib","position","blend","texcoord"};String[] keys={"ib",streamKey(0),streamKey(1),streamKey(2)};
+        for(int k=0;k<4;k++){String v=d.bindings.get(keys[k]);t.append(' ').append(names[k]).append('=').append(unbound(v)?"-":resource(rs,v).file.getName());}
+        for(int k=0;k<3;k++){String v=d.bindings.get("ps-t"+k);t.append(" ps-t").append(k).append('=').append(v==null?"-":unbound(v)?"null":resource(rs,v).file.getName());}
+        return t.toString();}
+    @SuppressWarnings("unchecked")
+    private static List<Draw> coreDrawsOf(LogicLayout L,Map<String,Integer> vars,CoreDraws core)throws Exception{
+        List<Object> files=new ArrayList<>();for(int i=0;i<L.files.size();i++)files.add(Json.of("namespace",L.namespaces.get(i),"text",L.texts.get(i)));
+        Map<String,Object> v=new LinkedHashMap<>();for(Map.Entry<String,Integer> e:vars.entrySet())v.put(e.getKey(),(long)e.getValue());
+        Map<String,Object> reply=Json.obj(Json.parse(core.run(Json.write(Json.of("main",L.mainNs,"files",files,"vars",v,"passes",L.passes)))),"3dm 后端结果");
+        check(Boolean.TRUE.equals(reply.get("ok")),"逻辑核心不能运行这个 INI："+reply.get("reason"));
+        Map<String,Map<String,Object>> byName=new LinkedHashMap<>();for(Object x:Json.arr(reply.get("passes"),"passes",1,256)){Map<String,Object> p=Json.obj(x,"pass");byName.put((String)p.get("name"),p);}
+        String prefix="resource\\"+lower(L.mainNs)+"\\";List<Draw> out=new ArrayList<>();
+        for(Object raw:L.passes){Map<String,Object> pass=Json.obj(raw,"pass");String part=(String)pass.get("name");if(part.equals("skin"))continue;Map<String,Object> got=byName.get(part);check(got!=null,"缺少绘制结果："+part);
+            Map<String,Object> fields=Json.obj(L.fields.get(part),"fields");
+            for(Object dx:Json.arr(got.get("draws"),"draws",0,64)){Map<String,Object> d=Json.obj(dx,"draw");Map<String,Object> b=Json.obj(d.get("bindings"),"bindings");
+                check("drawindexed".equals(d.get("kind")),part+" 的绘制是 "+d.get("kind")+"，转换器只建 drawindexed");boolean auto=Boolean.TRUE.equals(d.get("auto"));List<Object> args=Json.arr(d.get("args"),"args",0,8);
+                int count=-1,start=0;if(!auto){check(args.size()==3,part+" 的 drawindexed 参数");count=(int)((Number)args.get(0)).doubleValue();start=(int)((Number)args.get(1)).doubleValue();check(((Number)args.get(2)).doubleValue()==0,part+" 的 drawindexed baseVertex 不是 0");if(count==0)continue;}
+                String ib=coreName(b.get("ib"),prefix);if("null".equals(ib))continue;check(ib!=null,part+" 的绘制没有用 MOD 的索引缓冲");
+                Map<String,String> bindings=new LinkedHashMap<>();bindings.put("ib",ib);
+                for(int k=0;k<3;k++){String t=coreName(b.get("ps-t"+k),prefix);if(t!=null)bindings.put("ps-t"+k,t);}
+                String[] f={"position","blend","texcoord"};
+                for(int k=0;k<3;k++){List<Object> at=Json.arr(fields.get(f[k]),"field",2,2);String from=(String)at.get(0),slot=(String)at.get(1);Object ref;
+                    if(from.equals(part))ref=b.get(slot);else{Map<String,Object> other=byName.get(from);check(other!=null,"缺少绘制结果："+from);List<Object> od=Json.arr(other.get("draws"),"draws",0,64);
+                        ref=Json.obj(od.isEmpty()?other.get("bindings"):Json.obj(od.get(0),"draw").get("bindings"),"bindings").get(slot);}
+                    String n=coreName(ref,prefix);check(n!=null&&!n.equals("null"),part+" 的 "+streamName(k)+" 顶点流不是 MOD 的资源（"+ref+"）");bindings.put(streamKey(k),n);}
+                Draw x=new Draw(part,bindings,count,start);x.hash=String.valueOf(Json.obj(pass.get("bindings"),"bindings").get("ib"));x.issuer=part;out.add(x);}}
+        return out;}
+    /** A core ref as the converter names the resource: the main INI's [Resource] by section name, "null", or null for
+     *  the game's own or nothing bound. A resource of another INI is not one this converter can read. */
+    private static String coreName(Object ref,String prefix){if(!(ref instanceof String))return null;String r=(String)ref;if(r.equals("null"))return "null";if(!r.startsWith("mod:"))return null;
+        String key=r.substring(4);check(key.startsWith(prefix),"用到另一个 INI 的资源 "+key);return "resource"+key.substring(prefix.length());}
+    /** What the logic core needs to replay an assignment's draws as the game issues them: the INIs XXMI loads with
+     *  their namespaces, every [Resource] by identity, the draws (the skinning pass with the Position / Blend hashes,
+     *  then each part's IB hash and first index) and where each field of a part is read; plus the converter's own
+     *  draws per assignment. Null, with the reason in why, when that cannot be stated. */
+    static final class LogicLayout {final List<File> files=new ArrayList<>();final List<String> namespaces=new ArrayList<>(),texts=new ArrayList<>();String mainNs;Map<String,String> table;
+        final Map<String,LogicSection> byName=new HashMap<>();final List<Object> passes=new ArrayList<>();final Map<String,Object> fields=new LinkedHashMap<>();
+        final Map<String,Draw> firstDraw=new LinkedHashMap<>();final List<List<Draw>> drawn=new ArrayList<>();}
+    static LogicLayout layout(Ini ini,File src,List<Map<String,Integer>> assignments,Map<String,String> mapping,StringBuilder why)throws Exception{
+        LogicLayout L=new LogicLayout();List<File> files=logicSet(ini,src);
+        if(files.isEmpty()||files.size()>64){why.append("INI 文件数 ").append(files.size());return null;}
+        long total=0;
+        for(File f:files){String body=ModConfig.source(f);total+=body.length();
+            if(total>8L*1024*1024){why.append("INI 合计超过 8 MiB");return null;}
+            String ns=logicNamespace(src,placed(ini,src,f),body);L.files.add(f);L.namespaces.add(ns);L.texts.add(body);if(f.getCanonicalFile().equals(ini.file.getCanonicalFile()))L.mainNs=ns;}
+        if(L.mainNs==null){why.append("主 INI 不在 XXMI 会加载的文件里");return null;}
+        List<File> seen=new ArrayList<>();for(File f:files)seen.add(placed(ini,src,f));L.table=logicResources(src,seen,L.namespaces,L.texts);
+        List<LogicSection> sections=logicSections(ini,why);if(sections==null)return null;
+        for(LogicSection x:sections)L.byName.put(x.name,x);
         Map<String,Integer> vars0=assignments.get(0);Map<String,Resource> rs0=resources(ini,src,vars0);
         // The vertex-buffer sections that serve every part (no draw, no IB): their hash and the slot they bind.
         String[] hash=new String[3],slot=new String[3];
@@ -876,26 +941,32 @@ public final class ModelConverter {
             for(int k=0;k<3;k++){String v=e.bindings.get(streamKey(k));if(v==null)continue;String at=null;
                 for(Map.Entry<String,String> b:e.bindings.entrySet())if(b.getKey().matches("vb[0-9]+")&&v.equals(b.getValue()))at=b.getKey();
                 if(at==null)continue;
-                if(hash[k]!=null&&!(hash[k].equals(e.hash)&&slot[k].equals(at))){log.append("逻辑核心数据：").append(streamName(k)).append(" 顶点流由多个段提供，不写入\n");return null;}
+                if(hash[k]!=null&&!(hash[k].equals(e.hash)&&slot[k].equals(at))){why.append(streamName(k)).append(" 顶点流由多个段提供");return null;}
                 hash[k]=e.hash;slot[k]=at;}}
         // Every assignment's draws; the parts are the sections that draw in any of them.
-        List<List<Draw>> drawn=new ArrayList<>();Map<String,Draw> firstDraw=new LinkedHashMap<>();
-        for(Map<String,Integer> vars:assignments){List<Draw> ds=new ArrayList<>();for(Draw d:drawCalls(ini,vars,resources(ini,src,vars),mapping))if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part)))){ds.add(d);firstDraw.putIfAbsent(d.part,d);}drawn.add(ds);}
-        List<Object> passes=new ArrayList<>();Map<String,Object> fields=new LinkedHashMap<>();Set<String> keys=new HashSet<>();
+        for(Map<String,Integer> vars:assignments){List<Draw> ds=new ArrayList<>();for(Draw d:drawCalls(ini,vars,resources(ini,src,vars),mapping))if(!"skip".equalsIgnoreCase(mapping.get(lower(d.part)))){ds.add(d);L.firstDraw.putIfAbsent(d.part,d);}L.drawn.add(ds);}
+        Set<String> keys=new HashSet<>();
         if(hash[0]!=null||hash[1]!=null){Map<String,Object> b=new LinkedHashMap<>();List<Object> checks=new ArrayList<>();
-            for(int k=0;k<2;k++)if(hash[k]!=null){if(b.containsKey(slot[k])){log.append("逻辑核心数据：Position 和 Blend 在同一槽位，不写入\n");return null;}b.put(slot[k],hash[k]);checks.add(slot[k]);}
-            passes.add(Json.of("name","skin","bindings",b,"checks",checks));}
-        for(Draw d:firstDraw.values()){LogicSection own=byName.get(d.part);Long first=own==null?null:own.first;
-            if(!keys.add(d.hash+"|"+first)){log.append("逻辑核心数据：").append(d.part).append(" 和另一个部件的 hash / match_first_index 相同，无法分开，不写入\n");return null;}
+            for(int k=0;k<2;k++)if(hash[k]!=null){if(b.containsKey(slot[k])){why.append("Position 和 Blend 在同一槽位");return null;}b.put(slot[k],hash[k]);checks.add(slot[k]);}
+            L.passes.add(Json.of("name","skin","bindings",b,"checks",checks));}
+        for(Draw d:L.firstDraw.values()){LogicSection own=L.byName.get(d.part);Long first=own==null?null:own.first;
+            if(!keys.add(d.hash+"|"+first)){why.append(d.part).append(" 和另一个部件的 hash / match_first_index 相同，无法分开");return null;}
             Map<String,Object> b=new LinkedHashMap<>();b.put("ib",d.hash);if(hash[2]!=null)b.put(slot[2],hash[2]);
-            Map<String,Object> pass=Json.of("name",d.part,"bindings",b,"checks",Arrays.asList("vb0","vb1","vb2","ib"));if(first!=null)pass.put("call",Json.of("first_index",first));passes.add(pass);
+            Map<String,Object> pass=Json.of("name",d.part,"bindings",b,"checks",Arrays.asList("vb0","vb1","vb2","ib"));if(first!=null)pass.put("call",Json.of("first_index",first));L.passes.add(pass);
             Map<String,Object> r=new LinkedHashMap<>();
             for(String f:LOGIC_FIELDS){String from=d.part,at=f;
                 if(!f.equals("ib")&&!f.startsWith("ps-t")){int k=f.equals("position")?0:f.equals("blend")?1:2;String v=d.bindings.get(streamKey(k));at=null;
                     for(Map.Entry<String,String> x:d.bindings.entrySet())if(x.getKey().matches("vb[0-9]+")&&v!=null&&v.equals(x.getValue()))at=x.getKey();   // its own binding
-                    if(at==null){if(hash[k]==null){log.append("逻辑核心数据：").append(d.part).append(" 的 ").append(streamName(k)).append(" 来源不明，不写入\n");return null;}at=slot[k];if(k<2)from="skin";}}
+                    if(at==null){if(hash[k]==null){why.append(d.part).append(" 的 ").append(streamName(k)).append(" 来源不明");return null;}at=slot[k];if(k<2)from="skin";}}
                 r.put(f,Arrays.asList(from,at));}
-            fields.put(d.part,r);}
+            L.fields.put(d.part,r);}
+        return L;}
+    private static Map<String,Object> logicData(Ini ini,File src,List<Map<String,Integer>> assignments,Map<String,String> mapping,File out,StringBuilder log,String unit)throws Exception{
+        StringBuilder why=new StringBuilder();LogicLayout L=layout(ini,src,assignments,mapping,why);if(L==null){log.append("逻辑核心数据：").append(why).append("，不写入\n");return null;}
+        File dir=new File(out,"logic");check(dir.mkdirs(),"无法创建 logic 目录");List<Object> list=new ArrayList<>();
+        for(int i=0;i<L.files.size();i++){write(dir,i+".ini",text(L.texts.get(i)));list.add(Json.of("namespace",L.namespaces.get(i),"file","logic/"+i+".ini"));}
+        List<File> files=L.files;String mainNs=L.mainNs;Map<String,String> table=L.table;Map<String,LogicSection> byName=L.byName;List<Object> passes=L.passes;Map<String,Object> fields=L.fields;
+        Map<String,Draw> firstDraw=L.firstDraw;List<List<Draw>> drawn=L.drawn;List<String> texts=L.texts;
         // Whether a part's own draw is skipped: any section 3DMigoto matches for it (same hash, its first index or none) skips.
         List<Object> frames=new ArrayList<>();
         for(int i=0;i<assignments.size();i++){Map<String,Integer> vars=assignments.get(i);Map<String,Resource> rs=resources(ini,src,vars);Map<String,Object> sig=new LinkedHashMap<>();
@@ -973,6 +1044,10 @@ public final class ModelConverter {
          *  the App); null: such programs are refused as before. */
         public Rehearsal rehearsal=null;
         public Options rehearsal(Rehearsal r){rehearsal=r;return this;}
+        /** The 3DMigoto backend (NativeBridge.draws in the App): the logic core decides what a static model draws;
+         *  null: the converter's own evaluation, as before. */
+        public CoreDraws core=null;
+        public Options core(CoreDraws c){core=c;return this;}
         public String mapping="",fallback=null,sourcePath=null,sourceSignature=null;public File ini=null;
         /** The INI scheme to convert when the mod folder holds several model INIs. */
         public Options ini(File f){ini=f;return this;}public boolean variants=false;public boolean replace=false;public List<String> names=new ArrayList<>();
@@ -1033,6 +1108,7 @@ public final class ModelConverter {
         check(!dest.getName().isEmpty()&&dest.getName().getBytes(StandardCharsets.UTF_8).length<=255,"模型名过长："+dest.getName());
         File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
         try{
+            if(o.core!=null&&kept.size()==1)coreDraws(ini,src,kept,map,o.core,log);
             memoryBudget(ini,src,bones,map,kept,o.fallback,log);Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
             check(!b.groups.isEmpty(),"所选 INI "+ini.file.getName()+" 没有可转换的模型绘制："+(o.variants?"已开启款式枚举；请检查是否为纯贴图配置、部件全部跳过或依赖未支持的外部绘制命令":"当前只转换默认款式；可在手动转换中开启‘转换全部款式’，并检查部件映射及外部绘制命令"));
             Set<String> shown=new LinkedHashSet<>();
