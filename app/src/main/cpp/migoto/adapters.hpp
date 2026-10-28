@@ -47,6 +47,7 @@ struct ImportScan {
  std::map<std::string,VarInfo> vars;     // by name; a local is "<section> local $name"
  std::vector<std::string> customShaders,unported,external;   // external: a [Resource] that takes a game resource (ref ps-t0)
  std::vector<std::string> reasons;       // why the draw variables are not all finite
+ std::vector<std::string> inputs;        // the part of reasons that is outside input (clock, random, filters, transitions, game resources), not a counter
  bool finiteStates=false;uint64_t states=1;   // true: the draw variables are all finite and their product is small
 
  static bool constant(const Node& n){if(n.kind==Node::Value)return true;if(n.kind==Node::Unary)return n.op!=Op::Random&&constant(*n.rhs);
@@ -59,8 +60,12 @@ struct ImportScan {
   for(auto* c:{n.lhs.get(),n.rhs.get()})if(c){auto o=outside(*c);if(!o.empty())return o;}
   return "";}
 
- struct Write {Var* var;const Expression* value=nullptr;float keyValue=0;bool transition=false;std::set<Var*> control;std::string where;};
+ struct Write {Var* var;const Expression* value=nullptr;float keyValue=0;bool transition=false,inDraw=false;std::set<Var*> control;std::string where;};
  std::vector<Write> writes;std::map<const Command*,size_t> written;std::set<Var*> seeds;std::map<Var*,std::string> names;
+ std::set<Var*> drawVars;   // the seeds (what draws read) and everything that decides them
+ // Stands in the control of a write under a condition that reads something outside the mod (a keyword, random(), a
+ // texture filter): such a write depends on more than the variables.
+ Var outsideCondition;std::string outsideText;
  // A list is walked again only when it is reached under variables it was not yet reached under (else-if chains share
  // their branches between pre and post, and a walk of every path is exponential); its writes then gain that control.
  std::map<std::pair<const CommandList*,bool>,std::set<Var*>> visited;std::set<std::pair<std::string,std::string>> bound;
@@ -74,14 +79,15 @@ struct ImportScan {
   else visited[{&l,draws}]=ctl;
   for(auto& c:l.commands){Command* cmd=c.get();
    if(auto* a=cmd->kind()==Kind::Assign?static_cast<Assign*>(cmd):nullptr){if(a->param)continue;
-    auto at=written.find(cmd);if(at!=written.end()){writes[at->second].control.insert(ctl.begin(),ctl.end());continue;}
-    Write w;w.var=a->var;w.value=&a->value;w.control=ctl;w.where=where+": "+a->line;written[cmd]=writes.size();writes.push_back(w);}
-   else if(auto* i=cmd->kind()==Kind::If?static_cast<If*>(cmd):nullptr){std::set<Var*> r;reads(*i->cond.root,r);
-    if(draws){seeds.insert(r.begin(),r.end());auto o=outside(*i->cond.root);if(!o.empty()&&first)reasons.push_back(where+": "+i->line+" reads "+o);}
+    auto at=written.find(cmd);if(at!=written.end()){writes[at->second].control.insert(ctl.begin(),ctl.end());writes[at->second].inDraw|=draws;continue;}
+    Write w;w.var=a->var;w.value=&a->value;w.control=ctl;w.inDraw=draws;w.where=where+": "+a->line;written[cmd]=writes.size();writes.push_back(w);}
+   else if(auto* i=cmd->kind()==Kind::If?static_cast<If*>(cmd):nullptr){std::set<Var*> r;reads(*i->cond.root,r);auto o=outside(*i->cond.root);
+    if(draws){seeds.insert(r.begin(),r.end());if(!o.empty()&&first){reasons.push_back(where+": "+i->line+" reads "+o);inputs.push_back(reasons.back());}}
+    if(!o.empty()){r.insert(&outsideCondition);if(outsideText.empty())outsideText=where+": "+i->line+" reads "+o;}
     control.push_back(r);for(auto* sub:{&i->truePre,&i->truePost,&i->falsePre,&i->falsePost})walk(e,*sub,draws,control,where,depth+1);control.pop_back();}
    else if(auto* r=cmd->kind()==Kind::Run?static_cast<RunList*>(cmd):nullptr){walk(e,r->target->pre,draws,control,r->target->name,depth+1);walk(e,r->target->post,draws,control,r->target->name,depth+1);}
    else if(auto* d=cmd->kind()==Kind::Draw?static_cast<DrawCmd*>(cmd):nullptr){if(!draws)continue;
-    for(auto& x:d->args){reads(*x.root,seeds);auto o=outside(*x.root);if(!o.empty()&&first)reasons.push_back(where+": "+d->line+" reads "+o);}}
+    for(auto& x:d->args){reads(*x.root,seeds);auto o=outside(*x.root);if(!o.empty()&&first){reasons.push_back(where+": "+d->line+" reads "+o);inputs.push_back(reasons.back());}}}
    else if(auto* b=cmd->kind()==Kind::Bind?static_cast<Bind*>(cmd):nullptr){if(!first)continue;if(e.resources.count(b->src)){if(bound.insert({b->dst,b->src}).second)bindings.push_back({b->dst,b->src});resources.insert(b->src);}
     else if(b->dstResource&&b->src!="null")external.push_back(where+": "+b->line);}
    else if(!first)continue;
@@ -91,20 +97,27 @@ struct ImportScan {
  explicit ImportScan(Engine& e,uint64_t limit=4096){
   for(auto& g:e.globals)names[&g.second]=g.first;
   for(auto& kv:e.lists)for(auto& v:kv.second->locals)names[&v]=kv.second->name+" local "+v.name;
+  for(auto& k:e.keys)for(auto& p:k.presets)if(p.run)for(auto& v:p.run->locals)names[&v]=k.name+" local "+v.name;
   std::vector<std::set<Var*>> control;
   for(auto& kv:e.overrides)for(auto& t:kv.second){walk(e,t.list->pre,true,control,t.name,0);walk(e,t.list->post,true,control,t.name,0);}
   for(auto& kv:e.lists){if(istarts(kv.second->name,"TextureOverride"))continue;walk(e,kv.second->pre,false,control,kv.second->name,0);walk(e,kv.second->post,false,control,kv.second->name,0);}
-  for(auto& k:e.keys)for(auto& p:k.presets){for(auto& v:p.vars){Write w;w.var=v.first;w.keyValue=v.second;w.transition=p.transition||p.releaseTransition;w.where="["+k.name+"]";writes.push_back(w);}
-   if(p.run){walk(e,p.run->pre,false,control,k.name,1);walk(e,p.run->post,false,control,k.name,1);}}
+  // A key's writes depend on its condition, and a smart cycle picks its next preset by the current values of all
+  // the variables it sets.
+  for(auto& k:e.keys){std::set<Var*> keyVars;if(k.type=="cycle"&&k.smart)for(auto& p:k.presets)for(auto& v:p.vars)keyVars.insert(v.first);
+   for(auto& p:k.presets){std::set<Var*> ctl=keyVars;if(p.conditional){reads(*p.condition.root,ctl);auto o=outside(*p.condition.root);if(!o.empty()){ctl.insert(&outsideCondition);if(outsideText.empty())outsideText="["+k.name+"] condition reads "+o;}}
+    for(auto& v:p.vars){Write w;w.var=v.first;w.keyValue=v.second;w.transition=p.transition||p.releaseTransition;w.control=ctl;w.where="["+k.name+"]";writes.push_back(w);}
+    if(p.run){control.push_back(ctl);walk(e,p.run->pre,false,control,k.name,1);walk(e,p.run->post,false,control,k.name,1);control.pop_back();}}}
   // Draw variables: the seeds, and whatever the writes of a draw variable read or sit under.
   std::set<Var*> draw=seeds;for(bool grew=true;grew;){grew=false;
    for(auto& w:writes){if(!draw.count(w.var))continue;std::set<Var*> r=w.control;if(w.value)reads(*w.value->root,r);for(auto* x:r)grew|=draw.insert(x).second;}}
+  draw.erase(&outsideCondition);
   // Domains: initial values, then rounds of every write over the current domains.
-  std::map<Var*,std::set<float>> dom;std::map<Var*,std::string> bad;
+  std::map<Var*,std::set<float>> dom;std::map<Var*,std::string> bad;std::set<Var*> fromOutside;
+  for(auto& w:writes)if(draw.count(w.var)&&w.control.count(&outsideCondition)&&!bad.count(w.var)){bad[w.var]=w.where+": under a condition that depends on more than the mod ("+outsideText+")";fromOutside.insert(w.var);}
   for(auto* v:draw){auto it=e.initial.find(names[v]);dom[v].insert(it!=e.initial.end()?it->second:0.0f);}
   for(auto& w:writes){if(!draw.count(w.var))continue;
-   if(!w.value){if(w.transition)bad[w.var]=w.where+": a transition passes through values in between";else dom[w.var].insert(w.keyValue);continue;}
-   auto o=outside(*w.value->root);if(!o.empty())bad[w.var]=w.where+" reads "+o;}
+   if(!w.value){if(w.transition){bad[w.var]=w.where+": a transition passes through values in between";fromOutside.insert(w.var);}else dom[w.var].insert(w.keyValue);continue;}
+   auto o=outside(*w.value->root);if(!o.empty()){bad[w.var]=w.where+" reads "+o;fromOutside.insert(w.var);}}
   for(int round=0;round<16;round++){bool grew=false;
    for(auto& w:writes){if(!w.value||!draw.count(w.var)||bad.count(w.var))continue;std::set<Var*> r;reads(*w.value->root,r);std::vector<Var*> in(r.begin(),r.end());
     bool ok=true;uint64_t n=1;for(auto* x:in){if(bad.count(x)){bad[w.var]=w.where+" reads "+names[x]+", which is not finite";ok=false;break;}n*=dom[x].size();if(n>4096){bad[w.var]=w.where+": too many value combinations";ok=false;break;}}
@@ -119,11 +132,12 @@ struct ImportScan {
    if(!grew)break;
    if(round==15)for(auto& w:writes)if(w.value&&draw.count(w.var)&&!bad.count(w.var)){std::set<Var*> r;reads(*w.value->root,r);if(r.count(w.var)||!r.empty())bad[w.var]=w.where+": values keep growing (a counter?)";}}
   for(auto& w:writes){if(!w.var)continue;auto& info=vars[names[w.var]];info.name=names[w.var];}
-  for(auto* v:draw){auto& info=vars[names[v]];info.name=names[v];info.readByDraws=true;info.values=dom[v];auto b=bad.find(v);if(b!=bad.end()){info.finite=false;info.why.push_back(b->second);}}
+  drawVars=draw;
+  for(auto* v:draw){auto& info=vars[names[v]];info.name=names[v];info.readByDraws=true;info.values=dom[v];auto b=bad.find(v);if(b!=bad.end()){info.finite=false;info.why.push_back(b->second);if(fromOutside.count(v))inputs.push_back(info.name+": "+b->second);}}
   finiteStates=reasons.empty();
   for(auto* v:draw){auto& info=vars[names[v]];if(!info.finite){finiteStates=false;reasons.push_back(info.name+": "+info.why.front());continue;}
    states*=std::max<uint64_t>(1,info.values.size());if(states>limit){finiteStates=false;reasons.push_back("more than "+std::to_string(limit)+" combinations of the draw variables");break;}}
-  for(auto& x:external)reasons.push_back("uses a game resource: "+x);
+  for(auto& x:external){reasons.push_back("uses a game resource: "+x);inputs.push_back(reasons.back());}
   if(!external.empty())finiteStates=false;}
 };
 

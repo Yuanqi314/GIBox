@@ -1092,7 +1092,7 @@ struct Runtime::Impl {
   return ok;}
  void stopLogic(Set& s,const std::string& state,const std::string& why){auto& L=s.logic;if(L.driver){try{if(L.driver->persistChanged()||L.persistDue)savePersist(s);}catch(const std::exception& ex){log("logic-persist-error",s.name+": "+ex.what());}}
   L.driver.reset();L.pushed.clear();L.want.clear();L.persistDue=false;
-  if(animated(s)){s.animation.loop.current=s.animation.applied;s.animation.loop.clock=false;}log(state,s.name+": "+why+"; "+fallback(s)+" from here ("+shownText(s)+")");}
+  if(animated(s)){s.animation.loop.showFrom(s.animation.applied);s.animation.loop.clock=false;}log(state,s.name+": "+why+"; "+fallback(s)+" from here ("+shownText(s)+")");}
  // persist: logic-persist/<model>.json beside control.json, the model's persist variables by full name (namespace
  // included, as 3DMigoto writes d3dx_user.ini) and the main INI's namespace they belong to; another INI under the same
  // model name does not get them. Written whole to a temporary file and renamed; at most once a second while they

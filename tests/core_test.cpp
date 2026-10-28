@@ -4,6 +4,7 @@
 #include "model_fixture.hpp"
 #include "runtime.hpp"
 #include "logic_game.hpp"
+#include "logic_import.hpp"
 #include <cassert>
 #include <elf.h>
 #include <iostream>
@@ -22,6 +23,8 @@ Spec v2(){Spec s;s.version=2;s.variants="{\"vars\":[{\"name\":\"$halo\",\"values
  s.draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0},{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":1,\"when\":{\"vars\":[\"$halo\",\"$legs\"],\"allow\":[[3,1]]}}]"};
  s.edit=[](std::string& j){replaceIn(j,"\"bones\":[\"BoneA\"]","\"bones\":[\"BoneA\"],\"parents\":[-1]");};return s;}
 int main(int argc,char**argv){
+ // The converter's Present rehearsal (called by the Java tests in place of NativeBridge.rehearse): request file in, reply out.
+ if(argc==3&&std::string(argv[1])=="--rehearse"){std::cout<<rehearseJson(text(argv[2]))<<"\n";return 0;}
  // Converter output check (called by the Java tests): the folder must load exactly as the runtime will load it.
  if(argc==2){std::string p=argv[1];auto m=loadModelFile(p);auto s=readSummary(p);assert(m->parts.size()==s.parts.size()&&!m->parts.empty()&&m->variants.combos.empty());
   for(auto& part:m->parts){assert(!part.draws.empty());for(auto& d:part.draws)assert(m->materials.count(d.row.name));std::vector<Submesh> subs;std::vector<Material> rows;activeDraws(part.draws,m->variants.defaults,subs,rows);assert(!subs.empty());}
@@ -186,6 +189,15 @@ int main(int argc,char**argv){
   logicRefused("logic-missing",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/7.ini")),"Cannot read");
   logicRefused("logic-pass",fixture::withLogic(fixture::animated(),fixture::logicJson(ibs,"logic/0.ini","Skin")),"logic: Part ib");
   logicRefused("logic-frames",fixture::withLogic(fixture::animated(),fixture::logicJson({"file:a.ib","file:b.ib"})),"Invalid \"frames\" list");
+  // present-sequence (the rehearsal's order): frames by index, the sequence played one step per Present, then from loop.
+  {auto sequenced=[](const std::string& tail){Spec s=fixture::animated();auto inner=s.edit;s.edit=[inner,tail](std::string& t){inner(t);
+     auto m=JsonParser(t).parse();auto& an=m.object["animation"].object;for(auto k:{"variable","first","last","step","initial","counter","period","counterStep"})an.erase(k);
+     an["kind"].string="present-sequence";for(auto& kv:JsonParser("{"+tail+"}").parse().object)an[kv.first]=kv.second;t=fixture::jsonText(m);};return s;};
+   fixture::writeModel(root+"/sequence",sequenced("\"sequence\":[0,1,2,1],\"loop\":1"));auto m=loadModelFile(root+"/sequence");assert(m->animation.sequenced&&m->animation.sequence.size()==4&&m->animation.loop==1);
+   FrameLoop loop(m->animation);loop.tick(0);std::vector<size_t> shown{loop.current};for(uint32_t t=1;t<=7;t++){loop.tick(t);shown.push_back(loop.current);}
+   assert((shown==std::vector<size_t>{0,1,2,1,1,2,1,1}));loop.showFrom(2);assert(loop.current==2&&loop.step==2);
+   refused(root+"/sequence-range",[&](Spec& s){s=sequenced("\"sequence\":[0,3],\"loop\":0");},"animation sequence out of range");
+   refused(root+"/sequence-loop",[&](Spec& s){s=sequenced("\"sequence\":[0,1],\"loop\":2");},"\"loop\" out of range");}
   logicRefused("logic-key",fixture::withLogic(fixture::animated(),[&]{auto j=fixture::logicJson(ibs);j.insert(j.rfind('}'),",\"keys\":[{\"file\":0,\"section\":\"KeyA\",\"type\":\"hold\"}]");return j;}()),"logic: key type hold");
   // Keys through the driver: a namespaced [Key], its conditions (one per cycle preset, as upstream), its run list's pre (on) and post (off), two presses
   // before one Present both dispatched in order; persist values by full name, restored into a new driver.

@@ -134,6 +134,7 @@ public final class Importer {
         String lodLibrary = recorded != null ? recorded.lodMesh : ""; if (!lodLibrary.isEmpty()) recorded = null;
         ModelConverter.Options opt = new ModelConverter.Options().mapping(o.containsKey("map") ? o.get("map") : "").variants(true).replace(true).fallback("Body").ini(ini);
         opt.animationBoneFallback(animationBoneFallback(mod));
+        opt.rehearsal(request -> { try { return NativeBridge.rehearse(request); } catch (UnsatisfiedLinkError e) { throw new IllegalStateException("逻辑核心预演不可用：" + e.getMessage()); } });
         if (o.containsKey("ini")) log.append("INI 方案：").append(o.get("ini")).append('\n');
         opt.source(mod.getAbsolutePath(), ModLibrary.signature(mod));
         Result r = new Result(); r.id = id; r.library = recorded != null;

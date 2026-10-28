@@ -99,6 +99,30 @@ public final class CompatibilityTest {
         Files.delete(new File(src,"second.ini").toPath());GimiPatternsTest.put(src,"Citlali.ini",text+"\n[TextureOverrideCitlaliHead]\nib = ResourceCitlaliHeadIB\n");
         refused=false;try{new ModelConverter.Ini(src);}catch(IllegalArgumentException e){refused=e.getMessage().contains("重复 INI 段");}ok(refused,"do not merge conflicting geometry sections");
     }
+    // A Present program the frame-loop pattern does not cover (back and forth), through the logic core's rehearsal
+    // (core_test --rehearse in place of NativeBridge.rehearse): frames by the values the draws read, the order
+    // without input, and the native check playing it by the logic driver and by the sequence FrameLoop side by side.
+    // A counter that later opens a branch is refused with the rehearsal's reason.
+    private static void rehearsedAnimation(File base)throws Exception{
+        if(nativeChecker==null)return;
+        ModelConverter.Rehearsal native_=request->{File req=File.createTempFile("rehearse-",".json",base);Files.write(req.toPath(),request.getBytes("UTF-8"));
+            Process p=new ProcessBuilder(nativeChecker,"--rehearse",req.getAbsolutePath()).redirectErrorStream(true).start();java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();byte[] chunk=new byte[65536];for(int n;(n=p.getInputStream().read(chunk))>0;)bytes.write(chunk,0,n);String reply=new String(bytes.toByteArray(),"UTF-8").trim();ok(p.waitFor()==0,"rehearsal tool: "+reply);return reply;};
+        String program="[Present]\n$frame = $frame + $dir\nif $frame >= 2\n$dir = -1\nendif\nif $frame <= 0\n$dir = 1\nendif\n";
+        String text=GimiPatternsTest.ini("global $frame = 0\nglobal $dir = 1\n","if $frame == 1\nvb0 = ResourceNextPosition\nendif\n","","")+"[ResourceNextPosition]\nstride = 40\nfilename = Next.buf\n"+program;
+        File src=GimiPatternsTest.mod(base,"rehearsed",text),out=new File(base,"rehearsed-out");byte[] next=Files.readAllBytes(new File(src,"CitlaliPosition.buf").toPath());ByteBuffer.wrap(next).order(ByteOrder.LITTLE_ENDIAN).putFloat(0,99);GimiPatternsTest.put(src,"Next.buf",next);
+        boolean refused=false;try{ModelConverter.convert(src,null,new File(base,"rehearsed-none"),10000107,new ModelConverter.Options().variants(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){refused=e.getMessage().contains("暂不支持这个 Present 动画程序");}
+        ok(refused,"without the rehearsal the program is refused as before");
+        StringBuilder log=new StringBuilder();ModelConverter.convert(src,null,out,10000107,new ModelConverter.Options().variants(true).rehearsal(native_),DECODE,log);
+        Map<String,Object> anim=Json.obj(Json.obj(Json.read(new File(out,"model.json"),4L<<20),"model").get("animation"),"animation");
+        List<Integer> sequence=new ArrayList<>();for(Object x:Json.arr(anim.get("sequence"),"sequence",1,16))sequence.add(((Number)x).intValue());
+        ok("present-sequence".equals(anim.get("kind"))&&sequence.equals(Arrays.asList(0,1,2,1))&&((Number)anim.get("loop")).intValue()==0&&Json.arr(anim.get("frames"),"frames",3,3).size()==3,"rehearsed frames and order: "+anim.get("kind")+" "+sequence+" loop "+anim.get("loop"));
+        ok(log.toString().contains("由逻辑核心预演 Present 程序得出")&&log.toString().contains("为什么不走取余循环"),"the conversion log says where the frames come from: "+log);
+        ok(Json.arr(Json.obj(Json.obj(Json.read(new File(out,"model.json"),4L<<20),"model").get("logic"),"logic").get("frames"),"logic frames",3,3).size()==3,"logic data for every rehearsed frame");
+        Process check=new ProcessBuilder(nativeChecker,out.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"the native loader reads the sequence and the logic driver follows it");
+        GimiPatternsTest.put(src,"Citlali.ini",text.replace(program,"[Present]\n$t = $t + 1\nif $t > 100\n$frame = 1\nendif\n").replace("global $dir = 1\n","global $dir = 1\nglobal $t = 0\n"));refused=false;
+        try{ModelConverter.convert(src,null,new File(base,"rehearsed-counter"),10000107,new ModelConverter.Options().variants(true).rehearsal(native_),DECODE,new StringBuilder());}catch(IllegalArgumentException e){refused=e.getMessage().contains("逻辑核心预演也不能确定")&&e.getMessage().contains("does not repeat");}
+        ok(refused,"a counter that opens a branch later is refused, with the rehearsal's reason");
+    }
     private static void animation(File base)throws Exception{
         String program="[Present]\nif $counter % $speed == 0\nif $frame < $last\n$frame = $frame + 1\nelse\n$frame = $first\nendif\nendif\npost $counter = $counter + 1\n";
         String text=GimiPatternsTest.ini("global $speed = 0.5\nglobal $counter = 0\nglobal $frame = 0\nglobal $first = 0\nglobal $last = 2\n",
@@ -222,7 +246,7 @@ public final class CompatibilityTest {
     }
     public static void main(String[] args)throws Exception{
         nativeChecker=args.length>0?args[0]:null;File base=Files.createTempDirectory("gibox-compatibility-").toFile();
-        try{logicKeys();legacy(base);hohe(base);animation(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (logic core data for animations and outfits, App keys (cycle / toggle), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
+        try{logicKeys();legacy(base);hohe(base);animation(base);rehearsedAnimation(base);logicSignature(base);face(base);System.out.println("Compatibility: PASS (logic core data for animations and outfits, rehearsed Present programs, App keys (cycle / toggle), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
         finally{ModelConverter.remove(base);}
     }
 }

@@ -2,6 +2,7 @@
 // Host tests of the 3DMigoto logic core (app/src/main/cpp/migoto). The expected values follow the upstream code
 // paths at XXMI a7847eae named in each case; they are simulated runs, not runs of 3DMigoto itself.
 #include "migoto/adapters.hpp"
+#include "migoto/rehearsal.hpp"
 #include "model.hpp"
 #include <cstdio>
 #include <iostream>
@@ -258,9 +259,40 @@ static void animation(){
   CHECK_EQ(mismatches,0);
   ImportScan scan(e);CHECK(!scan.finiteStates);CHECK(!scan.vars["$\\mods\\anim\\anim.ini\\swapvar"].finite);CHECK_EQ(scan.resources.size(),size_t(3*frames));}}
 
+// The rehearsal of a Present program (converter side): frames, the order without input, keys, and what it refuses.
+static Rehearsal rehearse(const std::string& ini,Rehearsal::Limits lim={}){Engine e=loaded({{"Mods\\R\\r.ini",ini}});return Rehearsal(e,"Mods\\R\\r.ini",lim);}
+static bool says(const Rehearsal& r,const std::string& part){if(r.reason.find(part)!=std::string::npos)return true;std::cerr<<"rehearsal: expected \""<<part<<"\", got \""<<r.reason<<"\"\n";return false;}
+static void rehearsal(){
+ const std::string draws="[TextureOverrideP]\nhash = 1\nif $f == 0\n ib = ResourceA\nelse if $f == 1\n ib = ResourceB\nelse\n ib = ResourceC\nendif\n[ResourceA]\nfilename = a.ib\n[ResourceB]\nfilename = b.ib\n[ResourceC]\nfilename = c.ib\n";
+ // The merged GIMI loop, as the old FrameLoop plays it, Present by Present; the clock counter is kept as its phase.
+ for(const char* speed:{"0.5","1","2","3"}){std::string ini=animationIni(speed,3);auto r=rehearse(ini);CHECK(r.ok);if(!r.ok){std::cerr<<r.reason<<"\n";continue;}
+  CHECK_EQ(r.frames.size(),size_t(3));CHECK(r.phases.size()==1&&r.phases[0].var=="$\\mods\\r\\r.ini\\auxtime");
+  ms::AnimationSpec spec;spec.variable="$swapvar";spec.first=0;spec.last=2;spec.step=1;spec.initial=0;spec.counter=0;spec.period=std::strtof(speed,nullptr);spec.counterStep=1;
+  for(int i=0;i<3;i++){ms::AnimationFrame f;f.value=i;spec.frames.push_back(f);}ms::FrameLoop old(spec);old.tick(0);
+  for(uint32_t t=0;t<60;t++){size_t at=t<r.sequence.size()?t:r.loop+(t-r.loop)%(r.sequence.size()-r.loop);CHECK_EQ(r.frames[r.sequence[at]].at("$swapvar"),old.spec.frames[old.current].value);old.tick(t+1);}}
+ // A period that is not a 1/1024 step: the counter is not a phase here, and its full value never repeats.
+ {auto r=rehearse(animationIni("0.3",3),{4096,4096,64,3000,64ull<<20});CHECK(!r.ok&&says(r,"does not repeat within 4096 Presents")&&says(r,"auxtime"));}
+ // Back and forth (not the pattern the converter matches): 0 1 2 1, then the start state again.
+ {auto r=rehearse("[Constants]\nglobal $f = 0\nglobal $dir = 1\n[Present]\n$f = $f + $dir\nif $f >= 2\n $dir = -1\nendif\nif $f <= 0\n $dir = 1\nendif\n"+draws);CHECK(r.ok);
+  std::vector<int> shown;for(auto i:r.sequence)shown.push_back(r.frames[i].at("$f"));CHECK(shown==std::vector<int>({0,1,2,1}));CHECK_EQ(r.loop,size_t(0));CHECK(r.keys.empty()&&r.keyFrames==0);}
+ // What is drawn repeats for 100 Presents, then a counter opens another branch: refused, not cut short.
+ {auto r=rehearse("[Constants]\nglobal $t = 0\nglobal $f = 0\n[Present]\n$t = $t + 1\nif $t > 100\n $f = 1\nendif\n"+draws,{1000,4096,64,3000,64ull<<20});
+  CHECK(!r.ok&&says(r,"does not repeat within 1000 Presents")&&says(r,"$\\mods\\r\\r.ini\\t"));}
+ // A key the Present program does not touch: its frames come from key presses only.
+ {auto r=rehearse("[Constants]\nglobal $f = 0\nglobal $blink = 0\n[KeyF]\nkey = 1\ntype = cycle\n$f = 0,1,2\n[Present]\nif $blink == 0\n $blink = 1\nelse\n $blink = 0\nendif\n"
+   "[TextureOverrideQ]\nhash = 2\nif $blink == 1\n ps-t0 = ResourceA\nendif\n"+draws);CHECK(r.ok);
+  CHECK_EQ(r.frames.size(),size_t(6));CHECK_EQ(r.sequence.size(),size_t(2));CHECK_EQ(r.loop,size_t(0));CHECK_EQ(r.keyFrames,size_t(4));CHECK(r.keys==std::vector<std::string>({"Key\\Mods\\R\\r.ini\\F"}));CHECK(!r.notes.empty());}
+ // Refused: the clock, a condition on the clock, draws that change a draw variable (a global, a local), too many frames.
+ {auto r=rehearse("[Constants]\nglobal $f = 0\n[Present]\n$f = time % 3\n"+draws);CHECK(!r.ok&&says(r,"depends on more than the mod")&&says(r,"time"));}
+ {auto r=rehearse("[Constants]\nglobal $f = 0\n[Present]\nif time > 5\n $f = 1\nendif\n"+draws);CHECK(!r.ok&&says(r,"under a condition that depends on more than the mod"));}
+ {auto r=rehearse("[Constants]\nglobal $f = 0\n[Present]\n$f = 1\n[TextureOverrideZ]\nhash = 3\n$f = 2\n"+draws);CHECK(!r.ok&&says(r,"draws change $\\mods\\r\\r.ini\\f"));}
+ {auto r=rehearse("[Constants]\nglobal $g = 0\n[Present]\n$g = 1 - $g\n[CommandListPick]\nlocal $f\n$f = $g\nif $f == 1\n ib = ResourceA\nendif\n[TextureOverrideP]\nhash = 1\nrun = CommandListPick\n[ResourceA]\nfilename = a.ib\n");
+  CHECK(!r.ok&&says(r,"draws change CommandList\\Mods\\R\\r.ini\\Pick local $f"));}   // a local of a list the draws run
+ {auto r=rehearse("[Constants]\nglobal $f = 0\n[Present]\nif $f < 99\n $f = $f + 1\nelse\n $f = 0\nendif\n"+draws);CHECK(!r.ok&&says(r,"more than 64 different frames"));}}
+
 int main(){
- expressions();namespaces();conditions();prePost();timing();keys();matching();postRematch();selection();outfits();finiteness();animation();
+ expressions();namespaces();conditions();prePost();timing();keys();matching();postRematch();selection();outfits();finiteness();animation();rehearsal();
  if(failures){std::cerr<<failures<<" failure(s)\n";return 1;}
  std::cout<<"3DMigoto logic core: PASS (float expressions and precedence, namespaces, nested if / else if / locals, run and pre/post placement, abort, "
   "Present / input / transition order, keys: cycle, toggle, hold, condition, transition; TextureOverride draw matching and order, texture filters, "
-  "resource selection and change detection, finite outfit cycle and persist, finite-state analysis (draw arguments, assignment and control dependencies, locals, counters, clock, random, texture filters, transitions), Present frame loop vs the old FrameLoop; simulated, not a game run)\n";}
+  "resource selection and change detection, finite outfit cycle and persist, finite-state analysis (draw arguments, assignment and control dependencies, locals, counters, clock, random, texture filters, transitions), Present frame loop vs the old FrameLoop, Present rehearsal (phases, back and forth, key frames, counters and outside input refused); simulated, not a game run)\n";}

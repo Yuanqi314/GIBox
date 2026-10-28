@@ -37,6 +37,12 @@ public final class NativeBridge {
             return out.array();
         } finally { bitmap.recycle(); }
     }
+    /** The logic core's rehearsal of a Present program (app/src/main/cpp/logic_import.hpp): a JSON request, a JSON reply. */
+    public static synchronized String rehearse(String request) {
+        if (!loaded) { System.loadLibrary("gibox"); loaded=true; }
+        return new String(rehearseUtf8(request.getBytes(java.nio.charset.StandardCharsets.UTF_8)), java.nio.charset.StandardCharsets.UTF_8);
+    }
+    private static native byte[] rehearseUtf8(byte[] request);
     public static native void start(String packageName,String privateDir);
     private static native byte[] decodeDds(byte[] dds);
 }

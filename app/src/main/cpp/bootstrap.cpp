@@ -1,6 +1,7 @@
 #include "runtime.hpp"
 #include "json.hpp"
 #include "logfmt.hpp"
+#include "logic_import.hpp"
 #include <atomic>
 #include <chrono>
 #include <jni.h>
@@ -100,4 +101,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv*
  #endif
  }catch(const std::exception& e){bootStatus(pkg,"error",e.what());}}).detach();
  }catch(const std::exception& e){exception(env,e);} }
+// The converter's Present rehearsal (logic_import.hpp): UTF-8 JSON in, UTF-8 JSON out.
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_gibox_tool_NativeBridge_rehearseUtf8(JNIEnv* env,jclass,jbyteArray input){try{ms::require(input!=nullptr,"Null rehearsal request");auto n=env->GetArrayLength(input);ms::require(n>0&&n<=16*1024*1024,"Rehearsal request size");
+ std::string request(size_t(n),'\0');env->GetByteArrayRegion(input,0,n,reinterpret_cast<jbyte*>(request.data()));if(env->ExceptionCheck())return nullptr;auto out=ms::rehearseJson(request);
+ auto a=env->NewByteArray(jsize(out.size()));if(!a)return nullptr;env->SetByteArrayRegion(a,0,jsize(out.size()),reinterpret_cast<const jbyte*>(out.data()));return a;}catch(const std::exception& e){exception(env,e);return nullptr;}}
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_gibox_tool_NativeBridge_decodeDds(JNIEnv* env,jclass,jbyteArray input){try{ms::require(input!=nullptr,"Null DDS");auto n=env->GetArrayLength(input);ms::require(n>=128&&n<=256*1024*1024,"DDS input size");ms::Bytes b(n);env->GetByteArrayRegion(input,0,n,reinterpret_cast<jbyte*>(b.data()));if(env->ExceptionCheck())return nullptr;auto t=ms::decodeDds(b);ms::Bytes out(8+t.pixels.size());ms::put32(out.data(),t.w);ms::put32(out.data()+4,t.h);std::memcpy(out.data()+8,t.pixels.data(),t.pixels.size());auto a=env->NewByteArray(out.size());if(!a)return nullptr;env->SetByteArrayRegion(a,0,out.size(),reinterpret_cast<jbyte*>(out.data()));return a;}catch(const std::exception& e){exception(env,e);return nullptr;}}

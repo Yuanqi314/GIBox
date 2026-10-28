@@ -669,16 +669,51 @@ public final class ModelConverter {
             return Json.of("blob",Json.of("file","model.bin","size",blob.size,"crc32",blob.crc.getValue()),"parts",parts,"materials",materials);
         }
     }
-    /** A bounded frame loop, compiled from Present. Other dynamic programs fail explicitly. */
+    /** A JSON request in, a JSON reply out (logic_import.hpp). */
+    public interface Rehearsal {String run(String request)throws Exception;}
+    /** A bounded frame loop, compiled from Present: the counter / modulo / wrap pattern (present-loop), or else what
+     *  the logic core's rehearsal of the program finds (present-sequence: frames by the values of what the draws read,
+     *  and the order without input). Other dynamic programs fail explicitly. */
     static final class Animation {
         boolean stableWeights=true;String variable;int first,last,step,initial;double counter,period,counterStep;final List<Integer> values=new ArrayList<>();
+        final List<Map<String,Integer>> assignments=new ArrayList<>();final List<Integer> sequence=new ArrayList<>();int loop;String rehearsal="";
+        /** The variables a frame is converted with. */
+        Map<String,Integer> vars(Ini ini,int frame){Map<String,Integer> v=new LinkedHashMap<>(ini.vars);if(sequence.isEmpty())v.put(variable,values.get(frame));else v.putAll(assignments.get(frame));return v;}
+        static Animation parse(Ini ini,File src,Rehearsal r)throws Exception{
+            try{return parse(ini);}
+            catch(IllegalArgumentException ex){if(r==null||ini.sections.get("present")==null)throw ex;return rehearsed(ini,src,r,ex.getMessage());}}
+        /** The program's frames from the logic core; null when what is drawn never changes (an ordinary model then). */
+        static Animation rehearsed(Ini ini,File src,Rehearsal r,String why)throws Exception{
+            List<File> files=new ArrayList<>();logicFiles(src,files,0);check(!files.isEmpty()&&files.size()<=64,why+"；逻辑核心预演：INI 文件数 "+files.size());
+            List<Object> list=new ArrayList<>();String main=null;
+            for(File f:files){String body=ModConfig.source(f);String ns=logicNamespace(src,f,body);list.add(Json.of("namespace",ns,"text",body));if(f.getCanonicalFile().equals(ini.file.getCanonicalFile()))main=ns;}
+            check(main!=null,why+"；逻辑核心预演：主 INI 不在 XXMI 会加载的文件里");
+            Map<String,Object> j=Json.obj(Json.parse(r.run(Json.write(Json.of("main",main,"files",list)))),"预演结果");
+            if(!Boolean.TRUE.equals(j.get("ok")))throw new IllegalArgumentException(why+"；逻辑核心预演也不能确定："+j.get("reason"));
+            Animation a=new Animation();
+            for(Object x:Json.arr(j.get("frames"),"预演 frames",1,64)){Map<String,Integer> m=new LinkedHashMap<>();for(Map.Entry<String,Object> e:Json.obj(x,"预演 frame").entrySet()){check(e.getKey().startsWith("$"),"预演变量："+e.getKey());m.put(e.getKey(),(int)Json.integer(e.getValue(),e.getKey(),-1000000,1000000));}a.assignments.add(m);}
+            if(a.assignments.size()<2)return null;
+            for(Object x:Json.arr(j.get("sequence"),"预演 sequence",1,1<<20))a.sequence.add((int)Json.integer(x,"预演 sequence",0,a.assignments.size()-1));
+            a.loop=(int)Json.integer(j.get("loop"),"预演 loop",0,a.sequence.size()-1);for(int i=0;i<a.assignments.size();i++)a.values.add(i);
+            StringBuilder t=new StringBuilder("逻辑核心预演 ").append(j.get("states")).append(" 个程序状态、").append(j.get("presents")).append(" 次 Present");
+            for(Object p:Json.arr(j.get("phases"),"phases",0,4096)){Map<String,Object> ph=Json.obj(p,"phase");t.append("；").append(ph.get("var")).append(" 只按取余使用，按相位（模 ").append(ph.get("modulus")).append("）比较");}
+            List<Object> keys=Json.arr(j.get("keys"),"keys",0,4096);if(!keys.isEmpty())t.append("；探索了按键 ").append(keys).append("，其中 ").append(j.get("keyFrames")).append(" 帧只有按键能到");
+            for(Object n:Json.arr(j.get("notes"),"notes",0,4096))t.append("；").append(n);
+            t.append("；为什么不走取余循环：").append(why);a.rehearsal=t.toString();return a;}
         static double number(Ini ini,String expression){String x=lower(expression.trim());Double n=x.startsWith("$")?ini.numbers.get(x):Double.valueOf(x);check(n!=null&&Double.isFinite(n),"动画常量无效："+expression);return n;}
         static int integer(Ini ini,String x){double n=number(ini,x);check(n==Math.rint(n)&&Math.abs(n)<=1000000,"动画帧号必须是整数："+x);return (int)n;}
         static Animation parse(Ini ini){
             Section present=ini.sections.get("present");if(present==null)return null;List<String> model=conditionVars(ini);boolean dynamic=false;
             Set<Section> ticks=new LinkedHashSet<>();conversionSections(ini,present,ticks);
-            for(Section section:ticks)for(String l:section.lines){String x=lower(l).replaceAll("\\s+","").replaceFirst("^post","");int eq=x.indexOf('=');
-                if(eq>0&&model.contains(x.substring(0,eq))&&x.substring(eq+1).contains("$"))dynamic=true;}
+            // Present changes what is drawn: a draw variable set from a variable, or set at all under an if on one (a
+            // constant written when a counter reaches a value is still a change over time; an unconditional reset is not).
+            for(Section section:ticks){List<Boolean> open=new ArrayList<>();
+                for(String l:section.lines){String x=lower(l).replaceAll("\\s+","").replaceFirst("^post","");
+                    if(x.startsWith("if")&&!x.startsWith("if=")){open.add(x.contains("$"));continue;}
+                    if(x.startsWith("elseif")||x.startsWith("elif")){if(!open.isEmpty())open.set(open.size()-1,open.get(open.size()-1)||x.contains("$"));continue;}
+                    if(x.equals("endif")){if(!open.isEmpty())open.remove(open.size()-1);continue;}
+                    int eq=x.indexOf('=');if(eq<=0||!model.contains(x.substring(0,eq)))continue;
+                    if(x.substring(eq+1).contains("$")||open.contains(Boolean.TRUE))dynamic=true;}}
             if(!dynamic)return null;
             List<String> lines=new ArrayList<>();for(String l:present.lines)lines.add(lower(l).replaceAll("\\s+",""));
             String why="暂不支持这个 Present 动画程序；当前支持按计数器取余、递增帧号并循环的模型动画，不能当作普通款式合并";
@@ -695,7 +730,8 @@ public final class ModelConverter {
             int frame=a.initial;do{check(!a.values.contains(frame)&&a.values.size()<64,"动画超过 64 帧或帧序列不闭合");a.values.add(frame);frame=frame<a.last?frame+a.step:a.first;}while(frame!=a.initial);
             return a;
         }
-        Map<String,Object> json(List<Object> frames){return Json.of("kind","present-loop","stableWeights",stableWeights,"variable",variable,"first",first,"last",last,"step",step,"initial",initial,"counter",counter,"period",period,"counterStep",counterStep,"frames",frames);}
+        Map<String,Object> json(List<Object> frames){if(!sequence.isEmpty())return Json.of("kind","present-sequence","stableWeights",stableWeights,"sequence",sequence,"loop",loop,"frames",frames);
+            return Json.of("kind","present-loop","stableWeights",stableWeights,"variable",variable,"first",first,"last",last,"step",step,"initial",initial,"counter",counter,"period",period,"counterStep",counterStep,"frames",frames);}
     }
     private static void memoryBudget(Ini ini,File src,List<Bones> bones,Map<String,String> map,List<Map<String,Integer>> assignments,String fallback,StringBuilder log)throws Exception {
         Map<String,Long> streams=new HashMap<>();Set<String> ranges=new HashSet<>();long indices=0,input=0;
@@ -783,7 +819,7 @@ public final class ModelConverter {
     /** The logic data of a frame animation: each frame's signatures under "frames". */
     @SuppressWarnings("unchecked")
     private static Map<String,Object> logic(Ini ini,File src,Animation an,Map<String,String> mapping,File out,StringBuilder log)throws Exception{
-        List<Map<String,Integer>> assignments=new ArrayList<>();for(int v:an.values){Map<String,Integer> vars=new LinkedHashMap<>(ini.vars);vars.put(an.variable,v);assignments.add(vars);}
+        List<Map<String,Integer>> assignments=new ArrayList<>();for(int i=0;i<an.values.size();i++)assignments.add(an.vars(ini,i));
         Map<String,Object> data=logicData(ini,src,assignments,mapping,out,log,"帧");if(data==null)return null;List<Object> sigs=(List<Object>)data.remove("choices"),frames=new ArrayList<>();
         for(int i=0;i<sigs.size();i++)frames.add(Json.of("value",an.values.get(i),"draws",sigs.get(i)));data.put("frames",frames);return data;}
     /** The logic data of an outfit model: per converted assignment (one for each distinct drawn result) its values of
@@ -868,12 +904,13 @@ public final class ModelConverter {
                 for(String line:section.lines){String[] a=kv(line);if(a!=null)check(!a[0].startsWith("vs-t")&&!a[0].startsWith("vs-cb")&&!a[0].startsWith("cs-t")&&!a[0].startsWith("cs-u"),"动画骨骼兼容暂不支持自定义矩阵资源绑定："+a[0]);}}}
         dest=dest.getCanonicalFile();File parent=dest.getParentFile();check(parent.isDirectory()||parent.mkdirs(),"无法创建输出根目录");check(o.replace||!dest.exists(),"输出目录已存在："+dest);
         File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
-        log.append("模型动画：").append(animation.values.size()).append(" 帧，按 Present 次数推进；计数周期 ").append(animation.period).append("，完整转换，不合并为款式网格\n");
+        if(animation.sequence.isEmpty())log.append("模型动画：").append(animation.values.size()).append(" 帧，按 Present 次数推进；计数周期 ").append(animation.period).append("，完整转换，不合并为款式网格\n");
+        else log.append("模型动画：").append(animation.values.size()).append(" 帧，由逻辑核心预演 Present 程序得出（不是固定的取余循环）；无按键时的顺序 ").append(animation.sequence.size()).append(" 步，从第 ").append(animation.loop).append(" 步起循环；").append(animation.rehearsal).append("\n");
         log.append("动画骨骼兼容：").append(o.animationBoneFallback?"开启（实验）：忽略库外关联，保留每个顶点自身的有效权重并重新归一化；可能改变运动，不保证与 PC 等价":"关闭：越界的有效权重仍会拒绝转换").append('\n');
         try{
             Build registry=new Build();Map<String,WeightOrder> weights=new HashMap<>();List<Object> frames=new ArrayList<>(),firstParts=null;String layout=null;
             try(BlobWriter blob=new BlobWriter(new File(tmp,"model.bin"))){
-                for(int frame:animation.values){Map<String,Integer> vars=new LinkedHashMap<>(ini.vars);vars.put(animation.variable,frame);memoryBudget(ini,src,bones,mapping,Collections.singletonList(vars),o.fallback,log);
+                for(int fi=0;fi<animation.values.size();fi++){int frame=animation.values.get(fi);Map<String,Integer> vars=animation.vars(ini,fi);memoryBudget(ini,src,bones,mapping,Collections.singletonList(vars),o.fallback,log);
                     Build b=new Build();b.animationBoneFallback=o.animationBoneFallback;b.materials.putAll(registry.materials);
                     try{collect(ini,src,bones,mapping,vars,0,b,log,o.fallback);}
                     catch(IllegalArgumentException ex){if(o.animationBoneFallback||ex.getMessage()==null||!ex.getMessage().startsWith("骨骼索引越界"))throw ex;
@@ -888,7 +925,7 @@ public final class ModelConverter {
                     check(blob.size<=256L*1024*1024,"动画几何数据超过 256 MiB 预算");log.append("动画帧 ").append(frame).append("：写出完成，累计几何 ").append(blob.size/1024/1024).append(" MiB\n");
                 }
                 log.append("动画权重固定排列：").append(animation.stableWeights?"所有帧一致；动态模式不改写权重":"存在实际权重变化；请使用缓存帧网格模式").append('\n');
-                List<Map<String,Integer>> frameVars=new ArrayList<>();for(int frame:animation.values){Map<String,Integer> v=new LinkedHashMap<>(ini.vars);v.put(animation.variable,frame);frameVars.add(v);}
+                List<Map<String,Integer>> frameVars=new ArrayList<>();for(int fi=0;fi<animation.values.size();fi++)frameVars.add(animation.vars(ini,fi));
                 Resource face=faceTexture(ini,src,frameVars,log);List<Object> swaps=face==null?null:faceSwap(face,registry);
                 weights.clear();List<Object> materials=emitMaterials(registry,decoder,blob);blob.out.flush();String generation;synchronized(ModelConverter.class){generation=System.currentTimeMillis()+"-"+(++generationCounter);}
                 Map<String,Object> animationInfo=animation.json(frames);animationInfo.put("bonePolicy",o.animationBoneFallback?"retain-valid-experimental":"strict");
@@ -907,6 +944,10 @@ public final class ModelConverter {
         /** Lossy, opt-in experiment, applied only to present-loop geometry animation with a known skeleton. */
         public boolean animationBoneFallback=false;
         public Options animationBoneFallback(boolean value){animationBoneFallback=value;return this;}
+        /** The logic core's rehearsal of a Present program the frame-loop pattern does not cover (NativeBridge.rehearse in
+         *  the App); null: such programs are refused as before. */
+        public Rehearsal rehearsal=null;
+        public Options rehearsal(Rehearsal r){rehearsal=r;return this;}
         public String mapping="",fallback=null,sourcePath=null,sourceSignature=null;public File ini=null;
         /** The INI scheme to convert when the mod folder holds several model INIs. */
         public Options ini(File f){ini=f;return this;}public boolean variants=false;public boolean replace=false;public List<String> names=new ArrayList<>();
@@ -933,7 +974,7 @@ public final class ModelConverter {
         else if(boneDir==null){check((id==0&&!o.names.isEmpty())||(id>=10000000&&id<=10001999),"没有骨骼目录时需要角色 ID 或角色名");bones=new ArrayList<>();for(String r:DEFAULT_RENDERERS)bones.add(new Bones(r));if(o.fallback==null)o.fallback="Body";}
         else{check(id>=10000000&&id<=10001999,"角色 ID 越界");bones=bones(boneDir,id);}Map<String,String> map=new LinkedHashMap<>();
         if(!o.mapping.trim().isEmpty())for(String row:o.mapping.split(";")){String[] a=row.trim().split("=",-1);check(a.length==2&&!a[0].trim().isEmpty()&&!a[1].trim().isEmpty(),"映射格式：部件=渲染器;部件=skip");check(map.put(lower(a[0].trim()),a[1].trim())==null,"重复映射");}
-        Animation animation=Animation.parse(ini);
+        Animation animation=Animation.parse(ini,src,o.rehearsal);
         if(animation!=null)return convertAnimation(ini,src,bones,map,dest,id,o,decoder,log,animation);
         // Variants: every assignment of the variables that an if of a drawing section reads (not the ones only key or
         // Present sections use), one signature each; the distinct signatures are built, and each draw keeps the values of

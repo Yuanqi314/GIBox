@@ -67,27 +67,39 @@ inline When whenOf(const Json& w,const Variants& v,const std::string& what){When
 
 // A compiled Present loop and frame manifests. Geometry is read per frame, never as a vertex union.
 struct AnimationFrame {int value=0;Json parts;};
-struct AnimationSpec {bool stableWeights=false;std::string variable;int first=0,last=0,step=1,initial=0;float counter=0,period=1,counterStep=1;std::vector<AnimationFrame> frames;uint64_t bytes=0;
+// kind "present-loop": the counter / modulo / wrap program the converter matched (variable .. counterStep).
+// "present-sequence" (0.7.38): what the logic core's rehearsal found; frame values are their indexes, sequence is the
+// frame of the start and of each Present after it, and after its end it goes on from loop.
+struct AnimationSpec {bool stableWeights=false,sequenced=false;std::string variable;int first=0,last=0,step=1,initial=0;float counter=0,period=1,counterStep=1;std::vector<AnimationFrame> frames;uint64_t bytes=0;
+ std::vector<size_t> sequence;size_t loop=0;
  bool present()const{return !frames.empty();}size_t index(int value)const{for(size_t i=0;i<frames.size();i++)if(frames[i].value==value)return i;throw std::runtime_error("Animation frame value is not listed");}};
 inline AnimationSpec animationOf(const Json& m){AnimationSpec a;const auto& j=m.at("animation");auto version=juint(m,"version",1,4);
  if(version<4){require(j.type==Json::Null,"Animation requires model version 4");return a;}
- require(jstr(j,"kind",32)=="present-loop","Unsupported animation program");a.stableWeights=jbool(j,"stableWeights",false);a.variable=jstr(j,"variable",64);require(a.variable[0]=='$',"Animation variable");
- a.first=jint(jfield(j,"first"),"animation first");a.last=jint(jfield(j,"last"),"animation last");a.step=jint(jfield(j,"step"),"animation step");a.initial=jint(jfield(j,"initial"),"animation initial");
- auto number=[&](const char* key){const auto& n=jfield(j,key);require(n.type==Json::Number&&std::isfinite(n.number)&&std::abs(n.number)<=1000000,std::string("Animation ")+key);return float(n.number);};
- a.counter=number("counter");a.period=number("period");a.counterStep=number("counterStep");require(a.first<=a.last&&a.step>0&&a.period>0&&a.counterStep>0,"Animation loop bounds/period");
+ auto kind=jstr(j,"kind",32);require(kind=="present-loop"||kind=="present-sequence","Unsupported animation program");a.stableWeights=jbool(j,"stableWeights",false);a.sequenced=kind=="present-sequence";
+ if(!a.sequenced){a.variable=jstr(j,"variable",64);require(a.variable[0]=='$',"Animation variable");
+  a.first=jint(jfield(j,"first"),"animation first");a.last=jint(jfield(j,"last"),"animation last");a.step=jint(jfield(j,"step"),"animation step");a.initial=jint(jfield(j,"initial"),"animation initial");
+  auto number=[&](const char* key){const auto& n=jfield(j,key);require(n.type==Json::Number&&std::isfinite(n.number)&&std::abs(n.number)<=1000000,std::string("Animation ")+key);return float(n.number);};
+  a.counter=number("counter");a.period=number("period");a.counterStep=number("counterStep");require(a.first<=a.last&&a.step>0&&a.period>0&&a.counterStep>0,"Animation loop bounds/period");}
  const auto& variants=m.at("variants");if(variants.type!=Json::Null)require(jarr(variants,"vars",0,0).empty(),"Animation with independent variants is not supported");
- const auto& root=jarr(m,"parts",1,model::maxParts);int expected=a.initial;
+ const auto& root=jarr(m,"parts",1,model::maxParts);int expected=a.sequenced?0:a.initial;
  for(auto& f:jarr(j,"frames",1,64)){AnimationFrame frame;frame.value=jint(jfield(f,"value"),"animation frame value");require(frame.value==expected,"Animation frame sequence");frame.parts=jfield(f,"parts");require(frame.parts.type==Json::Array&&frame.parts.array.size()==root.size(),"Animation part count");
   for(size_t i=0;i<root.size();i++){const auto& p=frame.parts.array[i];require(jstr(p,"name",64)==jstr(root[i],"name",64)&&jstr(p,"renderer",256)==jstr(root[i],"renderer",256),"Animation part identity");
    auto n=juint(p,"vertices",1,model::maxVertices),ni=juint(p,"indices",3,model::maxIndices);require(n==juint(root[i],"vertices",1,model::maxVertices)&&juint(p,"bones",1,model::maxBones)==juint(root[i],"bones",1,model::maxBones),"Animation vertex/bone layout");
    const auto& data=jfield(p,"data");uint64_t bytes=n*64+ni*4;for(auto ch:{std::pair<const char*,unsigned>{"uv2",8},{"uv3",8},{"uv4",8},{"colors",4},{"tangents",16}})if(data.at(ch.first).type!=Json::Null)bytes+=n*ch.second;
    a.bytes+=bytes;require(a.bytes<=256ull*1024*1024,"Animation geometry exceeds 256 MiB budget");}
-  a.frames.push_back(std::move(frame));expected=expected<a.last?expected+a.step:a.first;}
+  a.frames.push_back(std::move(frame));expected=a.sequenced?expected+1:expected<a.last?expected+a.step:a.first;}
+ if(a.sequenced){for(auto& x:jarr(j,"sequence",1,1u<<20))a.sequence.push_back(size_t(jnum(x,0,a.frames.size()-1,"animation sequence")));a.loop=size_t(juint(j,"loop",0,a.sequence.size()-1));return a;}
  require(expected==a.initial,"Animation frame sequence is not closed");return a;}
-struct FrameLoop {AnimationSpec spec;float counter=0;size_t current=0;uint32_t last=0;bool clock=false;uint64_t advances=0,gaps=0;
- explicit FrameLoop(AnimationSpec a={}):spec(std::move(a)),counter(spec.counter){if(spec.present())current=spec.index(spec.initial);}
+struct FrameLoop {AnimationSpec spec;float counter=0;size_t current=0,step=0;uint32_t last=0;bool clock=false;uint64_t advances=0,gaps=0;
+ explicit FrameLoop(AnimationSpec a={}):spec(std::move(a)),counter(spec.counter){if(spec.present())current=spec.sequenced?spec.sequence.at(0):spec.index(spec.initial);}
+ // Go on from a frame shown by something else (the logic core): in a sequence, from its place in the loop if it has
+ // one (else the step stays where it was).
+ void showFrom(size_t frame){current=frame;if(!spec.sequenced)return;for(size_t i=spec.loop;i<spec.sequence.size();i++)if(spec.sequence[i]==frame){step=i;return;}for(size_t i=0;i<spec.loop;i++)if(spec.sequence[i]==frame){step=i;return;}}
  bool tick(uint32_t engineFrame){if(!clock){last=engineFrame;clock=true;return false;}uint32_t elapsed=engineFrame-last;if(!elapsed)return false;last=engineFrame;
-  if(elapsed>240){gaps++;return false;}bool changed=false;for(uint32_t n=0;n<elapsed;n++){if(std::fmod(counter,spec.period)==0){int value=spec.frames[current].value;value=value<spec.last?value+spec.step:spec.first;size_t next=spec.index(value);changed|=next!=current;current=next;advances++;}counter+=spec.counterStep;require(std::isfinite(counter),"Animation counter overflow");}return changed;}};
+  if(elapsed>240){gaps++;return false;}bool changed=false;
+  // present-sequence: one step of the rehearsed order per Present.
+  if(spec.sequenced){for(uint32_t n=0;n<elapsed;n++){step=step+1<spec.sequence.size()?step+1:spec.loop;size_t next=spec.sequence[step];changed|=next!=current;current=next;advances++;}return changed;}
+  for(uint32_t n=0;n<elapsed;n++){if(std::fmod(counter,spec.period)==0){int value=spec.frames[current].value;value=value<spec.last?value+spec.step:spec.first;size_t next=spec.index(value);changed|=next!=current;current=next;advances++;}counter+=spec.counterStep;require(std::isfinite(counter),"Animation counter overflow");}return changed;}};
 
 // ---------------------------------------------------------------- manifest summary (what the runtime scans every second)
 struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false,indexedBones=false;Fingerprint target;};
