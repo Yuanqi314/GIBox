@@ -40,6 +40,9 @@ int main(int argc,char**argv){
   if(exists(p+"/learned.json"))learnedOf(JsonParser(text(p+"/learned.json")).parse());
   return 0;}
  char temp[]="/tmp/gibox-core-XXXXXX";assert(mkdtemp(temp));std::string root=temp;
+ // Rows back to PC order for a texture on one of the game's meshes (the face swap): 3 rows of 2 pixels.
+ {Texture t{2,3,Bytes(24)};for(size_t i=0;i<24;i++)t.pixels[i]=uint8_t(i/8);flipRows(t);for(size_t i=0;i<24;i++)assert(t.pixels[i]==uint8_t(2-i/8));flipRows(t);for(size_t i=0;i<24;i++)assert(t.pixels[i]==uint8_t(i/8));
+  Texture odd{1,1,Bytes(4,7)};flipRows(odd);assert(odd.pixels==Bytes(4,7));}
  // ---- the GIBox model format: a good folder loads with everything in place
  {auto dir=root+"/good";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));s.variants="{\"vars\":[{\"name\":\"$swap\",\"values\":[0,1]}],\"combos\":[{\"$swap\":0},{\"$swap\":1}],\"default\":1}";
   s.draws={"[{\"start\":0,\"count\":3,\"material\":\"Material0\",\"slot\":0}]","[{\"start\":0,\"count\":0,\"material\":\"Material0\",\"slot\":2}]"};fixture::writeModel(dir,s);

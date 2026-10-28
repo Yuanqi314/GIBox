@@ -40,6 +40,9 @@ struct Material {std::string name;unsigned slot;};
 struct Skin {Bytes data;std::set<unsigned> used;};
 struct Submesh {unsigned start,count;};
 struct Texture {unsigned w,h;Bytes pixels;};
+// Rows in the other order. model.bin keeps textures with rows bottom to top, for the converter's meshes (whose UVs it
+// flips, 1 - v); a texture put on one of the game's own meshes (its UVs untouched) needs the PC rows back.
+inline void flipRows(Texture& t){size_t row=size_t(t.w)*4;if(!row||t.pixels.size()!=row*t.h)return;for(unsigned i=0,j=t.h?t.h-1:0;i<j;i++,j--)std::swap_ranges(t.pixels.begin()+long(i*row),t.pixels.begin()+long((i+1)*row),t.pixels.begin()+long(j*row));}
 // ---------------------------------------------------------------- bones
 // Source bones (the model's skeleton) to the bones of the renderer it goes on. Each bone the weights use is matched by
 //  1. its exact name, when that name is on one target bone;

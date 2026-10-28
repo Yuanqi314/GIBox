@@ -927,7 +927,9 @@ struct Runtime::Impl {
    if(!sync){requestTextures(s,missing);return false;}
    readTextures(s.path,s.fileGeneration,s.blobSize,s.mats,missing);log("texture-read",s.name+": "+std::to_string(missing.size())+" material(s) read on demand");}
   for(auto& n:names){if(s.textures.count(n))continue;auto it=s.mats.find(n);if(it==s.mats.end())continue;auto& mf=it->second;MatTex t;t.original=mf.original;
-   if(!t.original){require(mf.main!=nullptr,"Texture data missing: "+n);t.main=makeTexture(s,*mf.main,false);if(mf.light)t.light=makeTexture(s,*mf.light,true);if(mf.normal)t.normal=makeTexture(s,*mf.normal,true);
+   // A swap's texture goes on the game's own mesh, whose UVs the converter did not flip: its rows go back to PC order.
+   bool swap=false;for(auto& w:s.swaps)swap|=w.material==n;
+   if(!t.original){require(mf.main!=nullptr,"Texture data missing: "+n);if(swap)flipRows(*mf.main);t.main=makeTexture(s,*mf.main,false);if(mf.light)t.light=makeTexture(s,*mf.light,true);if(mf.normal)t.normal=makeTexture(s,*mf.normal,true);
     for(auto* x:{mf.main.get(),mf.light.get(),mf.normal.get()}){if(x)s.bytes+=uint64_t(x->w)*x->h*4;}mf.main.reset();mf.light.reset();mf.normal.reset();}
    s.textures[n]=t;}
   return true;}
