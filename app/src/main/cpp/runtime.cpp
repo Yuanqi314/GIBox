@@ -599,7 +599,9 @@ struct Runtime::Impl {
  // ---------------------------------------------------------------- texture swaps (model.json "textures": a mod's face texture)
  // On PC a texture-only override (FaceHeadDiffuse) gives the game's own face the mod's texture. Here: the renderer of
  // that name under the same character root as an attached part of the set keeps its mesh, and every slot of it showing
- // the game's face texture (the main texture its first textured slot had) shows ours. A material made at runtime and on
+ // the game's face texture (the main texture its first textured slot had) shows ours, and so does every other renderer
+ // under that root showing the same texture (Brow, Face_Eye: on PC the texture is replaced by its hash wherever the game
+ // binds it). A material made at runtime and on
  // no other renderer found gets the texture written in, its own kept; any other one is replaced by a copy holding ours.
  // Each scan repeats this, so a fresh material the game puts on is done again, and a game copy of ours (it carries our
  // texture) is tracked to get the original back. Everything goes back when the set's parts under that root are gone,
@@ -650,11 +652,17 @@ struct Runtime::Impl {
    if(k==s.swaps.size())continue;
    auto w=std::make_unique<Swap>();w->renderer=r;w->native=load<Ptr>(r+0x10);w->root=root;w->set=&s;w->index=k;
    try{pin(*w,r);ensureTextures(s,{s.swaps[k].material},true);swapApply(*w,list);
-    if(!w->original)log("texture-swap",swapName(*w)+" on "+rendererName(r)+": no main texture on its materials; left alone");
-    else{std::string also;for(Ptr o:list){if(o==r||!alive(o))continue;Ptr om=e.get(abi::getMaterials,o);if(!om)continue;bool uses=false;for(Ptr x:pointers(om,64))uses=uses||(alive(x)&&textureOf(x,"_MainTex")==w->original);
-      if(uses&&avatarRoot(o)==root)also+=(also.empty()?"":", ")+rendererName(o);}
-     if(!also.empty())log("texture-swap",swapName(*w)+": the game's face texture is also the main texture on "+also+" (not swapped)");}}
+    if(!w->original)log("texture-swap",swapName(*w)+" on "+rendererName(r)+": no main texture on its materials; left alone");}
    catch(const std::exception& ex){log("texture-swap-error",s.name+": "+ex.what());try{swapRestore(*w,"failed");}catch(const std::exception&){}freeOwned(*w);continue;}
+   swapped[r]=std::move(w);}
+  // On PC the face texture is replaced by its hash wherever the game binds it, and Brow and Face_Eye show the same
+  // texture as Face: every renderer under the root whose material shows the game's face texture takes ours too.
+  std::vector<Swap*> faces;for(auto& kv:swapped)if(kv.second->original&&normalize(rendererName(kv.second->renderer))==normalize(kv.second->set->swaps[kv.second->index].renderer))faces.push_back(kv.second.get());
+  for(Swap* face:faces)for(Ptr r:list){if(!alive(r)||swapped.count(r)||attachments.count(r)||avatarRoot(r)!=face->root)continue;Ptr om=e.get(abi::getMaterials,r);if(!om)continue;
+   bool uses=false;for(Ptr x:pointers(om,64))uses=uses||(alive(x)&&textureOf(x,"_MainTex")==face->original);if(!uses)continue;
+   auto w=std::make_unique<Swap>();w->renderer=r;w->native=load<Ptr>(r+0x10);w->root=face->root;w->set=face->set;w->index=face->index;w->original=face->original;
+   try{pin(*w,r);swapPin(*w,w->original);swapApply(*w,list);log("texture-swap",swapName(*w)+": "+rendererName(r)+" shows the game's face texture too; it takes ours, as on PC");}
+   catch(const std::exception& ex){log("texture-swap-error",face->set->name+": "+ex.what());try{swapRestore(*w,"failed");}catch(const std::exception&){}freeOwned(*w);continue;}
    swapped[r]=std::move(w);}}
 
  // ---------------------------------------------------------------- engine helpers (game thread)

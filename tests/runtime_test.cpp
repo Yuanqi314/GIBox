@@ -1118,7 +1118,8 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   f->obj[renderer].mesh=full;addBone(renderer,full);for(int n=0;n<8;n++){animated.tick(now);now+=120;}assert(meshOf(renderer)==meshOf(preview));
   animated.shutdown();assert(meshOf(renderer)==full&&meshOf(preview)==previewMesh&&meshOf(other)==otherMesh&&f->handles.empty());}
  // 52. Texture swaps (model.json "textures"): the game's Face renderer under the attached Body's character root keeps its
- //     mesh and shows the mod's face texture, written into a runtime material. A game copy of ours and a fresh material
+ //     mesh and shows the mod's face texture, written into a runtime material, and so does a Brow showing the same
+ //     game texture (as on PC, where the texture is replaced by its hash). A game copy of ours and a fresh material
  //     the game puts on are handled on the next scan; switching the model off puts every original back. A Face under
  //     another character is left alone. A loaded asset gets a copy, which goes with the renderer.
  {std::string mediaFace=root+"/mediaFace",sharedFace=mediaFace+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.extraMaterials=1;s.withTarget(fixture::target("Body"));
@@ -1126,18 +1127,21 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   auto control=[&](bool on){write(sharedFace+"/control.json.tmp",std::string("{\"enabled\":true,\"selected\":[")+(on?"\"FaceMod\"":"")+"]}");std::filesystem::rename(sharedFace+"/control.json.tmp",sharedFace+"/control.json");};
   auto has=[&](const std::string& x){return text(sharedFace+"/GIBox Log.txt").find(x)!=std::string::npos;};auto runtimeMade=[&](Ptr m){store<uint32_t>(load<Ptr>(m+0x10)+8,uint32_t(-7));};
   Ptr original=f->mesh(),body=f->renderer(original),faceMesh=f->mesh("Face"),face=f->renderer(faceMesh,"BoneA","Face"),other=f->renderer(f->mesh("Face"),"BoneA","Face",f->kavehRoot);
+  Ptr brow=f->renderer(f->mesh("Brow"),"BoneA","Brow"),otherBrow=f->renderer(f->mesh("Brow"),"BoneA","Brow",f->kavehRoot);   // they show the face texture too
   Ptr faceArray=f->obj[face].materials,faceMat=load<Ptr>(faceArray+0x20),otherMat=load<Ptr>(f->obj[other].materials+0x20),gameTex=f->object("texture","Face diffuse");
-  f->diffuse[faceMat]=gameTex;f->diffuse[otherMat]=gameTex;runtimeMade(faceMat);runtimeMade(otherMat);f->world(body);f->scene={body,face,other};
+  Ptr browMat=load<Ptr>(f->obj[brow].materials+0x20),otherBrowMat=load<Ptr>(f->obj[otherBrow].materials+0x20);f->diffuse[browMat]=gameTex;f->diffuse[otherBrowMat]=gameTex;runtimeMade(browMat);runtimeMade(otherBrowMat);
+  f->diffuse[faceMat]=gameTex;f->diffuse[otherMat]=gameTex;runtimeMade(faceMat);runtimeMade(otherMat);f->world(body);f->scene={body,face,other,brow,otherBrow};
   control(true);
   {Runtime fr(e,pkg,root+"/privateFace",mediaFace,false);fr.tick(4800000);fr.tick(4800600);Ptr ours=f->diffuse[faceMat];
    assert(meshOf(body)!=original&&meshOf(face)==faceMesh&&f->obj[face].materials==faceArray&&alive(ours)&&ours!=gameTex&&f->diffuse[otherMat]==gameTex);   // written, mesh kept
    assert(has("texture-swap FaceMod/Face on Face: slot 0 Material: written (instance id -7)"));
+   assert(f->diffuse[browMat]==ours&&f->diffuse[otherBrowMat]==gameTex&&has("texture-swap FaceMod/Face: Brow shows the game's face texture too; it takes ours, as on PC"));   // as on PC; not under another character
    Ptr copy=clone(faceMat,0);f->obj[copy].name="Material (Instance)";f->obj[face].materials=f->typed("material",copy);fr.tick(4801200);fr.tick(4801800);   // the game's copy of ours
    assert(f->diffuse[copy]==ours&&has("texture-swap FaceMod/Face: the game's copy Material (Instance) carries our texture"));
    Ptr fresh=f->object("material","Material");f->diffuse[fresh]=gameTex;runtimeMade(fresh);f->obj[face].materials=f->typed("material",fresh);fr.tick(4802400);fr.tick(4803000);   // a fresh one
    assert(f->diffuse[fresh]==ours);
    control(false);fr.tick(4803600);fr.tick(4804200);                                                             // the model no longer selected
-   assert(meshOf(body)==original&&f->diffuse[faceMat]==gameTex&&f->diffuse[copy]==gameTex&&f->diffuse[fresh]==gameTex&&f->diffuse[otherMat]==gameTex);
+   assert(meshOf(body)==original&&f->diffuse[faceMat]==gameTex&&f->diffuse[copy]==gameTex&&f->diffuse[fresh]==gameTex&&f->diffuse[otherMat]==gameTex&&f->diffuse[browMat]==gameTex);
    assert(has("texture-swap FaceMod/Face (model off): original texture back in 3 game materials, 0 copies taken off"));fr.shutdown();assert(f->handles.empty());}
   Ptr body2=f->renderer(original),face2=f->renderer(f->mesh("Face"),"BoneA","Face"),asset=load<Ptr>(f->obj[face2].materials+0x20);f->diffuse[asset]=gameTex;f->world(body2);f->scene={body2,face2};
   control(true);
