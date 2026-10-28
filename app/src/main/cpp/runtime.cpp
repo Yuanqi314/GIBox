@@ -1115,7 +1115,8 @@ struct Runtime::Impl {
  // next Present; a press while the core does not run the model is dropped (and said so), not kept for later.
  void logicKeys(Set& s){auto it=ctl.keys.find(s.name);if(it==ctl.keys.end())return;long long& seen=keySeen[s.name];
   for(auto& k:it->second){if(k.seq<=seen)continue;seen=k.seq;
-   if(!s.logic.driver){log("logic-key",s.name+": "+k.section+" not pressed: the logic core does not run this model (logicCore off, no logic data, or it stopped)");continue;}
+   if(!s.logic.driver){const char* why=!ctl.exp.logicCore?"logicCore is off":!s.logicSpec.present()?"the model has no logic data (convert it again)":s.logic.failed?"it stopped or did not start; the logic-error / logic-unavailable line above says why":"it has not started yet (the model is not shown)";
+    log("logic-key",s.name+": "+k.section+" not pressed: the logic core does not run this model ("+why+")");continue;}
    const LogicSpec::Key* key=nullptr;for(auto& x:s.logicSpec.keys)if(x.file==k.file&&x.section==k.section)key=&x;
    if(!key||!s.logic.driver->press(*key)){log("logic-key",s.name+": "+k.section+" is not a cycle or toggle key of this model; not pressed");continue;}
    log("logic-key",s.name+": "+k.section+" ("+key->type+") pressed, press "+std::to_string(k.seq));}}

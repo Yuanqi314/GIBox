@@ -53,10 +53,13 @@ public:
  // A part's selection in the converter's signature form (ModelConverter.logicSignature): "hidden" (skipped, no draw
  // of its own), "original" (the game's draw, not replaced), or its issued draws in the order the core issued them,
  // each with its kind, range and the identity of every field; "original|" first when the game's draw is not skipped.
+ // A drawindexed of 0 indices draws nothing and is not recorded (the converter's rule, ModelConverter drawCalls).
  std::string signature(const std::string& part)const{auto it=spec.parts.find(part);auto own=current.find(part);if(it==spec.parts.end()||own==current.end())return "?";
-  const auto& r=own->second;if(r.draws.empty())return r.skip?"hidden":"original";
+  const auto& r=own->second;std::vector<const migoto::IssuedDraw*> drawn;
+  for(auto& d:r.draws)if(!(d.kind=="drawindexed"&&!d.automatic&&!d.args.empty()&&d.args[0]==0))drawn.push_back(&d);
+  if(drawn.empty())return r.skip?"hidden":"original";
   std::string out=r.skip?"":"original|";
-  for(auto& d:r.draws){out+="kind="+d.kind+";";
+  for(auto* p:drawn){auto& d=*p;out+="kind="+d.kind+";";
    if(d.kind=="drawindexed"&&d.automatic)out+="count=auto;start=0;base=0;";
    else if(d.kind=="drawindexed"&&d.args.size()==3)out+="count="+number(d.args[0])+";start="+number(d.args[1])+";base="+number(d.args[2])+";";
    else{out+="args=";for(size_t i=0;i<d.args.size();i++)out+=(i?",":"")+number(d.args[i]);out+=d.automatic?";auto":d.fromCaller?";from_caller":"";out+=";";}
