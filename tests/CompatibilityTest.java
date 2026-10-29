@@ -158,6 +158,11 @@ public final class CompatibilityTest {
             Map<String,Object> jx=Json.obj(Json.read(new File(x,"model.json"),4L<<20),"m"),jy=Json.obj(Json.read(new File(y,"model.json"),4L<<20),"m");
             ok(String.valueOf(jx.get("parts")).equals(String.valueOf(jy.get("parts")))&&String.valueOf(jx.get("logic")).equals(String.valueOf(jy.get("logic")))&&jy.get("logic")!=null,k[0]+": parts and logic data the same");
             Process check=new ProcessBuilder(nativeChecker,y.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,k[0]+": the native driver follows it");}
+        // A texture-only mod (XXMI's GIMI SetTextures on the game's own draws, no IB or vertex buffer of its own): said
+        // so, the main INI not listed as an auxiliary one, and the backend not asked to run draws there are none of.
+        File tex=GimiPatternsTest.mod(base,"texture-only","[Constants]\nglobal $active\n[TextureOverrideBodyA]\nhash = d5ae71a3\nmatch_first_index = 0\nResource\\GIMI\\Diffuse = ref ResourceBodyDiffuse\nrun = CommandList\\GIMI\\SetTextures\n[TextureOverrideEyes]\nhash = 848c5980\nps-t1 = ResourceBodyDiffuse\n[ResourceBodyDiffuse]\nfilename = CitlaliHeadDiffuse.dds\n");
+        StringBuilder tl=new StringBuilder();String why="";try{ModelConverter.convert(tex,null,new File(base,"texture-only-out"),10000107,new ModelConverter.Options().variants(true).core(core),DECODE,tl);}catch(IllegalArgumentException e){why=e.getMessage();}
+        ok(why.contains("是纯贴图 MOD")&&!tl.toString().contains("未导入辅助 INI：Citlali.ini")&&tl.toString().contains("3dm 后端未用于本次转换：INI 没有模型绘制"),"a texture-only mod is named as one: "+why+"\n"+tl);
         StringBuilder failed=new StringBuilder();ModelConverter.convert(src,null,new File(base,"backend-failed"),10000107,new ModelConverter.Options().core(r->"{\"ok\":false,\"reason\":\"no core\"}"),DECODE,failed);
         ok(failed.toString().contains("3dm 后端未用于本次转换：逻辑核心不能运行这个 INI：no core；按转换器自己的求值"),"a core that cannot run leaves the converter's own evaluation: "+failed);
     }

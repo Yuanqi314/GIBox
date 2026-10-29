@@ -304,6 +304,14 @@ public final class ModelConverter {
     private static List<Object> faceSwap(Resource face,Build b){MaterialDef m=new MaterialDef();m.name="FaceTexture";m.diffuse=face;b.materials.put("face|"+path(face),m);
         return Collections.singletonList(Json.of("renderer",FACE_RENDERER,"material",m.name));}
     static final String FACE_RENDERER="Face";
+    /** A texture-only mod: no section binds an IB or a vertex buffer of its own, and some section sets textures for the
+     *  game's draws (ps-t slots, or GIMI's Resource\GIMI\... = ref ... with CommandList\GIMI\SetTextures). */
+    static boolean textureOnly(Ini ini){boolean textures=false;
+        for(Section s:ini.sections.values()){if(!lower(s.name).startsWith("textureoverride")&&!lower(s.name).startsWith("commandlist"))continue;
+            for(String l:s.lines){String[] a=kv(l);if(a==null)continue;
+                if((a[0].equals("ib")||a[0].matches("vb[0-9]+"))&&!unbound(a[1])&&lower(a[1]).replaceFirst("^ref\\s+","").startsWith("resource"))return false;
+                if(a[0].matches("ps-t[0-9]+")||a[0].startsWith("resource\\gimi\\")||(a[0].equals("run")&&lower(a[1]).contains("settextures")))textures=true;}}
+        return textures;}
     static final int MAX_ASSIGNMENTS=4096;
     private static final Pattern CONDITION_VAR=Pattern.compile("\\$[a-z_][a-z0-9_]*");
     private static boolean controlSection(String name){String n=lower(name);return n.startsWith("key")||n.equals("present")||n.equals("constants");}
@@ -871,6 +879,7 @@ public final class ModelConverter {
     static void coreDraws(Ini ini,File src,List<Map<String,Integer>> assignments,Map<String,String> mapping,CoreDraws core,StringBuilder log)throws Exception{
         StringBuilder why=new StringBuilder();ini.coreDraws=null;LogicLayout L=layout(ini,src,assignments,mapping,why);
         if(L==null){log.append("3dm 后端未用于本次转换：").append(why).append("；按转换器自己的求值\n");return;}
+        if(L.firstDraw.isEmpty()){log.append("3dm 后端未用于本次转换：INI 没有模型绘制（没有自己的 IB 和顶点缓冲），没有可运行的绘制\n");return;}
         Map<Map<String,Integer>,List<Draw>> out=new HashMap<>();List<String> differ=new ArrayList<>();int count=0;
         for(int i=0;i<assignments.size();i++){Map<String,Integer> vars=assignments.get(i);List<Draw> ds;
             try{ds=coreDrawsOf(L,vars,core);}catch(Exception ex){log.append("3dm 后端未用于本次转换：").append(ex.getMessage()).append("；按转换器自己的求值\n");return;}
@@ -1069,7 +1078,7 @@ public final class ModelConverter {
     public static File convert(File src,File boneDir,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log)throws Exception {
         Ini ini=new Ini(src,o.ini);List<Bones> bones;
         log.append("模型主 INI：").append(ini.file.getName()).append('\n');
-        for(File sibling:ModConfig.allInis(src))if(!sibling.equals(ini.file))log.append("未导入辅助 INI：").append(src.toPath().relativize(sibling.toPath())).append("（帮助、菜单或独立贴图配置；不包含在本次模型转换中）\n");
+        for(File sibling:ModConfig.allInis(src))if(!sibling.getCanonicalFile().equals(ini.file.getCanonicalFile()))log.append("未导入辅助 INI：").append(src.toPath().relativize(sibling.toPath())).append("（帮助、菜单或独立贴图配置；不包含在本次模型转换中）\n");
         if(o.variants)for(Map.Entry<String,TreeSet<Integer>> e:ini.excludedChoices.entrySet())
             log.append("款式 ").append(e.getKey()).append(" 按按键列出的值和初始值取 ").append(ini.choices.get(e.getKey())).append("；仅在条件中出现的值不作为可选款式：").append(e.getValue()).append('\n');
         check(o.names.size()<=16,"角色名过多");for(String n:o.names)check(n.matches("[a-z0-9]{3,40}"),"角色名格式："+n);
@@ -1114,6 +1123,7 @@ public final class ModelConverter {
         try{
             if(o.core!=null)coreDraws(ini,src,kept,map,o.core,log);
             memoryBudget(ini,src,bones,map,kept,o.fallback,log);Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
+            check(!b.groups.isEmpty()||!textureOnly(ini),"所选 INI "+ini.file.getName()+" 是纯贴图 MOD：只把贴图换到游戏自己的模型上，没有自己的网格（IB 和顶点缓冲）。GIBox 还不支持纯贴图 MOD；脸部贴图（FaceHeadDiffuse）目前只在带网格的 MOD 里随网格一起替换");
             check(!b.groups.isEmpty(),"所选 INI "+ini.file.getName()+" 没有可转换的模型绘制："+(o.variants?"已开启款式枚举；请检查是否为纯贴图配置、部件全部跳过或依赖未支持的外部绘制命令":"当前只转换默认款式；可在手动转换中开启‘转换全部款式’，并检查部件映射及外部绘制命令"));
             Set<String> shown=new LinkedHashSet<>();
             Object replaceWhen=null;
