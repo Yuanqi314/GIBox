@@ -1075,6 +1075,9 @@ public final class ModelConverter {
         /** Where a texture-only mod's read-only diagnostic goes (GIBox/texture-diag, TextureDiag); null: none. */
         public File textureDiag=null;
         public Options textureDiag(File dir){textureDiag=dir;return this;}
+        /** A texture-only mod is imported as one (TextureMod: texture.json, no mesh) instead of being refused. */
+        public boolean textureMods=false;
+        public Options textureMods(boolean on){textureMods=on;return this;}
     }
     /** A texture-only mod: its read-only diagnostic written for the game side (phase 1, nothing is replaced); the
      *  sentence that says so, for the refusal. Called only when the refusal is certain. */
@@ -1087,7 +1090,8 @@ public final class ModelConverter {
     public static File convert(File src,File boneDir,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log)throws Exception {
         Ini ini=new Ini(src,o.ini);List<Bones> bones;
         // A mod that converts (or fails for another reason) leaves no texture-only diagnostic of an earlier import behind.
-        if(o.textureDiag!=null&&!textureOnly(ini))TextureDiag.remove(o.textureDiag,dest.getName());
+        if(o.textureDiag!=null&&(!textureOnly(ini)||o.textureMods))TextureDiag.remove(o.textureDiag,dest.getName());
+        if(o.textureMods&&textureOnly(ini))return TextureMod.install(src,ini,id,dest,o,decoder,log);
         log.append("模型主 INI：").append(ini.file.getName()).append('\n');
         for(File sibling:ModConfig.allInis(src))if(!sibling.getCanonicalFile().equals(ini.file.getCanonicalFile()))log.append("未导入辅助 INI：").append(src.toPath().relativize(sibling.toPath())).append("（帮助、菜单或独立贴图配置；不包含在本次模型转换中）\n");
         if(o.variants)for(Map.Entry<String,TreeSet<Integer>> e:ini.excludedChoices.entrySet())
@@ -1180,7 +1184,7 @@ public final class ModelConverter {
     public static List<File> convert(File src,File boneDir,File dest,int id,String mapping,boolean variants,TextureDecoder decoder,StringBuilder log)throws Exception {
         return Collections.singletonList(convert(src,boneDir,dest,id,new Options().mapping(mapping).variants(variants),decoder,log));}
     /** Swap the finished folder in: readers see either the old or the new folder, never a half-written one. */
-    private static void commit(File tmp,File dest,boolean replace)throws Exception{
+    static void commit(File tmp,File dest,boolean replace)throws Exception{
         if(!dest.exists()){Files.move(tmp.toPath(),dest.toPath(),StandardCopyOption.ATOMIC_MOVE);return;}check(replace,"输出目录已存在："+dest);
         File old=new File(dest.getParentFile(),".old-"+dest.getName()+"-"+System.nanoTime());Files.move(dest.toPath(),old.toPath(),StandardCopyOption.ATOMIC_MOVE);
         try{Files.move(tmp.toPath(),dest.toPath(),StandardCopyOption.ATOMIC_MOVE);}catch(Exception e){Files.move(old.toPath(),dest.toPath(),StandardCopyOption.ATOMIC_MOVE);throw e;}

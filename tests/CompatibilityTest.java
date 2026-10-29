@@ -175,6 +175,17 @@ public final class CompatibilityTest {
             &&!new File(base,"texture-only-diag").exists(),"a texture-only mod gets its read-only diagnostic: "+dwhy+"\n"+dl+"\n"+dj);
         ModelConverter.convert(src,null,new File(base,"texture-only-diag"),10000107,new ModelConverter.Options().textureDiag(diagDir),DECODE,new StringBuilder());
         ok(!diag.exists(),"a mod that converts leaves no texture diagnostic of that name");
+        // As the App imports it (0.7.52): a texture-only model folder (texture.json + decoded textures, no mesh), with the
+        // rules, the variants and the decoded textures; the App reads it as a converted model; no stale diagnostic.
+        File texVar=GimiPatternsTest.mod(base,"texture-mod","[Constants]\nglobal persist $colour = 0\n[KeySwap]\nkey = 0\ntype = cycle\n$colour = 0,1\n[TextureOverrideBodyA]\nhash = d5ae71a3\nmatch_first_index = 0\nif $colour == 0\nResource\\GIMI\\Diffuse = ref ResourceBodyDiffuse\nendif\nrun = CommandList\\GIMI\\SetTextures\n[TextureOverrideEyes]\nhash = 848c5980\nps-t1 = ResourceBodyDiffuse\n[ResourceBodyDiffuse]\nfilename = CitlaliHeadDiffuse.dds\n");
+        File texOut=new File(base,"texture-mod-out");StringBuilder ml=new StringBuilder();TextureDiag.write(diagDir,"texture-mod-out",new LinkedHashMap<>());
+        ModelConverter.convert(texVar,null,texOut,10000107,new ModelConverter.Options().variants(true).textureDiag(diagDir).textureMods(true),DECODE,ml);
+        Map<String,Object> tj=Json.obj(Json.read(new File(texOut,"texture.json"),4L<<20),"texture.json");ModelManifest mm=ModelManifest.read(texOut);
+        ok("gibox-texture-mod".equals(tj.get("format"))&&!new File(texOut,"model.json").exists()&&new File(texOut,"textures/0.rgba").length()==4&&ModelManifest.exists(texOut)&&mm.textureMod&&mm.id==10000107
+            &&mm.vars.get("$colour").equals(Arrays.asList(0,1))&&mm.defaults.get("$colour")==0&&Variants.read(texOut).values.containsKey("$colour")&&!TextureDiag.file(diagDir,"texture-mod-out").exists()
+            &&String.valueOf(tj.get("diag")).contains("TextureOverrideBodyA")&&ml.toString().contains("纯贴图 MOD：2 / 2 条规则有可写入的贴图")&&ml.toString().contains("完成："),"a texture-only mod imports as one: "+ml+"\n"+tj);
+        String noUse="";try{ModelConverter.convert(GimiPatternsTest.mod(base,"texture-ramp","[TextureOverrideX]\nhash = 1\nps-t3 = ResourceRamp\n[ResourceRamp]\nfilename = Ramp.dds\n"),null,new File(base,"texture-ramp-out"),10000107,new ModelConverter.Options().textureMods(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){noUse=e.getMessage();}
+        ok(noUse.contains("没有能写入的贴图")&&!new File(base,"texture-ramp-out").exists(),"nothing writable: refused, no folder: "+noUse);
         StringBuilder failed=new StringBuilder();ModelConverter.convert(src,null,new File(base,"backend-failed"),10000107,new ModelConverter.Options().core(r->"{\"ok\":false,\"reason\":\"no core\"}"),DECODE,failed);
         ok(failed.toString().contains("3dm 后端未用于本次转换：逻辑核心不能运行这个 INI：no core；按转换器自己的求值"),"a core that cannot run leaves the converter's own evaluation: "+failed);
     }

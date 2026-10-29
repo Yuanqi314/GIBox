@@ -89,7 +89,22 @@ int main(){
  for(int k=0;k<3;k++){assert(wm[size_t(k)].verdict==Verdict::Likely&&wm[size_t(k)].renderer==0&&wm[size_t(k)].slot==k&&has(matchLine(lumine,wm[size_t(k)],low),"its index layout is its own, not comparable with the PC full mesh"));}
  assert(!has2(matchLine(lumine,wm[1],low),"merged")&&has(matchLine(lumine,wm[0],low),"material name and segment order agree"));
  assert(textureFormat(47)=="47 (ETC2_RGBA8)"&&textureFormat(99)=="99 (not in this build's TextureFormat)"&&materialPart("Avatar_Girl_Sword_PlayerGirl_Mat_Hair (Instance) #0")=="hair");
+ // Conditions as TextureDiag writes them, and what a rule writes for given values.
+ {std::map<std::string,int> v{{"$colour",1},{"$x",0}};std::string why;
+  assert(condition("",v,why)&&condition("$colour == 1",v,why)&&!condition("$colour == 0",v,why)&&condition("!($colour == 0) && $colour == 1",v,why)&&condition("$x == 1 || $colour >= 1",v,why)&&why.empty());
+  assert(!condition("$missing == 1",v,why)&&why=="unknown variable $missing");why.clear();assert(!condition("$colour === 1",v,why)&&!why.empty());why.clear();assert(!condition("time > 3",v,why)&&!why.empty());
+  Rule r;r.textures={{"resource\\gimi\\diffuse","ra","diffuse","$colour == 0",""},{"resource\\gimi\\diffuse","rb","diffuse","!($colour == 0) && $colour == 1",""},{"resource\\gimi\\lightmap","rl","lightmap","",""},
+   {"ps-t3","rr","ramp","",""},{"ps-t5","ru","unknown","$time > 1",""}};
+  std::vector<std::string> skipped;auto w=writes(r,v,skipped);
+  assert(w.size()==2&&w[0].property=="_MainTex"&&w[0].resource=="rb"&&!w[0].linear&&w[1].property=="_LightMapTex"&&w[1].resource=="rl"&&w[1].linear);
+  assert(skipped.size()==2&&has(skipped[0],"ps-t3 rr [ramp]: no confirmed game property (待诊断)")&&has(skipped[1],"condition '$time > 1' not evaluable (unknown variable $time)"));
+  Rule off=r;off.textures.push_back({"resource\\gimi\\diffuse","","diffuse","",""});skipped.clear();assert(writes(off,v,skipped).size()==1);}   // null takes _MainTex off
+ // texture.json: variants, textures (safe file names only), the rules.
+ {auto mod=parseMod(R"J({"format":"gibox-texture-mod","version":1,"name":"X","generation":"t1","character":{"id":10000007},"variants":{"vars":[{"name":"$c","values":[0,1]}],"default":{"$c":1}},
+   "textures":[{"resource":"r","file":"textures/0.rgba","width":4,"height":2}],"diag":{"format":"gibox-texture-diag","version":1,"rules":[{"section":"S","kind":"segment","hash":"h","first":0,"textures":[]}]}})J","/m/X");
+  assert(mod.character==10000007&&mod.defaults.at("$c")==1&&mod.textures.size()==1&&mod.textures[0].width==4&&mod.doc.rules.size()==1&&mod.doc.character==10000007&&mod.doc.path=="/m/X/texture.json");
+  bool bad=false;try{parseMod(R"J({"format":"gibox-texture-mod","version":1,"name":"X","generation":"t","character":{"id":10000007},"variants":{"vars":[],"default":{}},"textures":[{"resource":"r","file":"../x.rgba","width":1,"height":1}],"diag":{"format":"gibox-texture-diag","version":1,"rules":[]}})J","/m");}catch(const std::exception&){bad=true;}assert(bad);}
  if(std::getenv("TEXDIAG_PRINT")){for(auto& m:lm)std::cout<<matchLine(lumine,m,dev)<<"\n";for(auto& m:wm)std::cout<<matchLine(lumine,m,low)<<"\n";}
  if(std::getenv("TEXDIAG_PRINT"))for(auto& m:all)std::cout<<matchLine(d,m,rs)<<"\n";
- std::cout<<"Texture-only diagnostics: PASS (document, index-start / group / name / count / order evidence, merged PC segments, unreadable layouts never confirmed, texture-hash candidates by size, shared slots)\n";
+ std::cout<<"Texture-only diagnostics: PASS (conditions and write plan, texture.json, document, index-start / group / name / count / order evidence, merged PC segments, unreadable layouts never confirmed, texture-hash candidates by size, shared slots)\n";
 }

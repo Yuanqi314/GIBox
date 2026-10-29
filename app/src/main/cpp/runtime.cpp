@@ -53,7 +53,9 @@ struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glo
  std::string text()const{return std::string("gameMaterials=")+(gameMaterials?"on":"off")+" firstRefreshMs="+(firstRefreshMs?std::to_string(firstRefreshMs):"default")+" neutralColors="+(neutralColors?"on":"off")+" noUv2="+(noUv2?"on":"off")+" glowTrace="+(glowTrace?"on":"off")+" slotTextures="+(slotTextures==1?"block":slotTextures==2?"custom":"off")+" separateDraws="+(separateDraws?"on":"off")+" animationMode="+std::to_string(animationMode)+" logicCore="+(logicCore?"on":"off");}};
 // keys: the App's presses of a model's [Key] sections (model.json logic.keys), numbered; each is taken once, by number.
 struct KeyPress {long long seq=0;size_t file=0;std::string section;bool back=false;bool operator==(const KeyPress& o)const{return seq==o.seq&&file==o.file&&section==o.section&&back==o.back;}};
-struct ControlState {Experiments exp;bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;std::map<std::string,std::vector<KeyPress>> keys;};
+// Texture-only mods (control.json "textureMods", 0.7.52): strategy diagnose / direct / clone, lod full / migrate, test rounds.
+struct TexModControl {std::string strategy="diagnose",lod="full";long long testRequest=0;std::vector<std::string> testStrategies{"direct","clone"};int observeMs=4000;};
+struct ControlState {TexModControl tex;Experiments exp;bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;std::map<std::string,std::vector<KeyPress>> keys;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"Control JSON object");ControlState s;
  const auto& a=c.at("selected");require(a.type==Json::Array&&a.array.size()<=128,"Selected list");
@@ -71,6 +73,10 @@ ControlState parseControl(const std::string& raw){
   for(auto& k:model.second.array){require(k.type==Json::Object,"Key press");KeyPress x;x.seq=integerOf(k.at("seq"));auto file=integerOf(k.at("file"));require(x.seq>0&&file>=0&&file<64,"Key press number / file");x.file=size_t(file);
    require(k.at("section").type==Json::String&&!k.at("section").string.empty()&&k.at("section").string.size()<=256,"Key press section");x.section=k.at("section").string;x.back=k.at("back").type==Json::Bool&&k.at("back").boolean;s.keys[model.first].push_back(x);}}
  s.logLevel=logThreshold(c);
+ const auto& t=c.at("textureMods");if(t.type==Json::Object){auto text=[&](const char* k,const char* fallback,std::initializer_list<const char*> allowed){const auto& v=t.at(k);if(v.type!=Json::String)return std::string(fallback);for(auto* a:allowed)if(v.string==a)return v.string;return std::string(fallback);};
+  s.tex.strategy=text("strategy","diagnose",{"diagnose","direct","clone"});s.tex.lod=text("lod","full",{"full","migrate"});s.tex.testRequest=integerOf(t.at("testRequest"));require(s.tex.testRequest>=0,"textureMods.testRequest");
+  const auto& ts=t.at("testStrategies");if(ts.type==Json::Array){s.tex.testStrategies.clear();for(auto& v:ts.array)if(v.type==Json::String&&(v.string=="direct"||v.string=="clone")&&s.tex.testStrategies.size()<4)s.tex.testStrategies.push_back(v.string);if(s.tex.testStrategies.empty())s.tex.testStrategies={"direct","clone"};}
+  auto ms=integerOf(t.at("observeMs"));if(ms)s.tex.observeMs=int(std::min<long long>(60000,std::max<long long>(1000,ms)));}
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
   s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");s.exp.logicCore=flag("logicCore");
   auto ms=integerOf(x.at("firstRefreshMs"));require(ms>=0&&ms<=10000,"experiments.firstRefreshMs");s.exp.firstRefreshMs=int(ms);
@@ -239,7 +245,7 @@ struct Runtime::Impl {
  std::unique_ptr<renderprobe::UnityReader> renderReader;std::unique_ptr<renderprobe::Recorder> renderRecorder;
  long long renderMarkSeen=0;bool renderControlSeen=false;uint64_t renderIdentityAt=0,renderFollowEndAt=0;
  // Texture-only mods, phase 1 (texture_diag.hpp): files read by the worker, handed over under sm; the rest on Tick.
- struct TexDiagFile {std::string stamp,error;size_t content=0;std::shared_ptr<texdiag::Doc> doc;};
+ struct TexDiagFile {std::string stamp,error;size_t content=0;std::shared_ptr<texdiag::Doc> doc;std::shared_ptr<texdiag::TextureMod> mod;std::string dir;};
  std::map<std::string,TexDiagFile> texDiagScanned,texDiagWorker,texDiagDocs;bool texDiagFresh=false;uint64_t texDiagScanAt=0,texDiagAt=0;
  struct TexDiagSeen {std::string key;texdiag::Renderer info;};std::map<Ptr,TexDiagSeen> texDiagSeen;std::map<std::string,std::string> texDiagLogged,texDiagMatched;
  std::unique_ptr<renderprobe::UnityReader> texDiagReader;
@@ -277,6 +283,14 @@ struct Runtime::Impl {
    TexDiagFile f;f.stamp=stamp;try{auto body=text(path);f.content=std::hash<std::string>()(body);
     if(old!=texDiagWorker.end()&&old->second.content==f.content&&old->second.error.empty()){f.doc=old->second.doc;now[path]=f;continue;}
     f.doc=std::make_shared<texdiag::Doc>(texdiag::parse(body,path));f.doc->stamp=stamp;}catch(const std::exception& ex){f.error=ex.what();}now[path]=f;}
+  // Texture-only mods (models/<name>/texture.json, no model.json): their rules are diagnosed the same way.
+  if(std::filesystem::is_directory(modelRoot,ec))for(auto& entry:std::filesystem::directory_iterator(modelRoot,ec)){if(!entry.is_directory(ec))continue;auto dir=entry.path().string(),folder=entry.path().filename().string();
+   if(folder.empty()||folder[0]=='.'||exists(dir+"/model.json")||!exists(dir+"/texture.json")){continue;}if(now.size()>=64)break;auto path=dir+"/texture.json";auto stamp=stampOf(path);auto old=texDiagWorker.find(path);
+   if(old!=texDiagWorker.end()&&old->second.stamp==stamp){now[path]=old->second;continue;}
+   TexDiagFile f;f.stamp=stamp;f.dir=dir;try{auto body=read(path,16u<<20);std::string text(body.begin(),body.end());f.content=std::hash<std::string>()(text);
+    if(old!=texDiagWorker.end()&&old->second.content==f.content&&old->second.error.empty()){f.doc=old->second.doc;f.mod=old->second.mod;now[path]=f;continue;}
+    f.mod=std::make_shared<texdiag::TextureMod>(texdiag::parseMod(text,dir));f.mod->name=folder;f.mod->doc.name=folder;f.mod->doc.stamp=stamp;f.doc=std::make_shared<texdiag::Doc>(f.mod->doc);}
+   catch(const std::exception& ex){f.error=ex.what();}now[path]=f;}
   bool same=now.size()==texDiagWorker.size();if(same)for(auto& kv:now){auto o=texDiagWorker.find(kv.first);same=same&&o!=texDiagWorker.end()&&o->second.content==kv.second.content&&o->second.error==kv.second.error;}
   if(same){texDiagWorker=now;return;}
   texDiagWorker=now;std::lock_guard<std::mutex> l(sm);texDiagScanned=std::move(now);texDiagFresh=true;}
@@ -458,7 +472,8 @@ struct Runtime::Impl {
   if(texDiagDocs.empty()){texDiagSeen.clear();return;}
   if(now<texDiagAt){return;}texDiagAt=now+1000;
   if(!ch.entity){return;}
-  std::vector<const texdiag::Doc*> docs;std::string waiting;for(auto& kv:texDiagDocs)if(kv.second.doc){auto& d=*kv.second.doc;if(!d.character||d.character==ch.config)docs.push_back(&d);else waiting+=(waiting.empty()?"":", ")+d.name+" ("+std::to_string(d.character)+")";}
+  std::vector<const texdiag::Doc*> docs;std::string waiting;for(auto& kv:texDiagDocs)if(kv.second.doc){auto& d=*kv.second.doc;if(kv.second.mod&&!texModOn(kv.second.mod->name))continue;if(!d.character||d.character==ch.config)docs.push_back(&d);else waiting+=(waiting.empty()?"":", ")+d.name+" ("+std::to_string(d.character)+")";}
+  if(docs.empty()&&waiting.empty())return;
   if(docs.empty()){texDiagLog("texture-diag-wait","wait",std::to_string(ch.config)+" is controlled; texture diagnostics wait for: "+waiting);return;}
   std::vector<Ptr> world;try{world=worldRenderers();}catch(const std::exception& ex){texDiagLog("texture-diag-unsupported","world",std::string("character renderers unreadable: ")+ex.what());return;}
   // A world renderer showing a lower LOD (Body_LOD1 on the field, 0.7.50 log) is matched through its full-LOD twin when
@@ -489,10 +504,184 @@ struct Runtime::Impl {
   for(size_t i=0;i<live.size();i++)for(auto& m:live[i].materials)for(size_t j:users[m.material])if(j!=i)m.sharedWith.push_back(texdiag::label(live[j]));
   std::string stamp;for(auto& r:live)stamp+=texDiagSeen[r.renderer].key+";";
   for(auto* d:docs){auto& last=texDiagMatched[d->path];if(last==d->stamp+"|"+stamp)continue;last=d->stamp+"|"+stamp;
-   auto matches=texdiag::match(*d,live);unsigned counts[5]={0,0,0,0,0};
+   auto matches=texdiag::match(*d,live);unsigned counts[5]={0,0,0,0,0};bool mod=false;{auto f=texDiagDocs.find(d->path);mod=f!=texDiagDocs.end()&&f->second.mod;}
+   if(mod)texRemember(*d,matches,live);
    for(auto& m:matches){counts[int(m.verdict)]++;if(m.verdict==texdiag::Verdict::Skipped)continue;texDiagLog("texture-diag-match","match|"+d->path+"|"+d->rules[m.rule].section,texdiag::matchLine(*d,m,live));}
    texDiagLog("texture-diag-match","sum|"+d->path,d->name+": "+std::to_string(live.size())+" renderers of "+std::to_string(ch.config)+": "+std::to_string(counts[0])+" 确定匹配, "+std::to_string(counts[1])+" 高可信候选, "
-    +std::to_string(counts[2])+" 存在歧义, "+std::to_string(counts[3])+" 无法匹配, "+std::to_string(counts[4])+" without textures; nothing was replaced (phase 1)");}}
+    +std::to_string(counts[2])+" 存在歧义, "+std::to_string(counts[3])+" 无法匹配, "+std::to_string(counts[4])+" without textures; "+(mod?"writes follow the strategy ("+ctl.tex.strategy+", see texture-apply)":std::string("nothing was replaced (phase 1)")));}}
+
+ // ---------------------------------------------------------------- texture-only mods: putting the textures on (0.7.52)
+ // A texture-only mod (models/<name>/texture.json) switched on in the App, for the controlled character. Its slots are
+ // the ones the diagnostics confirmed (index starts on the full mesh); with "lod":"migrate" also the same slot of a lower
+ // LOD of that mesh once it checks out (renderer name, mesh, submesh and material counts, the slot material's part name).
+ // Strategies: diagnose (no writes), direct (the game's material gets our texture, the game keeps managing it), clone (a
+ // copy of the current material gets it and takes the slot). Every write is read back and watched: a material the game
+ // replaced or a texture it overwrote is logged and done again (up to 16 times a slot). Switching the mod or the strategy
+ // off, a test round, a character change and shutdown put back what was there and check it; anything of ours that could
+ // not be taken off stays alive (stranded), never destroyed under the game.
+ struct TexPixels {std::string generation,error;std::shared_ptr<std::map<std::string,Texture>> pixels;uint64_t bytes=0,ms=0;bool loading=false;};
+ std::map<std::string,TexPixels> texPixels;   // texture.json path -> decoded textures (the worker fills it, under sm)
+ struct TexDone {texdiag::Write write;Ptr before=0,ours=0;};
+ struct TexSlot {std::string rule,evidence,label,mesh,plan;Ptr renderer=0,native=0,material=0,materialNative=0,clone=0;int slot=-1;bool lod=false;std::vector<TexDone> writes;unsigned again=0;bool gaveUp=false;};
+ struct TexLive:Owned {std::string path,mod,strategy,test;std::map<std::string,Ptr> textures;std::vector<TexSlot> slots;uint64_t gpu=0;std::set<std::string> said;};
+ std::map<std::string,std::unique_ptr<TexLive>> texLive;std::vector<std::unique_ptr<TexLive>> texStranded;
+ struct TexConfirmed {std::string renderer,mesh,part,rule,from;unsigned submeshes=0,materials=0;int slot=-1;};
+ std::map<std::string,std::vector<TexConfirmed>> texConfirmed;   // per texture.json path, kept while the file is the same
+ std::map<std::string,std::vector<texdiag::Match>> texMatches;std::map<std::string,std::vector<texdiag::Renderer>> texMatchLive;
+ struct TexBase {Ptr renderer=0,native=0,material=0;int slot=-1;std::map<std::string,Ptr> textures;std::string label;};
+ struct TexTest {long long seen=-1,request=0;std::vector<std::string> strategies;size_t round=0;int phase=0;uint64_t until=0;int observeMs=4000;std::vector<TexBase> base;bool active=false;
+  std::string id()const{return "T"+std::to_string(request)+"-"+std::to_string(round+1);}} texTest;
+ uint64_t texModAt=0;std::string texStatus;bool texApplied=false;
+ bool texModOn(const std::string& name)const{return ctl.enabled&&std::find(ctl.selected.begin(),ctl.selected.end(),name)!=ctl.selected.end();}
+ // What the diagnostics confirmed, kept for LOD migration after the full mesh is gone (the party page closed).
+ void texRemember(const texdiag::Doc& d,const std::vector<texdiag::Match>& matches,const std::vector<texdiag::Renderer>& live){
+  texMatches[d.path]=matches;texMatchLive[d.path]=live;auto& list=texConfirmed[d.path];
+  for(auto& m:matches){if(m.verdict!=texdiag::Verdict::Confirmed||m.renderer<0||m.slot<0)continue;const auto& R=live[size_t(m.renderer)];if(size_t(m.slot)>=R.materials.size())continue;
+   TexConfirmed c{normalize(R.name),meshName(R.meshName),texdiag::materialPart(R.materials[size_t(m.slot)].name),d.rules[m.rule].section,texdiag::label(R)+" ("+R.meshName+")",unsigned(R.layout.submeshes>=0?R.layout.submeshes:int(R.submeshes)),unsigned(R.materials.size()),m.slot};
+   bool known=false;for(auto& x:list)if(x.renderer==c.renderer&&x.mesh==c.mesh&&x.slot==c.slot&&x.rule==c.rule){x=c;known=true;}if(!known)list.push_back(c);}}
+ std::map<std::string,int> texVars(const texdiag::TextureMod& m){auto v=m.defaults;auto c=ctl.variables.find(m.name);if(c!=ctl.variables.end())for(auto& kv:c->second)if(v.count(kv.first))v[kv.first]=kv.second;return v;}
+ std::string texDescribe(Ptr t){if(!t)return "null";if(!alive(t))return hex(t)+" (destroyed)";texdiag::Texture x;x.texture=t;try{x.name=name(t);texDiagTexture(x);}catch(const std::exception& ex){x.status=ex.what();}
+  return (x.name.empty()?std::string("(unnamed)"):x.name)+"#"+hex(t)+(x.width.empty()?"":" "+x.width+"x"+x.height)+(x.format.empty()?"":" "+x.format)+(x.status.empty()?"":" ["+x.status+"]");}
+ std::string texMaterial(Ptr m){if(!alive(m))return hex(m)+" (destroyed)";std::string sh;try{Ptr s=e.get(glow::rvaGetShader,m);sh=alive(s)?name(s):"none";}catch(const std::exception&){sh="?";}
+  return name(m)+"#"+hex(m)+" (instance id "+std::to_string(instanceId(m))+") shader="+sh;}
+ void texSay(TexLive& L,const std::string& key,const std::string& state,const std::string& line){if(L.said.insert(key).second)log(state,line);}
+ std::string texTag(const TexLive& L){return (L.test.empty()?std::string("-"):L.test)+"/"+L.strategy+" "+L.mod;}
+ // The decoded textures, read by the worker once per generation of the file.
+ bool texPixelsReady(const std::string& path,const TexDiagFile& f,std::shared_ptr<std::map<std::string,Texture>>& out,std::string& why){
+  bool post=false;{std::lock_guard<std::mutex> l(sm);auto& p=texPixels[path];if(p.generation!=f.mod->generation){p=TexPixels{};p.generation=f.mod->generation;p.loading=true;post=true;}
+   else if(p.pixels){out=p.pixels;return true;}else if(!p.error.empty()){why=p.error;return false;}}
+  if(post){auto mod=f.mod;auto dir=f.dir;worker.post([this,path,mod,dir]{auto t0=std::chrono::steady_clock::now();TexPixels r;r.generation=mod->generation;
+    try{auto px=std::make_shared<std::map<std::string,Texture>>();for(auto& t:mod->textures){auto b=read(dir+"/"+t.file,64u<<20);require(b.size()==size_t(t.width)*t.height*4,"texture "+t.file+" size");r.bytes+=b.size();(*px)[t.resource]=Texture{t.width,t.height,std::move(b)};}r.pixels=px;}
+    catch(const std::exception& ex){r.error=ex.what();}
+    r.ms=uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-t0).count());std::lock_guard<std::mutex> l(sm);auto& p=texPixels[path];if(p.generation==r.generation)p=std::move(r);});}
+  {std::lock_guard<std::mutex> l(sm);auto& p=texPixels[path];if(p.pixels){out=p.pixels;return true;}why=p.error.empty()?"reading the textures":p.error;}return false;}
+ struct TexTarget {Ptr renderer=0,native=0;int slot=-1;size_t rule=0;std::string evidence,label,mesh;bool lod=false;};
+ std::vector<TexTarget> texTargets(const std::string& path,const texdiag::TextureMod& m,TexLive* L){std::vector<TexTarget> out;std::set<std::pair<Ptr,int>> taken;
+  auto ruleOf=[&](const std::string& section)->int{for(size_t i=0;i<m.doc.rules.size();i++)if(m.doc.rules[i].section==section)return int(i);return -1;};
+  auto usable=[&](Ptr r,const std::string& label)->bool{if(!alive(r))return false;auto a=attachments.find(r);if(a!=attachments.end()){if(L)texSay(*L,"att|"+hex(r),"texture-skip",texTag(*L)+": "+label+" is taken over by GIBox model "+a->second->set->name+"; its mesh mod comes first, not written");return false;}
+   if(swapped.count(r)){if(L)texSay(*L,"swap|"+hex(r),"texture-skip",texTag(*L)+": "+label+" carries a mesh mod's face texture swap; not written");return false;}return true;};
+  auto mi=texMatches.find(path);auto li=texMatchLive.find(path);
+  if(mi!=texMatches.end()&&li!=texMatchLive.end())for(auto& x:mi->second){if(x.verdict!=texdiag::Verdict::Confirmed||x.renderer<0||x.slot<0)continue;const auto& R=li->second[size_t(x.renderer)];
+   if(!alive(R.renderer)||load<Ptr>(R.renderer+0x10)!=R.native||!usable(R.renderer,texdiag::label(R))||!taken.insert({R.renderer,x.slot}).second)continue;
+   out.push_back({R.renderer,R.native,x.slot,x.rule,"确定匹配（indexStart = match_first_index，同一 hash 的分段全部对上，材质数 = 子网格数）",texdiag::label(R),R.meshName,R.lod});}
+  if(ctl.tex.lod=="migrate"){auto ci=texConfirmed.find(path);if(ci!=texConfirmed.end())for(auto& kv:texDiagSeen){const auto& W=kv.second.info;if(!W.lod||!alive(W.renderer)||load<Ptr>(W.renderer+0x10)!=W.native)continue;
+    for(auto& c:ci->second){unsigned subs=unsigned(W.layout.submeshes>=0?W.layout.submeshes:int(W.submeshes));if(normalize(W.name)!=c.renderer||meshName(W.meshName)!=c.mesh||subs!=c.submeshes||W.materials.size()!=c.materials||size_t(c.slot)>=W.materials.size())continue;
+     if(texdiag::materialPart(W.materials[size_t(c.slot)].name)!=c.part){continue;}int rule=ruleOf(c.rule);if(rule<0||!usable(W.renderer,texdiag::label(W))||!taken.insert({W.renderer,c.slot}).second)continue;
+     out.push_back({W.renderer,W.native,c.slot,size_t(rule),"迁移自 "+c.from+"（核对：渲染器名、网格 "+c.mesh+"、"+std::to_string(subs)+" 子网格 / "+std::to_string(c.materials)+" 材质、槽位材质 "+c.part+"）",texdiag::label(W),W.meshName,true});}}}
+  return out;}
+ Ptr texOurs(TexLive& L,const std::map<std::string,Texture>& px,const texdiag::Write& w){auto key=w.resource+(w.linear?"#linear":"");auto it=L.textures.find(key);if(it!=L.textures.end())return it->second;
+  auto p=px.find(w.resource);require(p!=px.end(),"texture "+w.resource+" not decoded at import");Ptr t=makeTexture(L,p->second,w.linear);L.textures[key]=t;L.gpu+=uint64_t(p->second.w)*p->second.h*4;return t;}
+ std::vector<int32_t> texIds(Ptr m){std::vector<int32_t> ids;Owned tmp;try{Ptr a=e.get(glow::rvaGetTextureIds,m);if(a){pin(tmp,a);auto n=length(a,64);for(uint64_t i=0;i<n;i++)ids.push_back(load<int32_t>(a+0x20+4*i));}}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);return ids;}
+ // One slot: what the strategy writes, read back at once; the log line names everything needed to follow it.
+ bool texApply(TexLive& L,const texdiag::TextureMod& m,const std::map<std::string,Texture>& px,const TexTarget& t,TexSlot& s){
+  const auto& rule=m.doc.rules[t.rule];std::vector<std::string> skipped;auto plan=texdiag::writes(rule,texVars(m),skipped);
+  s=TexSlot{};s.rule=rule.section;s.evidence=t.evidence;s.label=t.label;s.mesh=t.mesh;s.renderer=t.renderer;s.native=t.native;s.slot=t.slot;s.lod=t.lod;for(auto& w:plan)s.plan+=w.property+"="+w.resource+";";
+  std::string line=texTag(L)+": "+rule.section+" -> character="+std::to_string(ch.config)+" "+t.label+" mesh="+t.mesh+" lod="+(t.lod?"lower":"full")+" slot="+std::to_string(t.slot)+" evidence="+t.evidence;
+  Ptr arr=e.get(abi::getMaterials,t.renderer);require(arr!=0,"no material array");auto current=pointers(arr,64);require(size_t(t.slot)<current.size(),"slot "+std::to_string(t.slot)+" beyond "+std::to_string(current.size())+" materials");
+  Ptr mat=current[size_t(t.slot)];require(alive(mat),"slot material destroyed");line+=" material="+texMaterial(mat);
+  std::string shared;for(auto& kv:texDiagSeen){if(kv.first==t.renderer||!alive(kv.first))continue;for(auto& x:kv.second.info.materials)if(x.material==mat)shared+=(shared.empty()?"":", ")+texdiag::label(kv.second.info);}
+  if(!shared.empty())line+=" shared-with="+shared;
+  if(L.strategy=="direct"&&instanceId(mat)>=0)line+=" (a loaded asset: a direct write changes every user of it until restored)";
+  auto ids=texIds(mat);Ptr target=mat;
+  if(L.strategy=="clone"){Ptr c=clone(L,mat);s.clone=c;target=c;line+=" copy="+hex(c);}
+  pin(L,mat);s.material=mat;s.materialNative=load<Ptr>(mat+0x10);bool ok=true;
+  for(auto& w:plan){int32_t id=slotId(w.property.c_str());if(std::find(ids.begin(),ids.end(),id)==ids.end()){line+=" | "+w.property+": the material has no such texture property; not written";continue;}
+   Ptr ours=texOurs(L,px,w);Ptr before=e.call<Ptr>(glow::rvaGetTexture,target,id,Ptr(0));if(alive(before))pin(L,before);putTexture(target,w.property.c_str(),ours);
+   Ptr back=e.call<Ptr>(glow::rvaGetTexture,target,id,Ptr(0));ok=ok&&back==ours;s.writes.push_back({w,before,ours});
+   line+=" | "+w.property+" ("+w.slot+" "+w.resource+(w.linear?", linear":", sRGB")+"): "+texDescribe(before)+" -> "+texDescribe(ours)+" readback="+(back==ours?"ok":"FAILED, now "+texDescribe(back));}
+  for(auto& k:skipped)line+=" | skipped "+k;
+  if(s.writes.empty())line+=" | nothing to write";
+  if(s.clone){std::vector<Ptr> next=current;next[size_t(t.slot)]=s.clone;Owned tmp;try{e.set(abi::setMaterials,t.renderer,array(tmp,arr,next.data(),next.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);
+   Ptr now=e.get(abi::getMaterials,t.renderer);Ptr on=now?pointers(now,64)[size_t(t.slot)]:0;ok=ok&&on==s.clone;line+=std::string(" | slot readback=")+(on==s.clone?"ok (our copy)":"FAILED, holds "+(alive(on)?name(on):hex(on)));}
+  log("texture-apply",line);return ok;}
+ // Puts back one slot; false when something of ours could not be taken off (then nothing of ours is destroyed).
+ bool texRestore(TexLive& L,TexSlot& s,const std::string& why){std::string line=texTag(L)+": "+s.rule+" on "+s.label+" slot "+std::to_string(s.slot)+" ("+why+")";bool ok=true;
+  bool live=alive(s.renderer)&&load<Ptr>(s.renderer+0x10)==s.native;
+  if(s.clone){if(live){Ptr arr=e.get(abi::getMaterials,s.renderer);auto list=arr?pointers(arr,64):std::vector<Ptr>{};
+     if(size_t(s.slot)<list.size()&&list[size_t(s.slot)]==s.clone){if(alive(s.material)){list[size_t(s.slot)]=s.material;Owned tmp;try{e.set(abi::setMaterials,s.renderer,array(tmp,arr,list.data(),list.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);
+       Ptr now=e.get(abi::getMaterials,s.renderer);Ptr on=now?pointers(now,64)[size_t(s.slot)]:0;ok=on==s.material;line+=std::string(": source material back ")+(ok?"(verified)":"FAILED, slot holds "+hex(on));}
+      else{ok=false;line+=": the source material is destroyed; our copy stays on the slot";}}
+     else line+=": the slot holds "+(size_t(s.slot)<list.size()&&alive(list[size_t(s.slot)])?name(list[size_t(s.slot)]):std::string("nothing"))+" (the game replaced our copy); nothing to put back";}
+   else line+=": renderer gone";
+   if(ok&&alive(s.clone)){auto& v=L.objects;v.erase(std::remove(v.begin(),v.end(),s.clone),v.end());e.action(abi::destroy,s.clone);line+="; copy destroyed";}}
+  else for(auto& w:s.writes){int32_t id=slotId(w.write.property.c_str());
+    if(!alive(s.material)||load<Ptr>(s.material+0x10)!=s.materialNative){line+=" | "+w.write.property+": material gone";continue;}
+    Ptr now=e.call<Ptr>(glow::rvaGetTexture,s.material,id,Ptr(0));if(now!=w.ours){line+=" | "+w.write.property+": now "+texDescribe(now)+" (changed by the game); left";continue;}
+    putTexture(s.material,w.write.property.c_str(),w.before);Ptr back=e.call<Ptr>(glow::rvaGetTexture,s.material,id,Ptr(0));bool good=back==w.before;ok=ok&&good;
+    line+=" | "+w.write.property+": back to "+texDescribe(w.before)+(good?" (verified)":" FAILED, now "+texDescribe(back));}
+  log("texture-restore",line+(ok?"":"; RESTORE FAILED"));return ok;}
+ bool texRestoreAll(TexLive& L,const std::string& why){bool ok=true;for(auto& s:L.slots)ok=texRestore(L,s,why)&&ok;L.slots.clear();return ok;}
+ void texDrop(std::unique_ptr<TexLive> L,bool ok){if(ok){freeOwned(*L);return;}log("texture-restore",texTag(*L)+": something of ours stays in the game; its textures and copies are kept alive (not destroyed)");texStranded.push_back(std::move(L));}
+ void texRestoreEverything(const std::string& why){for(auto& kv:texLive){bool ok=texRestoreAll(*kv.second,why);texDrop(std::move(kv.second),ok);}texLive.clear();}
+ // One slot already written: the game may replace the material or overwrite the texture; logged and done again.
+ void texWatch(TexLive& L,const texdiag::TextureMod& m,const std::map<std::string,Texture>& px,TexSlot& s,const TexTarget& t){if(s.gaveUp)return;
+  Ptr arr=e.get(abi::getMaterials,s.renderer);if(!arr)return;auto list=pointers(arr,64);if(size_t(s.slot)>=list.size())return;Ptr on=list[size_t(s.slot)];
+  std::string event;
+  if(s.clone){if(on!=s.clone)event="the game put "+(alive(on)?texMaterial(on):hex(on))+" in place of our copy";}
+  else if(on!=s.material)event="the game put "+(alive(on)?texMaterial(on):hex(on))+" in place of "+hex(s.material);
+  else for(auto& w:s.writes){Ptr now=e.call<Ptr>(glow::rvaGetTexture,s.material,slotId(w.write.property.c_str()),Ptr(0));if(now!=w.ours){event=w.write.property+" overwritten by the game (now "+texDescribe(now)+")";break;}}
+  if(event.empty())return;
+  if(++s.again>16){s.gaveUp=true;log("texture-event",texTag(L)+": "+s.rule+" on "+s.label+" slot "+std::to_string(s.slot)+": "+event+"; done again 16 times, stops here");return;}
+  log("texture-event",texTag(L)+": "+s.rule+" on "+s.label+" slot "+std::to_string(s.slot)+": "+event+"; writing again ("+std::to_string(s.again)+")");
+  unsigned again=s.again;bool restored=texRestore(L,s,"re-apply after the game's change");if(!restored){s.gaveUp=true;return;}
+  try{texApply(L,m,px,t,s);s.again=again;}catch(const std::exception& ex){log("texture-error",texTag(L)+": "+ex.what());s.gaveUp=true;}}
+ // The test rounds (control.json textureMods.testRequest): per round save the slots, apply, read back, watch observeMs,
+ // put back, compare with what was saved; a failed restore stops the run.
+ std::vector<TexBase> texBaseline(){std::vector<TexBase> out;
+  for(auto& kv:texDiagDocs){auto& f=kv.second;if(!f.mod||!texModOn(f.mod->name)||f.mod->character!=ch.config)continue;
+   for(auto& t:texTargets(kv.first,*f.mod,nullptr)){TexBase b;b.renderer=t.renderer;b.native=t.native;b.slot=t.slot;b.label=t.label;Ptr arr=e.get(abi::getMaterials,t.renderer);if(!arr)continue;auto list=pointers(arr,64);if(size_t(t.slot)>=list.size())continue;b.material=list[size_t(t.slot)];
+    for(auto* p:{"_MainTex","_LightMapTex"}){b.textures[p]=e.call<Ptr>(glow::rvaGetTexture,b.material,slotId(p),Ptr(0));}out.push_back(b);}}
+  return out;}
+ bool texVerify(const std::vector<TexBase>& base,std::string& report){bool ok=true;
+  for(auto& b:base){std::string r=b.label+" slot "+std::to_string(b.slot)+": ";if(!alive(b.renderer)||load<Ptr>(b.renderer+0x10)!=b.native){report+=r+"renderer gone; ";continue;}
+   Ptr arr=e.get(abi::getMaterials,b.renderer);auto list=arr?pointers(arr,64):std::vector<Ptr>{};Ptr on=size_t(b.slot)<list.size()?list[size_t(b.slot)]:0;
+   bool ours=false;for(auto& kv:texLive)for(auto& s:kv.second->slots)ours=ours||s.clone==on;for(auto& L:texStranded)for(auto& o:L->objects)ours=ours||o==on;
+   if(on!=b.material){if(ours){ok=false;report+=r+"our copy is still on the slot; ";}else report+=r+"the game replaced the material ("+hex(b.material)+" -> "+hex(on)+"), not counted; ";continue;}
+   for(auto& kv:b.textures){Ptr now=e.call<Ptr>(glow::rvaGetTexture,on,slotId(kv.first.c_str()),Ptr(0));bool mine=false;for(auto& x:texLive)for(auto& t:x.second->textures)mine=mine||t.second==now;for(auto& L:texStranded)for(auto& t:L->textures)mine=mine||t.second==now;
+    if(now==kv.second){continue;}if(mine){ok=false;report+=r+kv.first+" still ours; ";}else report+=r+kv.first+" changed by the game ("+texDescribe(kv.second)+" -> "+texDescribe(now)+"), not counted; ";}
+   if(ok)report+=r+"as saved; ";}
+  return ok;}
+ void textureModTick(uint64_t now){if(now<texModAt)return;texModAt=now+500;texStatus.clear();texApplied=false;
+  bool any=false;for(auto& kv:texDiagDocs)any=any||(kv.second.mod&&texModOn(kv.second.mod->name));
+  // Test rounds: a new request after the game started (one there at start is history, not a request).
+  if(texTest.seen<0)texTest.seen=ctl.tex.testRequest;
+  if(!texTest.active&&ctl.tex.testRequest>texTest.seen){texTest.seen=ctl.tex.testRequest;texTest.request=ctl.tex.testRequest;texTest.strategies=ctl.tex.testStrategies;texTest.observeMs=ctl.tex.observeMs;texTest.round=0;texTest.phase=1;texTest.active=true;
+   std::string list;for(auto& x:texTest.strategies)list+=(list.empty()?"":" -> ")+x;log("texture-test","T"+std::to_string(texTest.request)+" start: "+list+", observe "+std::to_string(texTest.observeMs)+" ms each, character "+std::to_string(ch.config)+", lod "+ctl.tex.lod);}
+  std::string strategy=texTest.active?texTest.strategies[texTest.round]:ctl.tex.strategy,test=texTest.active?texTest.id():"";
+  if(texTest.active&&texTest.phase==3){std::string report;bool restored=true;for(auto& kv:texLive){bool ok=texRestoreAll(*kv.second,"end of round "+test);restored=restored&&ok;texDrop(std::move(kv.second),ok);}texLive.clear();
+   bool same=texVerify(texTest.base,report);bool ok=restored&&same;log("texture-test",test+" "+strategy+" restore: "+(ok?"ok":"FAILED")+"; "+report);
+   if(!ok){log("texture-test","T"+std::to_string(texTest.request)+" stopped: a restore failed (rounds left: "+std::to_string(texTest.strategies.size()-texTest.round-1)+")");texTest.active=false;}
+   else if(++texTest.round<texTest.strategies.size())texTest.phase=1;else{log("texture-test","T"+std::to_string(texTest.request)+" done: "+std::to_string(texTest.strategies.size())+" rounds, every restore verified");texTest.active=false;}
+   return;}
+  // Whatever no longer matches what is wanted goes back first.
+  for(auto it=texLive.begin();it!=texLive.end();){if(!it->second){it=texLive.erase(it);continue;}auto f=texDiagDocs.find(it->first);bool keep=f!=texDiagDocs.end()&&f->second.mod&&texModOn(f->second.mod->name)&&ch.entity&&f->second.mod->character==ch.config&&strategy!="diagnose"&&it->second->strategy==strategy&&it->second->test==test;
+   if(keep){++it;continue;}std::string why=f==texDiagDocs.end()||!f->second.mod?"mod removed":!texModOn(f->second.mod->name)?"mod switched off":!ch.entity||f->second.mod->character!=ch.config?"another character":test!=it->second->test?(test.empty()?"test round over":"test round "+test):"strategy "+strategy;
+   bool ok=texRestoreAll(*it->second,why);texDrop(std::move(it->second),ok);it=texLive.erase(it);}
+  if(!any){if(texTest.active){log("texture-test","T"+std::to_string(texTest.request)+" stopped: no texture-only mod is switched on");texTest.active=false;}return;}
+  if(texTest.active&&texTest.phase==1){texTest.base=texBaseline();if(texTest.base.empty()){log("texture-test",test+": no confirmed slot on the current character (open the party page or the character details for the full mesh, or allow LOD migration); stopped");texTest.active=false;return;}
+   std::string list;for(auto& b:texTest.base)list+=(list.empty()?"":"; ")+b.label+" slot "+std::to_string(b.slot)+" "+(alive(b.material)?name(b.material):hex(b.material))+" _MainTex="+texDescribe(b.textures["_MainTex"]);
+   log("texture-test",test+" "+strategy+" baseline: "+list);texTest.phase=2;texTest.until=now+uint64_t(texTest.observeMs);}
+  std::string status;
+  for(auto& kv:texDiagDocs){auto& f=kv.second;if(!f.mod||!texModOn(f.mod->name))continue;const auto& m=*f.mod;std::string who=m.name+"：";
+   if(!ch.entity||m.character!=ch.config){status+=(status.empty()?"":"；")+who+"等待角色 "+std::to_string(m.character);continue;}
+   if(strategy=="diagnose"){status+=(status.empty()?"":"；")+who+"只诊断，不写入（设置里可换策略）";continue;}
+   std::shared_ptr<std::map<std::string,Texture>> px;std::string why;if(!texPixelsReady(kv.first,f,px,why)){status+=(status.empty()?"":"；")+who+"贴图读取中";if(why!="reading the textures")log("texture-error",m.name+": "+why);continue;}
+   auto& L=texLive[kv.first];if(!L){L=std::make_unique<TexLive>();L->path=kv.first;L->mod=m.name;L->strategy=strategy;L->test=test;
+    uint64_t bytes=0,ms=0;{std::lock_guard<std::mutex> l(sm);auto& p=texPixels[kv.first];bytes=p.bytes;ms=p.ms;}
+    log("texture-load",texTag(*L)+": "+std::to_string(px->size())+" textures, "+std::to_string(bytes>>20)+" MiB RGBA read in "+std::to_string(ms)+" ms; GPU about the same once made (RGBA32, no mipmaps)");}
+   auto targets=texTargets(kv.first,m,L.get());
+   // Slots no longer targeted (renderer gone, mapping lost) go back; a changed variant is written again.
+   for(auto it=L->slots.begin();it!=L->slots.end();){bool still=false;for(auto& t:targets)still=still||(t.renderer==it->renderer&&t.slot==it->slot);
+    std::string plan;if(still){for(auto& t:targets)if(t.renderer==it->renderer&&t.slot==it->slot){std::vector<std::string> sk;for(auto& w:texdiag::writes(m.doc.rules[t.rule],texVars(m),sk))plan+=w.property+"="+w.resource+";";}}
+    if(still&&plan==it->plan){++it;continue;}bool ok=texRestore(*L,*it,still?"variant changed":"no longer a target");if(!ok){texDrop(std::move(L),false);break;}it=L->slots.erase(it);}
+   if(!L){status+=(status.empty()?"":"；")+who+"还原失败，已停止";continue;}
+   size_t done=0;for(auto& t:targets){TexSlot* s=nullptr;for(auto& x:L->slots)if(x.renderer==t.renderer&&x.slot==t.slot)s=&x;
+    try{if(s){texWatch(*L,m,*px,*s,t);if(!s->gaveUp)done++;continue;}TexSlot fresh;bool ok=texApply(*L,m,*px,t,fresh);L->slots.push_back(std::move(fresh));if(ok)done++;}
+    catch(const std::exception& ex){texSay(*L,"err|"+hex(t.renderer)+"|"+std::to_string(t.slot)+"|"+ex.what(),"texture-error",texTag(*L)+": "+t.label+" slot "+std::to_string(t.slot)+": "+ex.what());}}
+   if(targets.empty())status+=(status.empty()?"":"；")+who+"等待映射（没有确定匹配的槽位："+(ctl.tex.lod=="migrate"?"打开队伍预览或角色详情让完整模型出现一次":"大世界多为低精度模型；打开队伍预览或角色详情，或允许迁移到 LOD")+"）";
+   else{status+=(status.empty()?"":"；")+who+(strategy=="direct"?"直接改材质":"克隆材质")+"，"+std::to_string(done)+" / "+std::to_string(targets.size())+" 个槽位已写入";texApplied=texApplied||done>0;}}
+  texStatus=status;
+  if(texTest.active&&texTest.phase==2&&now>=texTest.until)texTest.phase=3;}
 
  // ---------------------------------------------------------------- switch-in glow trace (debug + experiments.glowTrace)
  // The hooks (glow_trace.hpp) keep every write to the objects registered here: each attachment's renderer, its
@@ -2056,6 +2245,7 @@ struct Runtime::Impl {
    if(ch.config!=shownCharacter){shownCharacter=ch.config;log("character",ch.entity?std::to_string(ch.config):std::string("none"));}
    glowTick();
    try{textureDiagTick(now);}catch(const std::exception& ex){log("texture-diag-unsupported",std::string("diagnostics stopped this round: ")+ex.what());}
+   try{textureModTick(now);}catch(const std::exception& ex){log("texture-error",std::string("texture-only mods this round: ")+ex.what());}
    // Reuse the verified Type discovery only here, on the existing serial Tick.
    // Diagnostic hooks never call Runtime::Impl and never scan all objects.
    if(handoff::canSeed()&&now>=handoffTypeRetry){handoffTypeRetry=now+1000;
@@ -2119,6 +2309,9 @@ struct Runtime::Impl {
    animationPrepare(now);for(auto& s:sets)if(wantedSet(*s)&&s->animation.stopped)errors.push_back(s->name+"：动画已暂停："+s->animation.error);
    for(auto& n:notes)errors.push_back(n);
    for(auto& kv:attachments){auto& n=kv.second->set->name;if(std::find(active.begin(),active.end(),n)==active.end())active.push_back(n);}
+   for(auto& kv:texLive)if(kv.second&&!kv.second->slots.empty()&&std::find(active.begin(),active.end(),kv.second->mod)==active.end())active.push_back(kv.second->mod);
+   // Texture-only mods (no mesh model): their own state ("等待映射", "只诊断", written slots) is the status line.
+   if(wanted.empty()&&!texStatus.empty()&&waiting.empty()&&building.empty()&&errors.empty()&&!restoring){status(texApplied?"active":"waiting",texStatus,active,errors);inTick=false;animationTick(now);return;}
    if(restoring)status("waiting","正在恢复已停用 MOD 的原模型；暂时失败的渲染器会单独重试",active,errors);
    else if(!animationWaiting.empty()&&errors.empty())status("waiting",animationWaiting,active,errors);
    else if(!active.empty())status("active",errors.empty()?"":errors[0],active,errors);
@@ -2136,5 +2329,5 @@ void Runtime::spawned(Ptr go)noexcept{glow::OwnScope own;try{p->spawned(go);}cat
 void Runtime::spawnedAfter()noexcept{glow::OwnScope own;try{p->spawnedAfter();}catch(...){}}
 Ptr Runtime::bindMesh(Ptr renderer,Ptr mesh)noexcept{glow::OwnScope own;try{return p->bindMesh(renderer,mesh);}catch(...){return mesh;}}
 void Runtime::meshBound(Ptr renderer)noexcept{glow::OwnScope own;try{p->meshBound(renderer);}catch(...){}}
-void Runtime::shutdown(){glow::OwnScope own;glow::trace().armed.store(false);handoff::disarm();p->renderBinding.clear();p->renderRecorder.reset();p->renderReader.reset();p->texDiagReader.reset();if(p->releaseAll()){p->pruneRestoreBackups(true);p->freeOwned(p->handoffTypeRoots);p->freeOwned(p->slotRoots);p->slotBlock=0;}}
+void Runtime::shutdown(){glow::OwnScope own;glow::trace().armed.store(false);handoff::disarm();p->renderBinding.clear();p->renderRecorder.reset();p->renderReader.reset();try{p->texRestoreEverything("shutdown");}catch(const std::exception&){}p->texDiagReader.reset();if(p->releaseAll()){p->pruneRestoreBackups(true);p->freeOwned(p->handoffTypeRoots);p->freeOwned(p->slotRoots);p->slotBlock=0;}}
 }

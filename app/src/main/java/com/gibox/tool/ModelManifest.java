@@ -35,6 +35,8 @@ public final class ModelManifest {
     /** The logic data says the mod's own program picks the outfit (logic.driven): with the logic core on, the 款式 table
      *  is not its input. */
     public boolean driven;
+    /** A texture-only mod (texture.json, TextureMod): no mesh; variants as in version 2. */
+    public boolean textureMod;
     public final List<Key> keys = new ArrayList<>();
 
     /** A lower level of detail by mesh name (Body_LOD1, Body_LOD3 …); the plain name and _LOD0 are the full mesh (core.hpp lowerLod). */
@@ -45,9 +47,10 @@ public final class ModelManifest {
         String d = o.substring(p + 4); return d.matches("[0-9]+") && !d.matches("0+");
     }
 
-    public static boolean exists(File dir) { return new File(dir, "model.json").isFile(); }
+    public static boolean exists(File dir) { return new File(dir, "model.json").isFile() || TextureMod.is(dir); }
 
     public static ModelManifest read(File dir) throws Exception {
+        if (TextureMod.is(dir)) return readTextureMod(dir);
         Map<String, Object> m = Json.obj(Json.read(new File(dir, "model.json"), 4L << 20), "model.json");
         Json.check("gibox-model".equals(m.get("format")), "不是 GIBox 模型：" + dir.getName());
         long version = Json.integer(m.get("version"), "version", 1, 1000000); Json.check(version >= 1 && version <= 4, "模型格式版本 " + version + " 不支持（新版 GIBox 转换的？）：" + dir.getName());
@@ -112,6 +115,25 @@ public final class ModelManifest {
                 Json.check(k.type.equals("cycle") || k.type.equals("toggle"), "logic.keys.type"); k.back = Json.bool(e.get("back"), "logic.keys.back", false); r.keys.add(k);
             }
         } catch (Exception e) { r.keys.clear(); }
+        return r;
+    }
+
+    /** texture.json (format "gibox-texture-mod", version 1): name, generation, character, variants, source. */
+    static ModelManifest readTextureMod(File dir) throws Exception {
+        Map<String, Object> m = Json.obj(Json.read(new File(dir, TextureMod.FILE), 16L << 20), TextureMod.FILE);
+        Json.check("gibox-texture-mod".equals(m.get("format")), "不是 GIBox 纯贴图 MOD：" + dir.getName());
+        long version = Json.integer(m.get("version"), "version", 1, 1000000); Json.check(version == 1, "纯贴图格式版本 " + version + " 不支持（新版 GIBox 转换的？）：" + dir.getName());
+        ModelManifest r = new ModelManifest(); r.version = 2; r.textureMod = true;
+        r.name = Json.str(m.get("name"), "name", 512); r.generation = Json.str(m.get("generation"), "generation", 64);
+        r.id = (int) Json.integer(Json.obj(m.get("character"), "character").get("id"), "character.id", 10000000, 10001999);
+        Map<String, Object> vo = Json.obj(m.get("variants"), "variants"); Map<String, Object> d = Json.obj(vo.get("default"), "variants.default");
+        for (Object x : Json.arr(vo.get("vars"), "variants.vars", 0, 16)) {
+            Map<String, Object> e = Json.obj(x, "variants.vars"); String n = Json.str(e.get("name"), "variants.vars.name", 64); Json.check(n.length() > 1 && n.startsWith("$") && !r.vars.containsKey(n), "款式变量：" + n);
+            List<Integer> values = new ArrayList<>(); for (Object k : Json.arr(e.get("values"), n, 1, 64)) values.add((int) Json.integer(k, n, -1000000, 1000000)); r.vars.put(n, values);
+            int v = (int) Json.integer(d.get(n), "variants.default." + n, -1000000, 1000000); Json.check(values.contains(v), "默认值不在可选值里：" + n); r.defaults.put(n, v);
+        }
+        Object s = m.get("source");
+        if (s != null) { Map<String, Object> so = Json.obj(s, "source"); if (so.get("path") instanceof String) r.sourcePath = (String) so.get("path"); if (so.get("signature") instanceof String) r.sourceSignature = (String) so.get("signature"); }
         return r;
     }
 

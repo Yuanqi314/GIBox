@@ -211,6 +211,17 @@ class AppState(private val activity: Activity) {
         Control.setExperiment(game, key, value)
         AppLog.info(game, LOGGER, "调试实验 $key = $value")
     }
+    /** Texture-only mods: strategy and LOD option (control.json "textureMods"), and a run of the test rounds. */
+    fun textureMods(key: String, fallback: String): String = Control.textureMods(game, key, fallback)
+    fun setTextureMods(key: String, value: String) = save("保存纯贴图设置") {
+        Control.setTextureMods(game, key, value)
+        AppLog.info(game, LOGGER, "纯贴图 $key = $value")
+    }
+    fun startTextureTest() = save("开始轮测") {
+        val n = Control.requestTextureTest(game, 4000)
+        AppLog.info(game, LOGGER, "纯贴图轮测 #$n：直接改材质 → 克隆材质，各观察 4 秒")
+        toast("已通知游戏开始轮测 #$n；结果看日志 texture-test")
+    }
     /** 显示替换 开/关 for a model with its own on/off switch (model.json "replaceWhen"). */
     fun setReplacing(mod: Importer.Mod, variants: Variants, on: Boolean) = save("保存") {
         val change = variants.switchTo(on, variants.current(game, mod.name))

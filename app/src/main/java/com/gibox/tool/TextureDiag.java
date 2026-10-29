@@ -159,7 +159,7 @@ final class TextureDiag {
         }
     }
     /** A resource path as 3DMigoto takes it: relative to the INI's folder; missing components matched without case. */
-    private static File resolve(File base, String path) throws Exception {
+    static File resolve(File base, String path) throws Exception {
         String r = base.getCanonicalPath() + File.separator; File cursor = base;
         for (String part : path.replace('\\', '/').split("/")) { if (part.isEmpty() || part.equals(".")) continue;
             File exact = new File(cursor, part); if (exact.exists() || part.equals("..")) { cursor = exact; continue; }

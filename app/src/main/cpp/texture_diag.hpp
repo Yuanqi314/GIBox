@@ -22,6 +22,8 @@
 #include "json.hpp"
 #include "render_probe.hpp"
 #include <algorithm>
+#include <cstring>
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -39,7 +41,7 @@ struct Doc {std::string path,stamp,name,ini,characterName;unsigned character=0;s
 inline std::string str(const Json& j,const char* k){const auto& v=j.at(k);return v.type==Json::String?v.string:std::string();}
 inline long long num(const Json& j,const char* k,long long fallback){const auto& v=j.at(k);return v.type==Json::Number&&std::isfinite(v.number)&&std::floor(v.number)==v.number&&std::fabs(v.number)<9e15?(long long)v.number:fallback;}
 // The App's document (version 1); anything it cannot use is an error naming the field, never a silent skip.
-inline Doc parse(const std::string& text,const std::string& path){Doc d;d.path=path;Json j=JsonParser(text).parse();
+inline Doc parseDoc(const Json& j,const std::string& path){Doc d;d.path=path;
  require(j.type==Json::Object&&str(j,"format")=="gibox-texture-diag","not a GIBox texture diagnostic");require(num(j,"version",0)==1,"texture diagnostic version "+std::to_string(num(j,"version",0))+" is not supported");
  d.name=str(j,"name");d.ini=str(j,"ini");d.characterName=str(j,"characterName");auto c=num(j,"character",0);require(c==0||(c>=10000000&&c<=10001999),"texture diagnostic character");d.character=unsigned(c);
  const auto& rules=j.at("rules");require(rules.type==Json::Array&&rules.array.size()<=4096,"texture diagnostic rules");
@@ -57,6 +59,7 @@ inline Doc parse(const std::string& text,const std::string& path){Doc d;d.path=p
  const auto& others=j.at("otherInis");if(others.type==Json::Array)for(auto& o:others.array)if(o.type==Json::Object){std::string h;const auto& a=o.at("sharedHashes");if(a.type==Json::Array)for(auto& n:a.array)if(n.type==Json::String)h+=(h.empty()?"":",")+n.string;d.others.push_back(str(o,"ini")+(h.empty()?"":" shares "+h));}
  const auto& notes=j.at("notes");if(notes.type==Json::Array)for(auto& n:notes.array)if(n.type==Json::String)d.notes.push_back(n.string);
  return d;}
+inline Doc parse(const std::string& text,const std::string& path){return parseDoc(JsonParser(text).parse(),path);}
 
 // What the Runtime read of one renderer. A string field starting with "未采集:" was not available, with the reason.
 struct Texture {std::string property;int id=0;Ptr texture=0;std::string name,cls,width,height,mips,format,status;};
@@ -230,4 +233,52 @@ inline std::vector<std::string> materialLines(const Renderer& r){std::vector<std
  for(size_t i=0;i<r.materials.size();i++){auto& m=r.materials[i];std::string t;for(auto& x:m.textures)t+=(t.empty()?"":", ")+textureText(x);std::string shared;for(auto& x:m.sharedWith)shared+=(shared.empty()?"":",")+x;
   out.push_back(label(r)+" slot="+std::to_string(i)+" material="+m.name+"#"+hexOf(m.material)+" shader="+m.shader+(shared.empty()?"":" shared-with="+shared)+" textures=["+t+"]"+(m.error.empty()?"":" error="+m.error));}
  return out;}
+// ---------------------------------------------------------------- texture-only mods (0.7.52)
+// models/<name>/texture.json (TextureMod.java): the rules (the diagnostic document as "diag"), the variants and the
+// decoded textures (textures/<n>.rgba, RGBA8, rows top to bottom as on the PC).
+struct ModTexture {std::string resource,file;unsigned width=0,height=0;};
+struct TextureMod {std::string name,generation;unsigned character=0;std::map<std::string,std::vector<int>> vars;std::map<std::string,int> defaults;std::vector<ModTexture> textures;Doc doc;};
+inline TextureMod parseMod(const std::string& text,const std::string& dir){Json j=JsonParser(text).parse();
+ require(j.type==Json::Object&&str(j,"format")=="gibox-texture-mod","not a GIBox texture-only mod");require(num(j,"version",0)==1,"texture-only mod version "+std::to_string(num(j,"version",0))+" is not supported");
+ TextureMod m;m.name=str(j,"name");m.generation=str(j,"generation");require(!m.name.empty()&&!m.generation.empty(),"texture-only mod name / generation");
+ auto c=num(j.at("character"),"id",0);require(c>=10000000&&c<=10001999,"texture-only mod character");m.character=unsigned(c);
+ const auto& v=j.at("variants");require(v.type==Json::Object,"texture-only mod variants");const auto& d=v.at("default");
+ if(v.at("vars").type==Json::Array)for(auto& x:v.at("vars").array){auto n=str(x,"name");require(n.size()>1&&n[0]=='$'&&!m.vars.count(n),"texture-only mod variable");auto& vals=m.vars[n];
+  const auto& a=x.at("values");require(a.type==Json::Array&&!a.array.empty()&&a.array.size()<=64,"texture-only mod values "+n);for(auto& k:a.array){require(k.type==Json::Number&&std::floor(k.number)==k.number&&std::fabs(k.number)<=1000000,"texture-only mod value "+n);vals.push_back(int(k.number));}
+  auto def=num(d,n.c_str(),vals[0]);require(std::find(vals.begin(),vals.end(),int(def))!=vals.end(),"texture-only mod default "+n);m.defaults[n]=int(def);}
+ const auto& t=j.at("textures");require(t.type==Json::Array&&t.array.size()<=256,"texture-only mod textures");
+ for(auto& x:t.array){ModTexture mt;mt.resource=str(x,"resource");mt.file=str(x,"file");auto w=num(x,"width",0),h=num(x,"height",0);
+  bool safe=mt.file.size()>14&&mt.file.compare(0,9,"textures/")==0&&mt.file.compare(mt.file.size()-5,5,".rgba")==0&&mt.file.find_first_not_of("0123456789",9)==mt.file.size()-5;
+  require(!mt.resource.empty()&&safe&&w>0&&h>0&&w<=4096&&h<=4096,"texture-only mod texture "+mt.resource);mt.width=unsigned(w);mt.height=unsigned(h);m.textures.push_back(mt);}
+ const auto& diag=j.at("diag");require(diag.type==Json::Object,"texture-only mod rules (diag)");m.doc=parseDoc(diag,dir+"/texture.json");m.doc.name=m.name;m.doc.character=m.character;
+ return m;}
+
+// A condition as TextureDiag writes it ("$a == 1 && !($b == 2)"; || and parentheses too): variables and integer
+// numbers compared with == != < > <= >=. Anything else, or a variable the mod does not declare, cannot be evaluated
+// here: false, with why set (so the binding is reported, not written).
+inline bool condition(const std::string& text,const std::map<std::string,int>& vars,std::string& why){
+ if(text.empty()){return true;}size_t p=0;bool bad=false;
+ auto ws=[&]{while(p<text.size()&&text[p]==' ')p++;};auto take=[&](const char* t){ws();size_t n=std::strlen(t);if(text.compare(p,n,t)==0){p+=n;return true;}return false;};
+ auto fail=[&](const std::string& w){if(!bad){bad=true;why=w;}return 0.0;};
+ std::function<double()> expr;
+ auto operand=[&]()->double{ws();if(p<text.size()&&text[p]=='$'){size_t q=p+1;while(q<text.size()&&(std::isalnum((unsigned char)text[q])||text[q]=='_'))q++;auto n=text.substr(p,q-p);p=q;auto it=vars.find(n);if(it==vars.end())return fail("unknown variable "+n);return it->second;}
+  size_t q=p;if(q<text.size()&&(text[q]=='-'||text[q]=='+'))q++;size_t digits=q;while(q<text.size()&&std::isdigit((unsigned char)text[q]))q++;if(q==digits)return fail("not a number at '"+text.substr(p)+"'");double v=std::stod(text.substr(p,q-p));p=q;return v;};
+ std::function<double()> unary=[&]()->double{if(take("!")&&!take("=")){return unary()!=0?0:1;}
+  ws();if(p<text.size()&&text[p]=='('){p++;double v=expr();if(!take(")"))return fail("missing )");return v;}
+  double a=operand();for(const char* op:{"==","!=","<=",">=","<",">"}){if(take(op)){double b=operand();std::string o=op;return o=="=="?a==b:o=="!="?a!=b:o=="<="?a<=b:o==">="?a>=b:o=="<"?a<b:a>b;}}return a;};
+ auto conj=[&]()->double{double v=unary();while(take("&&")){double b=unary();v=(v!=0&&b!=0)?1:0;}return v;};
+ expr=[&]()->double{double v=conj();while(take("||")){double b=conj();v=(v!=0||b!=0)?1:0;}return v;};
+ double v=expr();ws();if(!bad&&p!=text.size())fail("unexpected '"+text.substr(p)+"'");return !bad&&v!=0;}
+
+// What one rule writes for these variable values: diffuse -> _MainTex, lightmap -> _LightMapTex, the last binding of a
+// property winning (3DMigoto runs the lines in order; a null binding takes it off). Every other binding is reported.
+struct Write {std::string property,resource,role,slot;bool linear=false;};
+inline std::vector<Write> writes(const Rule& r,const std::map<std::string,int>& vars,std::vector<std::string>& skipped){
+ std::map<std::string,Write> byProperty;std::vector<std::string> order;
+ for(auto& b:r.textures){std::string why;if(!condition(b.condition,vars,why)){if(!why.empty())skipped.push_back(b.slot+" "+b.resource+": condition '"+b.condition+"' not evaluable ("+why+")");continue;}
+  const char* prop=b.role=="diffuse"?"_MainTex":b.role=="lightmap"?"_LightMapTex":nullptr;
+  if(!prop){skipped.push_back(b.slot+" "+(b.resource.empty()?"null":b.resource)+" ["+b.role+"]: no confirmed game property (待诊断)");continue;}
+  if(b.resource.empty()){byProperty.erase(prop);continue;}
+  if(!byProperty.count(prop)){order.push_back(prop);}byProperty[prop]={prop,b.resource,b.role,b.slot,b.role!="diffuse"};}
+ std::vector<Write> out;for(auto& p:order){auto it=byProperty.find(p);if(it!=byProperty.end())out.push_back(it->second);}return out;}
 }  // namespace ms::texdiag
