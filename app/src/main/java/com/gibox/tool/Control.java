@@ -59,18 +59,20 @@ public final class Control {
      *  1 per-material property block, 2 per-material custom texture); for animations animationMode (0 cached frame
      *  meshes, 1 dynamic, 2 paused) and logicCore (boolean: the mod's own INI logic picks the frame shown). */
     public static boolean experiment(String pkg, String key) { JSONObject x = load(pkg).optJSONObject("experiments"); return x != null && x.optBoolean(key, false); }
-    public static int experimentMs(String pkg) { return experimentInt(pkg, "firstRefreshMs"); }
     public static int experimentInt(String pkg, String key) { JSONObject x = load(pkg).optJSONObject("experiments"); return x == null ? 0 : x.optInt(key, 0); }
+    /** Experiments the App no longer offers (0.7.47): slot textures, the first material re-copy time, neutral vertex
+     *  colours, zeroed UV2, unmerged draws. A value left in control.json by an earlier version is taken out, so none
+     *  stays on without a switch to turn it off; the runtime then keeps their defaults. */
+    static final String[] RETIRED_EXPERIMENTS = {"slotTextures", "firstRefreshMs", "neutralColors", "noUv2", "separateDraws"};
+    public static synchronized void retireExperiments(String pkg) throws Exception {
+        if (!new File(shared(pkg), "control.json").isFile()) return;
+        JSONObject j = load(pkg); JSONObject x = j.optJSONObject("experiments"); if (x == null) return; boolean changed = false;
+        for (String k : RETIRED_EXPERIMENTS) if (x.has(k)) { x.remove(k); changed = true; }
+        if (changed) { j.put("experiments", x); save(pkg, j); }
+    }
     public static synchronized void setExperiment(String pkg, String key, Object value) throws Exception {
         JSONObject j = load(pkg); JSONObject x = j.optJSONObject("experiments"); if (x == null) x = new JSONObject();
         x.put(key, value); j.put("experiments", x); save(pkg, j);
-    }
-    public static synchronized void requestRenderMark(String pkg) throws Exception {
-        JSONObject j = load(pkg);
-        if (!"debug".equals(j.optString("logLevel", "info"))) throw new IllegalStateException("请先把日志等级设为调试，再复现异常");
-        long previous = j.optLong("renderMark", 0);
-        if (previous < 0 || previous >= 9007199254740991L) throw new IllegalStateException("画面标记计数无效");
-        j.put("renderMark", Math.max(System.currentTimeMillis(), previous + 1)); save(pkg, j);
     }
     /** Variant choice per model, read by the runtime from control.json "variables". */
     public static synchronized void setVariable(String pkg, String model, String var, int value) throws Exception {

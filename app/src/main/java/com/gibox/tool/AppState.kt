@@ -98,6 +98,7 @@ class AppState(private val activity: Activity) {
 
     init {
         AppLog.debug(game, "app", "App Start $VERSION")
+        runCatching { Control.retireExperiments(game) }
         Importer.discardAll(modsRoot)
         refresh()
     }
@@ -165,6 +166,7 @@ class AppState(private val activity: Activity) {
     fun setServer(pkg: String) {
         game = pkg
         writePrivate("game.txt", pkg)
+        runCatching { Control.retireExperiments(pkg) }
         Importer.discardAll(modsRoot)
         refresh()
     }
@@ -204,7 +206,6 @@ class AppState(private val activity: Activity) {
     }
     /** Material experiments (debug): read back on every recomposition through `revision`. */
     fun experiment(key: String): Boolean = Control.experiment(game, key)
-    fun experimentMs(): Int = Control.experimentMs(game)
     fun experimentInt(key: String): Int = Control.experimentInt(game, key)
     fun setExperiment(key: String, value: Any) = save("保存实验设置") {
         Control.setExperiment(game, key, value)
@@ -216,11 +217,6 @@ class AppState(private val activity: Activity) {
         if (change.isNotEmpty()) Control.setVariables(game, mod.name, change)
     }
     fun changeLogLevel(level: String) = save("保存") { Control.setLogLevel(game, level) }
-    fun markRenderAnomaly() = save("标记画面异常") {
-        Control.requestRenderMark(game)
-        AppLog.debug(game, LOGGER, "已提交画面异常标记；请求保留游戏收到标记前约 30 秒与之后 5 秒的诊断记录")
-        toast("已提交标记，请回游戏继续约 5 秒，再分享日志")
-    }
     fun exportBones() = save("保存") {
         Control.requestBoneExport(game)
         toast("已通知游戏：骨骼采集校验通过后导出，未通过会自动重试")

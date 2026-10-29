@@ -29,7 +29,9 @@ uint64_t clockMs(){return std::chrono::duration_cast<std::chrono::milliseconds>(
 std::string hex(uint64_t v){char b[24];std::snprintf(b,sizeof(b),"0x%llx",static_cast<unsigned long long>(v));return b;}
 
 // ---------------------------------------------------------------- files (worker side)
-// Debug experiments for the switch-in glow (control.json "experiments"), each off by default:
+// Debug experiments for the switch-in glow (control.json "experiments"), each off by default. The App no longer offers
+// firstRefreshMs, neutralColors / noUv2, slotTextures and separateDraws (0.7.47) and takes them out of control.json;
+// they stay readable here for the tests that still compare against them:
 //   gameMaterials  the game's own materials on our mesh (no clones): is the glow in our copied materials?
 //   firstRefreshMs first material re-copy after attaching (default 1500): does the glow end with it?
 //   neutralColors / noUv2  mesh data: vertex colours set to the original's usual value, UV2 zeroed (rebuilds the model)
