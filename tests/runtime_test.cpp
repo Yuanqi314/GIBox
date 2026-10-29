@@ -1,6 +1,7 @@
 // Fake managed objects exercise runtime state transitions without a game process.
 #include "runtime.hpp"
 #include "glow_trace.hpp"
+#include "texture_diag.hpp"
 #include "json.hpp"
 #include "model_fixture.hpp"
 #include <cassert>
@@ -1193,8 +1194,16 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   Ptr mat2=f->object("material","Material2");f->diffuse[mat2]=tex;f->obj[body].materials=f->typed("material",mat2);td.tick(5005000);td.tick(5006000);log=text(logFile);
   assert(count("texture-diag-material Body#")==2&&count("material=Material2#")==1&&gameWrites==writes);
   // Another character controlled: only the file for it is considered.
-  store<uint32_t>(diagEntity+0x3a4,10000200);td.tick(5007000);td.tick(5008000);log=text(logFile);
-  assert(count("texture-diag-match Other: 1 renderers of 10000200: 0 确定匹配")==1&&count("texture-diag-match Mod: TextureOverrideModBodyA")==2);
+  // The field shows a lower LOD (Body_LOD1, as on the device); the party page has the full mesh of the same avatar:
+  // that twin is read and matched in its place, the LOD one only logged. No game writes either way.
+  Ptr lodBody=f->renderer(f->mesh("Body_LOD1",2)),fullBody=f->renderer(f->mesh("Body",3));
+  for(Ptr r:{lodBody,fullBody}){Ptr m=load<Ptr>(f->obj[r].materials+0x20);f->diffuse[m]=tex;}
+  f->world(lodBody);f->scene={lodBody,fullBody};for(uint64_t now=5006500;now<=5009000;now+=500)td.tick(now);log=text(logFile);
+  assert(count("mesh=Body_LOD1#")==1&&count("lod=lower (by name) vertices=2")==1&&count("full-LOD twin of Body#"+texdiag::hexOf(load<Ptr>(lodBody+0x10))+" (elsewhere in the scene), matched in its place")==1);
+  assert(count("texture-diag-match Mod: TextureOverrideModBodyA hash=d5ae71a3 match_first_index=0 -> 确定匹配 renderer=Body#"+texdiag::hexOf(load<Ptr>(fullBody+0x10))+" mesh=Body ")==1&&gameWrites==writes);
+  f->scene.clear();f->world(body);
+  store<uint32_t>(diagEntity+0x3a4,10000200);td.tick(5017000);td.tick(5018000);log=text(logFile);
+  assert(count("texture-diag-match Other: 1 renderers of 10000200: 0 确定匹配")==1&&count("texture-diag-match Mod: TextureOverrideModBodyA")==3&&count("mesh=Body_LOD1 submesh")==0);
   store<uint32_t>(diagEntity+0x3a4,10000107);td.shutdown();assert(f->handles.empty());f->world(0);}
  std::filesystem::remove_all(root);
  std::cout<<"Native runtime: PASS (texture-only diagnostics read-only and cached; logic core: outfits by what the logic selects, App value as input, off, not finite and missing variable refused; App key presses as core key events (cycle, toggle, back, taken once, not replayed at start, refused when not a cycle/toggle key or the core is off), persist saved atomically per model and restored over the App table, not for another INI; driven outfit models (the program picks by clock and keys, the App table not pushed); frames by what the draws select, as FrameLoop, a selection no frame has keeps the frame, no match at the start keeps FrameLoop, switch off; face texture swaps: written, copies tracked, fresh materials, restored, assets copied; direct textures: written, put back, game copies tracked, assets and shared materials copied; merged draws: hidden and non-contiguous ranges, variant switches, separateDraws rebuild; slot textures by property block and custom texture, glow trace windows and read-back, structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, glow experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";

@@ -239,7 +239,7 @@ struct Runtime::Impl {
  std::unique_ptr<renderprobe::UnityReader> renderReader;std::unique_ptr<renderprobe::Recorder> renderRecorder;
  long long renderMarkSeen=0;bool renderControlSeen=false;uint64_t renderIdentityAt=0,renderFollowEndAt=0;
  // Texture-only mods, phase 1 (texture_diag.hpp): files read by the worker, handed over under sm; the rest on Tick.
- struct TexDiagFile {std::string stamp,error;std::shared_ptr<texdiag::Doc> doc;};
+ struct TexDiagFile {std::string stamp,error;size_t content=0;std::shared_ptr<texdiag::Doc> doc;};
  std::map<std::string,TexDiagFile> texDiagScanned,texDiagWorker,texDiagDocs;bool texDiagFresh=false;uint64_t texDiagScanAt=0,texDiagAt=0;
  struct TexDiagSeen {std::string key;texdiag::Renderer info;};std::map<Ptr,TexDiagSeen> texDiagSeen;std::map<std::string,std::string> texDiagLogged,texDiagMatched;
  std::unique_ptr<renderprobe::UnityReader> texDiagReader;
@@ -273,9 +273,13 @@ struct Runtime::Impl {
   if(std::filesystem::is_directory(dir,ec))for(auto& entry:std::filesystem::directory_iterator(dir,ec)){auto path=entry.path().string(),file=entry.path().filename().string();
    if(file.empty()||file[0]=='.'||entry.path().extension()!=".json"||!entry.is_regular_file(ec)){continue;}if(now.size()>=32)break;
    auto stamp=stampOf(path);auto old=texDiagWorker.find(path);if(old!=texDiagWorker.end()&&old->second.stamp==stamp){now[path]=old->second;continue;}
-   TexDiagFile f;f.stamp=stamp;try{f.doc=std::make_shared<texdiag::Doc>(texdiag::parse(text(path),path));f.doc->stamp=stamp;}catch(const std::exception& ex){f.error=ex.what();}now[path]=f;}
-  bool same=now.size()==texDiagWorker.size();if(same)for(auto& kv:now){auto o=texDiagWorker.find(kv.first);same=same&&o!=texDiagWorker.end()&&o->second.stamp==kv.second.stamp;}
-  if(same){return;}texDiagWorker=now;std::lock_guard<std::mutex> l(sm);texDiagScanned=std::move(now);texDiagFresh=true;}
+   // A new stamp with the same text (the media storage put the old time back, 0.7.50 log) is no change.
+   TexDiagFile f;f.stamp=stamp;try{auto body=text(path);f.content=std::hash<std::string>()(body);
+    if(old!=texDiagWorker.end()&&old->second.content==f.content&&old->second.error.empty()){f.doc=old->second.doc;now[path]=f;continue;}
+    f.doc=std::make_shared<texdiag::Doc>(texdiag::parse(body,path));f.doc->stamp=stamp;}catch(const std::exception& ex){f.error=ex.what();}now[path]=f;}
+  bool same=now.size()==texDiagWorker.size();if(same)for(auto& kv:now){auto o=texDiagWorker.find(kv.first);same=same&&o!=texDiagWorker.end()&&o->second.content==kv.second.content&&o->second.error==kv.second.error;}
+  if(same){texDiagWorker=now;return;}
+  texDiagWorker=now;std::lock_guard<std::mutex> l(sm);texDiagScanned=std::move(now);texDiagFresh=true;}
  // urgent: the character is appearing now: its job goes ahead of the queue (once; a queued copy then finds it loaded).
  void requestLoad(const ModelInfo& m,bool urgent=false){
   auto key=m.path+"|"+m.generation;{std::lock_guard<std::mutex> l(sm);auto it=loaded.find(m.path);if(it!=loaded.end()&&it->second.generation==m.generation)return;
@@ -457,9 +461,19 @@ struct Runtime::Impl {
   std::vector<const texdiag::Doc*> docs;std::string waiting;for(auto& kv:texDiagDocs)if(kv.second.doc){auto& d=*kv.second.doc;if(!d.character||d.character==ch.config)docs.push_back(&d);else waiting+=(waiting.empty()?"":", ")+d.name+" ("+std::to_string(d.character)+")";}
   if(docs.empty()){texDiagLog("texture-diag-wait","wait",std::to_string(ch.config)+" is controlled; texture diagnostics wait for: "+waiting);return;}
   std::vector<Ptr> world;try{world=worldRenderers();}catch(const std::exception& ex){texDiagLog("texture-diag-unsupported","world",std::string("character renderers unreadable: ")+ex.what());return;}
-  std::set<Ptr> present;unsigned reads=0;std::vector<texdiag::Renderer> live;
-  for(Ptr r:world){if(live.size()>=64)break;try{if(!alive(r))continue;present.insert(r);auto key=texDiagKey(r);auto& seen=texDiagSeen[r];
-    if(seen.key!=key){if(reads>=8)continue;reads++;seen.key=key;seen.info=texDiagRead(r);
+  // A world renderer showing a lower LOD (Body_LOD1 on the field, 0.7.50 log) is matched through its full-LOD twin when
+  // the scene has one (party / detail page): same avatar, same renderer name, same mesh but full LOD. The LOD one is
+  // still read and logged, not matched.
+  std::vector<std::pair<Ptr,Ptr>> twins;   // (world renderer, full-LOD twin)
+  for(Ptr r:world){try{if(!alive(r))continue;auto it=texDiagSeen.find(r);if(it==texDiagSeen.end()||!it->second.info.lod)continue;auto& w=it->second.info;
+    for(auto& sn:seen){if(sn.renderer==r||!alive(sn.renderer)||!alive(sn.mesh)||lowerLod(sn.fp.mesh)||meshName(sn.fp.mesh)!=meshName(w.meshName)||normalize(rendererName(sn.renderer))!=normalize(w.name))continue;
+     if(avatarIdentity(sn.renderer)!=w.avatar){continue;}twins.push_back({r,sn.renderer});break;}}
+   catch(const std::exception&){}}
+  std::vector<Ptr> reading=world;for(auto& t:twins)reading.push_back(t.second);
+  std::set<Ptr> present;unsigned reads=0;bool freshLod=false;std::vector<texdiag::Renderer> live;
+  for(Ptr r:reading){if(live.size()>=64)break;try{if(!alive(r))continue;present.insert(r);auto key=texDiagKey(r);auto& seen=texDiagSeen[r];
+    if(seen.key!=key){if(reads>=8)continue;reads++;seen.key=key;seen.info=texDiagRead(r);freshLod=freshLod||(seen.info.lod&&std::find(world.begin(),world.end(),r)!=world.end());
+     for(auto& t:twins)if(t.second==r){auto w=texDiagSeen.find(t.first);if(w!=texDiagSeen.end())seen.info.error+=(seen.info.error.empty()?"":"; ")+std::string("full-LOD twin of ")+texdiag::label(w->second.info)+" (elsewhere in the scene), matched in its place";}
      texDiagLog("texture-diag-renderer","r|"+hex(seen.info.native),texdiag::rendererLine(seen.info,ch.config));
      auto subs=texdiag::submeshLines(seen.info);for(size_t i=0;i<subs.size();i++)texDiagLog("texture-diag-submesh","s|"+hex(seen.info.native)+"|"+std::to_string(i),subs[i]);
      if(seen.info.layout.status!="read")texDiagLog("texture-diag-unsupported","layout|"+hex(seen.info.native),texdiag::label(seen.info)+": per-submesh indexStart/indexCount not read ("+seen.info.layout.status+"); rules on it are matched by name and counts only, never confirmed");
@@ -467,7 +481,9 @@ struct Runtime::Impl {
     live.push_back(seen.info);}
    catch(const std::exception& ex){texDiagLog("texture-diag-unsupported","read|"+hex(r),"renderer "+hex(r)+": "+ex.what());}}
   for(auto it=texDiagSeen.begin();it!=texDiagSeen.end();)if(!present.count(it->first))it=texDiagSeen.erase(it);else ++it;
-  if(reads>=8)return;   // the rest next second, then one match over all of them
+  if(reads>=8||freshLod)return;   // the rest (or the twin of a lower LOD just read) next second, then one match over all of them
+  if(live.empty()){texDiagLog("texture-diag-wait","none",std::to_string(ch.config)+" has no renderers yet (loading); matching waits");return;}
+  for(auto& t:twins){auto x=std::find_if(live.begin(),live.end(),[&](const texdiag::Renderer& l){return l.renderer==t.first;});if(x!=live.end())live.erase(x);}
   // Materials on several renderers: phase 2 must copy per renderer.
   std::map<Ptr,std::vector<size_t>> users;for(size_t i=0;i<live.size();i++)for(auto& m:live[i].materials)users[m.material].push_back(i);
   for(size_t i=0;i<live.size();i++)for(auto& m:live[i].materials)for(size_t j:users[m.material])if(j!=i)m.sharedWith.push_back(texdiag::label(live[j]));

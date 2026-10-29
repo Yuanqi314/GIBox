@@ -110,6 +110,8 @@ inline std::vector<Match> match(const Doc& d,const std::vector<Renderer>& rs){
  auto sameTextures=[&](long long a,long long b,const std::string& hash){const Rule* x=nullptr;const Rule* y=nullptr;for(auto& r:d.rules)if(r.hash==hash){if(r.first==a)x=&r;if(r.first==b)y=&r;}
   if(!x||!y||x->textures.size()!=y->textures.size()){return false;}for(size_t i=0;i<x->textures.size();i++)if(x->textures[i].slot!=y->textures[i].slot||x->textures[i].resource!=y->textures[i].resource||x->textures[i].condition!=y->textures[i].condition)return false;return true;};
  auto nameHits=[&](const Rule& r){std::vector<int> hits;size_t best=0;for(size_t i=0;i<rs.size();i++){auto s=nameScore(r.hint,rs[i].name);if(!s)continue;if(s>best){best=s;hits.clear();}if(s==best)hits.push_back(int(i));}return hits;};
+ // A layout comparable with the PC index buffer: read, and not a lower LOD (whose index buffer is its own).
+ auto comparable=[&](size_t i){return rs[i].known()&&!rs[i].lod;};
  auto slotOf=[&](const Renderer& r,int sub,Match& m){size_t mats=r.materials.size(),subs=size_t(r.layout.submeshes>=0?r.layout.submeshes:int(r.submeshes));
   if(mats==subs){m.reasons.push_back("materials = submeshes ("+std::to_string(mats)+"): submesh "+std::to_string(sub)+" draws with material slot "+std::to_string(sub));return true;}
   if(size_t(sub)<mats&&size_t(sub)+1<subs){m.reasons.push_back(std::to_string(mats)+" materials, "+std::to_string(subs)+" submeshes: slot "+std::to_string(sub)+" by position (counts differ)");return false;}
@@ -127,8 +129,26 @@ inline std::vector<Match> match(const Doc& d,const std::vector<Renderer>& rs){
   if(r.kind=="control"){m.verdict=Verdict::Skipped;m.reasons.push_back("binds no texture (sets variables only)");out.push_back(m);continue;}
   auto names=nameHits(r);std::string nameText;for(int i:names)nameText+=(nameText.empty()?"":", ")+label(rs[size_t(i)]);
   if(r.kind=="segment"){const auto& group=firsts[r.hash];
+   // The renderer by name, or by the hash's other segments. When its index layout cannot be compared with the PC one
+   // (not readable, or a lower LOD with an index buffer of its own), the material names and the segment order decide;
+   // never more than likely.
+   int target=names.size()==1?names[0]:-1;bool viaGroup=false;if(target<0&&names.empty()){target=groupRenderer(r.hash);viaGroup=target>=0;}
+   if(target>=0&&!comparable(size_t(target))){const auto& R=rs[size_t(target)];size_t pos=size_t(std::find(group.begin(),group.end(),r.first)-group.begin());
+    size_t subs=R.layout.submeshes>=0?size_t(R.layout.submeshes):R.submeshes;m.renderer=target;
+    m.reasons.push_back(R.known()?label(R)+" shows a lower LOD ("+R.meshName+"): its index layout is its own, not comparable with the PC full mesh":"indexStart not readable on "+label(R)+(R.layout.status.empty()?"":" ("+R.layout.status+")"));
+    m.reasons.push_back(viaGroup?"the part name '"+r.hint+"' names no renderer; another segment of hash "+r.hash+" names "+label(R)+" (one PC index buffer taken as one Android mesh)":"the part name '"+r.hint+"' names it");
+    m.reasons.push_back("segment "+std::to_string(pos)+" of "+std::to_string(group.size())+", "+std::to_string(subs)+" submeshes, "+std::to_string(R.materials.size())+" materials");
+    bool counts=group.size()==subs&&subs==R.materials.size(),alias=false;int byName=slotByName(R,r.hint,alias);
+    if(byName>=0){m.slot=byName;m.reasons.push_back("material "+R.materials[size_t(byName)].name+" (slot "+std::to_string(byName)+") is named for the part"+(alias?" (GIMI Head = game Hair, a naming convention)":""));
+     if(counts&&size_t(byName)==pos){m.submesh=byName;m.verdict=Verdict::Likely;m.reasons.push_back("material name and segment order agree (still no index evidence)");}
+     else if(counts){m.verdict=Verdict::Ambiguous;m.reasons.push_back("material name says slot "+std::to_string(byName)+", segment order says "+std::to_string(pos));}
+     else{m.verdict=Verdict::Likely;m.reasons.push_back("counts differ; slot by material name only");}}
+    else if(counts){m.submesh=int(pos);m.slot=int(pos);m.verdict=Verdict::Likely;m.reasons.push_back("counts agree: slot "+std::to_string(pos)+" by order only (order alone is not proof)");}
+    else{m.verdict=Verdict::Ambiguous;m.reasons.push_back("counts differ and no material is named for the part: no slot");}
+    if(R.lod)m.reasons.push_back(R.known()?std::string("read again when the full mesh is shown"):"renderer shows a lower LOD ("+R.meshName+"): read again when the full mesh is shown");
+    out.push_back(m);continue;}
    std::vector<std::pair<int,int>> exact,inside;bool unknown=false;
-   for(size_t i=0;i<rs.size();i++){if(!rs[i].known()){unknown=true;continue;}const auto& subs=rs[i].layout.subs;
+   for(size_t i=0;i<rs.size();i++){if(!comparable(i)){unknown=true;continue;}const auto& subs=rs[i].layout.subs;
     for(size_t j=0;j<subs.size();j++){if(subs[j].start==uint64_t(r.first))exact.push_back({int(i),int(j)});else if(uint64_t(r.first)>subs[j].start&&uint64_t(r.first)<uint64_t(subs[j].start)+subs[j].count)inside.push_back({int(i),int(j)});}}
    auto groupExact=[&](int i){unsigned n=0;for(long long f:group)for(auto& s:rs[size_t(i)].layout.subs)if(s.start==uint64_t(f)){n++;break;}return n;};
    // Index 0 starts a submesh on every renderer: the other segments of the hash decide, when they all start
@@ -149,7 +169,7 @@ inline std::vector<Match> match(const Doc& d,const std::vector<Renderer>& rs){
     bool slotSure=slotOf(R,j,m);
     {bool alias=false;int byName=slotByName(R,r.hint,alias);if(byName==j)m.reasons.push_back("material "+R.materials[size_t(j)].name+" is named for the part"+(alias?" (GIMI Head = game Hair)":""));
      else if(byName>=0){m.reasons.push_back("but material "+R.materials[size_t(byName)].name+" (slot "+std::to_string(byName)+") is the one named for the part");slotSure=false;}}
-    if(R.lod)m.reasons.push_back("renderer shows a lower LOD ("+R.meshName+")");
+
     if(!names.empty()&&std::find(names.begin(),names.end(),i)==names.end()){m.reasons.push_back("the part name '"+r.hint+"' points at "+nameText+" instead");slotSure=false;}
     else if(!names.empty())m.reasons.push_back("the part name '"+r.hint+"' agrees");
     if(m.verdict!=Verdict::Likely)m.verdict=complete&&countOk&&slotSure?Verdict::Confirmed:(merged&&!countOk?Verdict::Ambiguous:Verdict::Likely);
@@ -160,28 +180,9 @@ inline std::vector<Match> match(const Doc& d,const std::vector<Renderer>& rs){
     // The renderer where the hash's other segments start submeshes is the one it most likely went into.
     std::vector<std::pair<int,int>> fit;unsigned most=0;for(auto& h:inside){unsigned n=groupExact(h.first);if(n>most){most=n;fit.clear();}if(n&&n==most)fit.push_back(h);}
     if(fit.size()==1){m.renderer=fit[0].first;m.submesh=fit[0].second;m.slot=fit[0].second;m.reasons.push_back("most of the hash's other segments ("+std::to_string(most)+") start submeshes of "+label(rs[size_t(m.renderer)])+": most likely merged into its submesh "+std::to_string(m.submesh));}
-    for(auto& h:inside)if(rs[size_t(h.first)].lod){m.reasons.push_back(label(rs[size_t(h.first)])+" shows a lower LOD ("+rs[size_t(h.first)].meshName+"): its index layout is its own, so this says nothing about merging; read again when the full mesh is shown");break;}
     out.push_back(m);continue;}
-   // No index layout to compare: the renderer by name (or by the hash's other segments), the slot by the material's
-   // name and by the segment's place among the hash's segments; never more than likely.
-   int target=names.size()==1?names[0]:-1;bool viaGroup=false;if(target<0&&names.empty()){target=groupRenderer(r.hash);viaGroup=target>=0;}
-   if(target>=0&&!rs[size_t(target)].known()){const auto& R=rs[size_t(target)];size_t pos=size_t(std::find(group.begin(),group.end(),r.first)-group.begin());
-    size_t subs=R.layout.submeshes>=0?size_t(R.layout.submeshes):R.submeshes;m.renderer=target;m.reasons.push_back("indexStart not readable on "+label(R)+(R.layout.status.empty()?"":" ("+R.layout.status+")"));
-    m.reasons.push_back(viaGroup?"the part name '"+r.hint+"' names no renderer; another segment of hash "+r.hash+" names "+label(R)+" (one PC index buffer taken as one Android mesh)":"the part name '"+r.hint+"' names it");
-    m.reasons.push_back("segment "+std::to_string(pos)+" of "+std::to_string(group.size())+", "+std::to_string(subs)+" submeshes, "+std::to_string(R.materials.size())+" materials");
-    bool counts=group.size()==subs&&subs==R.materials.size(),alias=false;int byName=slotByName(R,r.hint,alias);
-    if(byName>=0){m.slot=byName;m.reasons.push_back("material "+R.materials[size_t(byName)].name+" (slot "+std::to_string(byName)+") is named for the part"+(alias?" (GIMI Head = game Hair, a naming convention)":""));
-     if(counts&&size_t(byName)==pos){m.submesh=byName;m.verdict=Verdict::Likely;m.reasons.push_back("material name and segment order agree (still no index evidence)");}
-     else if(counts){m.verdict=Verdict::Ambiguous;m.reasons.push_back("material name says slot "+std::to_string(byName)+", segment order says "+std::to_string(pos));}
-     else{m.verdict=Verdict::Likely;m.reasons.push_back("counts differ; slot by material name only");}}
-    else if(counts){m.submesh=int(pos);m.slot=int(pos);m.verdict=Verdict::Likely;m.reasons.push_back("counts agree: slot "+std::to_string(pos)+" by order only (order alone is not proof)");}
-    else{m.verdict=Verdict::Ambiguous;m.reasons.push_back("counts differ and no material is named for the part: no slot");}
-    if(R.lod)m.reasons.push_back("renderer shows a lower LOD ("+R.meshName+"): read again when the full mesh is shown");
-    out.push_back(m);continue;}
-   if(names.size()>1){m.verdict=Verdict::Ambiguous;for(int i:names)m.candidates.push_back(label(rs[size_t(i)]));m.reasons.push_back("no submesh starts at "+std::to_string(r.first)+" where the layout is readable, and the part name fits several renderers");out.push_back(m);continue;}
-   m.reasons.push_back(std::string("no renderer has a submesh starting at ")+std::to_string(r.first)+(unknown?" among those whose layout is readable":"")+(target<0?"; the part name '"+r.hint+"' names no renderer":"; "+label(rs[size_t(target)])+(viaGroup?" (by the hash's other segments)":" (by name)")+" starts none there"));
-   // A lower LOD has its own index buffer: no conclusion about the PC order from it.
-   if(target>=0&&rs[size_t(target)].lod){m.verdict=Verdict::Ambiguous;m.renderer=target;{bool alias=false;int byName=slotByName(rs[size_t(target)],r.hint,alias);if(byName>=0){m.slot=byName;m.reasons.push_back("material slot "+std::to_string(byName)+" is named for the part");}}m.reasons.push_back(label(rs[size_t(target)])+" shows a lower LOD ("+rs[size_t(target)].meshName+"), whose index layout is its own; read again when the full mesh is shown");out.push_back(m);continue;}
+   if(names.size()>1){m.verdict=Verdict::Ambiguous;for(int i:names)m.candidates.push_back(label(rs[size_t(i)]));m.reasons.push_back("no submesh starts at "+std::to_string(r.first)+" where the layout is comparable, and the part name fits several renderers");out.push_back(m);continue;}
+   m.reasons.push_back(std::string("no renderer has a submesh starting at ")+std::to_string(r.first)+(unknown?" among those whose layout is comparable":"")+(target<0?"; the part name '"+r.hint+"' names no renderer":"; "+label(rs[size_t(target)])+(viaGroup?" (by the hash's other segments)":" (by name)")+" starts none there"));
    m.verdict=Verdict::None;m.reasons.push_back("so either Android's index order differs from the PC one, or the hash belongs to another character / outfit");out.push_back(m);continue;}
   if(r.kind=="whole-ib"){m.reasons.push_back("no match_first_index: 3DMigoto applies it to every draw of hash "+r.hash);
    std::set<int> hit;for(auto& x:out)if(x.renderer>=0&&d.rules[x.rule].hash==r.hash&&(x.verdict==Verdict::Confirmed||x.verdict==Verdict::Likely))hit.insert(x.renderer);

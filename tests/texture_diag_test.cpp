@@ -30,6 +30,7 @@ Renderer renderer(const char* name,Ptr native,std::vector<std::pair<uint32_t,uin
  for(unsigned i=0;i<materials;i++){Material m;m.material=native*16+i;m.name=std::string(name)+"Mat"+std::to_string(i);m.shader="miHoYo/Character";m.textures.push_back(tex("_MainTex","Tex","2048","2048"));m.textures.push_back(tex("_LightMapTex","Light","2048","2048"));r.materials.push_back(m);}
  return r;}
 const Match& of(const std::vector<Match>& all,const Doc& d,const char* section){for(auto& m:all)if(d.rules[m.rule].section==section)return m;assert(false);return all[0];}
+bool has2(const std::string& s,const char* x){return s.find(x)!=std::string::npos;}
 bool has(const std::string& s,const char* x){if(s.find(x)!=std::string::npos)return true;std::cerr<<"missing \""<<x<<"\" in: "<<s<<"\n";return false;}
 }
 int main(){
@@ -82,11 +83,11 @@ int main(){
  auto full=lumineWorld(true,false,{{0,6915},{6915,33498},{40413,9000}});auto fm=match(lumine,full);
  for(int k=0;k<3;k++)assert(fm[size_t(k)].verdict==Verdict::Confirmed&&fm[size_t(k)].renderer==0&&fm[size_t(k)].slot==k);
  assert(has(matchLine(lumine,fm[0],full),"only Body#0x10 has all 3")&&has(matchLine(lumine,fm[0],full),"is named for the part (GIMI Head = game Hair)"));
- // The lower LOD read: its own index layout, never taken as merged PC segments or as a mismatch of the PC order.
- auto low=lumineWorld(true,true,{{0,3000},{3000,12000},{15000,4000}});auto wm=match(lumine,low);
- assert(wm[0].verdict==Verdict::Likely&&wm[0].renderer==0&&has(matchLine(lumine,wm[0],low),"the hash's other segments name Body#0x10"));
- assert(wm[1].verdict==Verdict::Ambiguous&&has(matchLine(lumine,wm[1],low),"its index layout is its own"));
- assert(wm[2].verdict==Verdict::Ambiguous&&has(matchLine(lumine,wm[2],low),"whose index layout is its own"));
+ // The lower LOD as the 0.7.50 device log read it (Body_LOD1: 0 / 4218 / 20229): its own index layout, not compared
+ // with the PC one: never merged segments or a different PC order; material names and order decide, likely at most.
+ auto low=lumineWorld(true,true,{{0,4218},{4218,16011},{20229,1944}});auto wm=match(lumine,low);
+ for(int k=0;k<3;k++){assert(wm[size_t(k)].verdict==Verdict::Likely&&wm[size_t(k)].renderer==0&&wm[size_t(k)].slot==k&&has(matchLine(lumine,wm[size_t(k)],low),"its index layout is its own, not comparable with the PC full mesh"));}
+ assert(!has2(matchLine(lumine,wm[1],low),"merged")&&has(matchLine(lumine,wm[0],low),"material name and segment order agree"));
  assert(textureFormat(47)=="47 (ETC2_RGBA8)"&&textureFormat(99)=="99 (not in this build's TextureFormat)"&&materialPart("Avatar_Girl_Sword_PlayerGirl_Mat_Hair (Instance) #0")=="hair");
  if(std::getenv("TEXDIAG_PRINT")){for(auto& m:lm)std::cout<<matchLine(lumine,m,dev)<<"\n";for(auto& m:wm)std::cout<<matchLine(lumine,m,low)<<"\n";}
  if(std::getenv("TEXDIAG_PRINT"))for(auto& m:all)std::cout<<matchLine(d,m,rs)<<"\n";
