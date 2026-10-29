@@ -2,6 +2,7 @@
 #include "model.hpp"
 #include "logfmt.hpp"
 #include "render_probe.hpp"
+#include "texture_diag.hpp"
 #include "glow_trace.hpp"
 #include "logic_game.hpp"
 #include <chrono>
@@ -237,6 +238,11 @@ struct Runtime::Impl {
  struct LegacyLodProbe {std::string stamp,note;uint64_t at=0;};std::map<std::string,LegacyLodProbe> legacyLodProbes;
  std::unique_ptr<renderprobe::UnityReader> renderReader;std::unique_ptr<renderprobe::Recorder> renderRecorder;
  long long renderMarkSeen=0;bool renderControlSeen=false;uint64_t renderIdentityAt=0,renderFollowEndAt=0;
+ // Texture-only mods, phase 1 (texture_diag.hpp): files read by the worker, handed over under sm; the rest on Tick.
+ struct TexDiagFile {std::string stamp,error;std::shared_ptr<texdiag::Doc> doc;};
+ std::map<std::string,TexDiagFile> texDiagScanned,texDiagWorker,texDiagDocs;bool texDiagFresh=false;uint64_t texDiagScanAt=0,texDiagAt=0;
+ struct TexDiagSeen {std::string key;texdiag::Renderer info;};std::map<Ptr,TexDiagSeen> texDiagSeen;std::map<std::string,std::string> texDiagLogged,texDiagMatched;
+ std::unique_ptr<renderprobe::UnityReader> texDiagReader;
  struct RenderBones {std::vector<std::pair<Ptr,uint32_t>> bones;std::string error;};
  struct RenderBind {RenderBones before;unsigned depth=0;};std::map<Ptr,RenderBind> renderBinding;
  Worker worker;  // last member: destroyed (joined) first, while everything it touches still exists
@@ -260,7 +266,16 @@ struct Runtime::Impl {
   if(now>=controlAt){controlAt=now+100;try{auto file=shared+"/control.json";if(exists(file)){auto raw=text(file);if(raw!=controlRaw){controlRaw=raw;scanAt=0;
      try{auto c=parseControl(raw);logLevel.store(c.logLevel);std::lock_guard<std::mutex> l(sm);pendingControl=c;controlError.clear();}catch(const std::exception& ex){std::lock_guard<std::mutex> l(sm);controlError=ex.what();}}}}catch(const std::exception&){}}
   if(now>=scanAt){scanAt=now+1000;try{auto list=scanModels(modelRoot,scanCache);std::lock_guard<std::mutex> l(sm);scanned=std::move(list);scannedFresh=true;}catch(const std::exception&){}}
+  if(now>=texDiagScanAt){texDiagScanAt=now+2000;textureDiagScan();}
  }
+ // GIBox/texture-diag/*.json (TextureDiag.java): parsed here when its stamp changes; Tick gets the set when it differs.
+ void textureDiagScan(){std::map<std::string,TexDiagFile> now;std::error_code ec;auto dir=shared+"/"+"texture-diag";
+  if(std::filesystem::is_directory(dir,ec))for(auto& entry:std::filesystem::directory_iterator(dir,ec)){auto path=entry.path().string(),file=entry.path().filename().string();
+   if(file.empty()||file[0]=='.'||entry.path().extension()!=".json"||!entry.is_regular_file(ec)){continue;}if(now.size()>=32)break;
+   auto stamp=stampOf(path);auto old=texDiagWorker.find(path);if(old!=texDiagWorker.end()&&old->second.stamp==stamp){now[path]=old->second;continue;}
+   TexDiagFile f;f.stamp=stamp;try{f.doc=std::make_shared<texdiag::Doc>(texdiag::parse(text(path),path));f.doc->stamp=stamp;}catch(const std::exception& ex){f.error=ex.what();}now[path]=f;}
+  bool same=now.size()==texDiagWorker.size();if(same)for(auto& kv:now){auto o=texDiagWorker.find(kv.first);same=same&&o!=texDiagWorker.end()&&o->second.stamp==kv.second.stamp;}
+  if(same){return;}texDiagWorker=now;std::lock_guard<std::mutex> l(sm);texDiagScanned=std::move(now);texDiagFresh=true;}
  // urgent: the character is appearing now: its job goes ahead of the queue (once; a queued copy then finds it loaded).
  void requestLoad(const ModelInfo& m,bool urgent=false){
   auto key=m.path+"|"+m.generation;{std::lock_guard<std::mutex> l(sm);auto it=loaded.find(m.path);if(it!=loaded.end()&&it->second.generation==m.generation)return;
@@ -363,6 +378,84 @@ struct Runtime::Impl {
   if(renderFollowEndAt&&now>=renderFollowEndAt){for(auto& kv:attachments)renderSnapshot(*kv.second,"user-mark-follow-end");renderFollowEndAt=0;}
   renderIdentities(now);renderRecorder->tick(now);
  }
+
+ // ---------------------------------------------------------------- texture-only mods, phase 1: read-only diagnostics
+ // For each texture diagnostic of the controlled character: the character's renderers, their game mesh and materials
+ // (under a GIBox model too: the attachment's originals), matched against the INI rules and logged (texture-diag-*).
+ // Only getters are called. A renderer is read again only when its key changes (renderer, mesh, materials): a
+ // character switch, a rebuilt renderer, a mesh or material change; the match is logged again only when it changes.
+ // Per-submesh ranges and texture sizes come through named, signature-checked IL2CPP methods (render_probe.hpp);
+ // where the engine lacks them, the lines say so and matching uses names and counts (never "confirmed").
+ static constexpr const char* texDiagNames[]={"_MainTex","_LightMapTex","_LightMap","_LightmapTex","_Lightmap","_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex",
+  "_ShadowRampTex","_RampTex","_FaceMapTex","_MaterialMasksTex","_MTMap","_MTSpecularRamp","_EmissionTex","_DissolveTex","_FaceShadowTex"};
+ void texDiagLog(const std::string& state,const std::string& key,const std::string& line){auto& old=texDiagLogged[key];if(old==line)return;
+  if(texDiagLogged.size()>4096){texDiagLogged.clear();}texDiagLogged[key]=line;log(state,line);}
+ std::string texDiagKey(Ptr r){auto a=attachments.find(r);bool ours=a!=attachments.end()&&a->second->native==load<Ptr>(r+0x10);
+  Ptr mesh=ours?a->second->original:e.get(abi::getMesh,r);std::string k=hex(load<Ptr>(r+0x10))+"|"+hex(mesh)+"|"+(alive(mesh)?hex(load<Ptr>(mesh+0x10))+":"+std::to_string(load<uint32_t>(load<Ptr>(mesh+0x10)+8)):"-");
+  Ptr arr=ours?a->second->originalMaterials:e.get(abi::getMaterials,r);if(arr)for(Ptr m:pointers(arr,64))k+="|"+hex(m);return k;}
+ texdiag::Renderer texDiagRead(Ptr r){texdiag::Renderer info;info.renderer=r;Owned roots;
+  if(!texDiagReader)texDiagReader=std::make_unique<renderprobe::UnityReader>(e.namedExport);
+  try{info.native=load<Ptr>(r+0x10);info.name=rendererName(r);auto a=attachments.find(r);bool ours=a!=attachments.end()&&a->second->native==info.native;
+   if(ours)info.takenBy=a->second->set->name+"/"+a->second->set->parts[a->second->part].name;
+   auto sw=swapped.find(r);if(sw!=swapped.end()&&sw->second->set)info.swap=sw->second->set->name+" (textures read may be GIBox's)";
+   try{info.avatar=avatarIdentity(r);}catch(const std::exception&){}
+   Ptr mesh=ours?a->second->original:e.get(abi::getMesh,r);info.mesh=mesh;
+   if(alive(mesh)){auto fp=fingerprint(mesh,true);info.meshName=fp.mesh;info.vertices=fp.vertices;info.submeshes=fp.submeshes;info.bones=fp.bones;info.lod=lowerLod(fp.mesh);
+    info.layout=texDiagReader->meshLayout(mesh);}
+   else info.error="no live mesh";
+   Ptr arr=ours?a->second->originalMaterials:e.get(abi::getMaterials,r);if(arr){pin(roots,arr);
+    for(Ptr m:pointers(arr,64)){texdiag::Material mat;mat.material=m;
+     try{require(alive(m),"material destroyed");mat.name=name(m);Ptr sh=e.get(glow::rvaGetShader,m);mat.shader=alive(sh)?name(sh):"none";
+      std::map<int32_t,std::string> named;for(auto* n:texDiagNames)named[slotId(n)]=n;
+      std::vector<int32_t> ids;Ptr idArr=e.get(glow::rvaGetTextureIds,m);
+      if(idArr){pin(roots,idArr);auto n=length(idArr,64);for(uint64_t i=0;i<n;i++)ids.push_back(load<int32_t>(idArr+0x20+4*i));}
+      else{mat.error="texture property list unavailable; candidate names checked instead";for(auto* n:texDiagNames)if(e.call<uint32_t>(abi::hasProperty,m,managedName(n),Ptr(0))&1u)ids.push_back(slotId(n));}
+      for(int32_t id:ids){texdiag::Texture t;auto nm=named.find(id);t.property=nm==named.end()?"#"+std::to_string(id):nm->second;t.id=id;t.texture=e.call<Ptr>(glow::rvaGetTexture,m,id,Ptr(0));
+       if(t.texture&&alive(t.texture)){t.name=name(t.texture);auto l=texDiagReader->textureLayout(t.texture);
+        t.cls=l.cls;t.width=l.width;t.height=l.height;t.mips=l.mips;t.format=l.format;if(l.status!="read")t.status=l.status;}
+       else if(t.texture)t.status="texture destroyed";
+       mat.textures.push_back(std::move(t));}}
+     catch(const std::exception& ex){mat.error=ex.what();}
+     info.materials.push_back(std::move(mat));}}
+   else info.error+=(info.error.empty()?"":"; ")+std::string("no material array");}
+  catch(const std::exception& ex){info.error+=(info.error.empty()?"":"; ")+std::string(ex.what());}
+  freeOwned(roots);return info;}
+ void textureDiagTick(uint64_t now){
+  {std::lock_guard<std::mutex> l(sm);if(texDiagFresh){texDiagFresh=false;
+    for(auto& kv:texDiagDocs)if(!texDiagScanned.count(kv.first))log("texture-diag-ini",kv.first+": removed");
+    texDiagDocs=texDiagScanned;texDiagMatched.clear();texDiagLogged.clear();texDiagSeen.clear();   // a new or changed file: everything logged once more
+    for(auto& kv:texDiagDocs){auto& f=kv.second;if(!f.doc){texDiagLog("texture-diag-unsupported","file|"+kv.first,kv.first+": "+f.error);continue;}auto& d=*f.doc;
+     std::string vars,others;for(auto& v:d.variables)vars+=(vars.empty()?"":"; ")+v;for(auto& o:d.others)others+=(others.empty()?"":"; ")+o;
+     texDiagLog("texture-diag-ini","doc|"+kv.first,d.name+": "+kv.first+" stamp "+f.stamp+", INI "+d.ini+", character "+std::to_string(d.character)+", "+std::to_string(d.rules.size())+" rules, "+std::to_string(d.resources.size())+" resources"
+      +(vars.empty()?"":", variables: "+vars)+(others.empty()?"":", other INIs: "+others)+"; read-only, nothing is replaced");
+     for(auto& r:d.rules)texDiagLog("texture-diag-ini","rule|"+kv.first+"|"+r.section,texdiag::ruleLine(d,r));
+     for(auto& n:d.notes)texDiagLog("texture-diag-ini","note|"+kv.first+"|"+n,d.name+": "+n);}}}
+  if(texDiagDocs.empty()){texDiagSeen.clear();return;}
+  if(now<texDiagAt){return;}texDiagAt=now+1000;
+  if(!ch.entity){return;}
+  std::vector<const texdiag::Doc*> docs;std::string waiting;for(auto& kv:texDiagDocs)if(kv.second.doc){auto& d=*kv.second.doc;if(!d.character||d.character==ch.config)docs.push_back(&d);else waiting+=(waiting.empty()?"":", ")+d.name+" ("+std::to_string(d.character)+")";}
+  if(docs.empty()){texDiagLog("texture-diag-wait","wait",std::to_string(ch.config)+" is controlled; texture diagnostics wait for: "+waiting);return;}
+  std::vector<Ptr> world;try{world=worldRenderers();}catch(const std::exception& ex){texDiagLog("texture-diag-unsupported","world",std::string("character renderers unreadable: ")+ex.what());return;}
+  std::set<Ptr> present;unsigned reads=0;std::vector<texdiag::Renderer> live;
+  for(Ptr r:world){if(live.size()>=64)break;try{if(!alive(r))continue;present.insert(r);auto key=texDiagKey(r);auto& seen=texDiagSeen[r];
+    if(seen.key!=key){if(reads>=8)continue;reads++;seen.key=key;seen.info=texDiagRead(r);
+     texDiagLog("texture-diag-renderer","r|"+hex(seen.info.native),texdiag::rendererLine(seen.info,ch.config));
+     auto subs=texdiag::submeshLines(seen.info);for(size_t i=0;i<subs.size();i++)texDiagLog("texture-diag-submesh","s|"+hex(seen.info.native)+"|"+std::to_string(i),subs[i]);
+     if(seen.info.layout.status!="read")texDiagLog("texture-diag-unsupported","layout|"+hex(seen.info.native),texdiag::label(seen.info)+": per-submesh indexStart/indexCount not read ("+seen.info.layout.status+"); rules on it are matched by name and counts only, never confirmed");
+     auto mats=texdiag::materialLines(seen.info);for(size_t i=0;i<mats.size();i++)texDiagLog("texture-diag-material","m|"+hex(seen.info.native)+"|"+std::to_string(i),mats[i]);}
+    live.push_back(seen.info);}
+   catch(const std::exception& ex){texDiagLog("texture-diag-unsupported","read|"+hex(r),"renderer "+hex(r)+": "+ex.what());}}
+  for(auto it=texDiagSeen.begin();it!=texDiagSeen.end();)if(!present.count(it->first))it=texDiagSeen.erase(it);else ++it;
+  if(reads>=8)return;   // the rest next second, then one match over all of them
+  // Materials on several renderers: phase 2 must copy per renderer.
+  std::map<Ptr,std::vector<size_t>> users;for(size_t i=0;i<live.size();i++)for(auto& m:live[i].materials)users[m.material].push_back(i);
+  for(size_t i=0;i<live.size();i++)for(auto& m:live[i].materials)for(size_t j:users[m.material])if(j!=i)m.sharedWith.push_back(texdiag::label(live[j]));
+  std::string stamp;for(auto& r:live)stamp+=texDiagSeen[r.renderer].key+";";
+  for(auto* d:docs){auto& last=texDiagMatched[d->path];if(last==d->stamp+"|"+stamp)continue;last=d->stamp+"|"+stamp;
+   auto matches=texdiag::match(*d,live);unsigned counts[5]={0,0,0,0,0};
+   for(auto& m:matches){counts[int(m.verdict)]++;if(m.verdict==texdiag::Verdict::Skipped)continue;texDiagLog("texture-diag-match","match|"+d->path+"|"+d->rules[m.rule].section,texdiag::matchLine(*d,m,live));}
+   texDiagLog("texture-diag-match","sum|"+d->path,d->name+": "+std::to_string(live.size())+" renderers of "+std::to_string(ch.config)+": "+std::to_string(counts[0])+" 确定匹配, "+std::to_string(counts[1])+" 高可信候选, "
+    +std::to_string(counts[2])+" 存在歧义, "+std::to_string(counts[3])+" 无法匹配, "+std::to_string(counts[4])+" without textures; nothing was replaced (phase 1)");}}
 
  // ---------------------------------------------------------------- switch-in glow trace (debug + experiments.glowTrace)
  // The hooks (glow_trace.hpp) keep every write to the objects registered here: each attachment's renderer, its
@@ -1925,6 +2018,7 @@ struct Runtime::Impl {
    wantedNow.clear();bindingTargets.clear();bindingReady=false;if(!worker.background()){workerTick(now);}consume();ch=current();renderTick(now);bindingStats();
    if(ch.config!=shownCharacter){shownCharacter=ch.config;log("character",ch.entity?std::to_string(ch.config):std::string("none"));}
    glowTick();
+   try{textureDiagTick(now);}catch(const std::exception& ex){log("texture-diag-unsupported",std::string("diagnostics stopped this round: ")+ex.what());}
    // Reuse the verified Type discovery only here, on the existing serial Tick.
    // Diagnostic hooks never call Runtime::Impl and never scan all objects.
    if(handoff::canSeed()&&now>=handoffTypeRetry){handoffTypeRetry=now+1000;
@@ -2005,5 +2099,5 @@ void Runtime::spawned(Ptr go)noexcept{glow::OwnScope own;try{p->spawned(go);}cat
 void Runtime::spawnedAfter()noexcept{glow::OwnScope own;try{p->spawnedAfter();}catch(...){}}
 Ptr Runtime::bindMesh(Ptr renderer,Ptr mesh)noexcept{glow::OwnScope own;try{return p->bindMesh(renderer,mesh);}catch(...){return mesh;}}
 void Runtime::meshBound(Ptr renderer)noexcept{glow::OwnScope own;try{p->meshBound(renderer);}catch(...){}}
-void Runtime::shutdown(){glow::OwnScope own;glow::trace().armed.store(false);handoff::disarm();p->renderBinding.clear();p->renderRecorder.reset();p->renderReader.reset();if(p->releaseAll()){p->pruneRestoreBackups(true);p->freeOwned(p->handoffTypeRoots);p->freeOwned(p->slotRoots);p->slotBlock=0;}}
+void Runtime::shutdown(){glow::OwnScope own;glow::trace().armed.store(false);handoff::disarm();p->renderBinding.clear();p->renderRecorder.reset();p->renderReader.reset();p->texDiagReader.reset();if(p->releaseAll()){p->pruneRestoreBackups(true);p->freeOwned(p->handoffTypeRoots);p->freeOwned(p->slotRoots);p->slotBlock=0;}}
 }

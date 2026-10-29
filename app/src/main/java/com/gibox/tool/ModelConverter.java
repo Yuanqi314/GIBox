@@ -1072,11 +1072,22 @@ public final class ModelConverter {
         /** Character name tokens (model.json "character.names") for a conversion without skeleton library; the runtime finds the character by its skeleton names
          *  (with an ID: the character's model name, so it is also found on the party and detail pages before it was on the field). */
         public Options names(List<String> n){names=new ArrayList<>(n);return this;}
+        /** Where a texture-only mod's read-only diagnostic goes (GIBox/texture-diag, TextureDiag); null: none. */
+        public File textureDiag=null;
+        public Options textureDiag(File dir){textureDiag=dir;return this;}
     }
+    /** A texture-only mod: its read-only diagnostic written for the game side (phase 1, nothing is replaced); the
+     *  sentence that says so, for the refusal. Called only when the refusal is certain. */
+    private static String textureDiag(File src,Ini ini,int id,File dest,Options o,StringBuilder log){if(o.textureDiag==null)return "";
+        try{Map<String,Object> doc=TextureDiag.analyze(src,ini.file,id,dest.getName(),log);File f=TextureDiag.write(o.textureDiag,dest.getName(),doc);log.append("纯贴图诊断已写出：").append(f.getPath()).append('\n');
+            return "。已写出只读诊断 "+TextureDiag.DIR+"/"+f.getName()+"：进游戏让该角色出场，日志里的 texture-diag-* 记录 INI 规则和游戏渲染器、子网格、材质槽的对应情况；这一阶段不改变画面";}
+        catch(Exception e){log.append("纯贴图诊断未写出：").append(e.getMessage()).append('\n');return "（只读诊断未写出："+e.getMessage()+"）";}}
     private static int generationCounter=0;
     /** Converts one PC mod into one GIBox model folder. Variant combinations share the vertices; each has its own draws. */
     public static File convert(File src,File boneDir,File dest,int id,Options o,TextureDecoder decoder,StringBuilder log)throws Exception {
         Ini ini=new Ini(src,o.ini);List<Bones> bones;
+        // A mod that converts (or fails for another reason) leaves no texture-only diagnostic of an earlier import behind.
+        if(o.textureDiag!=null&&!textureOnly(ini))TextureDiag.remove(o.textureDiag,dest.getName());
         log.append("模型主 INI：").append(ini.file.getName()).append('\n');
         for(File sibling:ModConfig.allInis(src))if(!sibling.getCanonicalFile().equals(ini.file.getCanonicalFile()))log.append("未导入辅助 INI：").append(src.toPath().relativize(sibling.toPath())).append("（帮助、菜单或独立贴图配置；不包含在本次模型转换中）\n");
         if(o.variants)for(Map.Entry<String,TreeSet<Integer>> e:ini.excludedChoices.entrySet())
@@ -1123,7 +1134,7 @@ public final class ModelConverter {
         try{
             if(o.core!=null)coreDraws(ini,src,kept,map,o.core,log);
             memoryBudget(ini,src,bones,map,kept,o.fallback,log);Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
-            check(!b.groups.isEmpty()||!textureOnly(ini),"所选 INI "+ini.file.getName()+" 是纯贴图 MOD：只把贴图换到游戏自己的模型上，没有自己的网格（IB 和顶点缓冲）。GIBox 还不支持纯贴图 MOD；脸部贴图（FaceHeadDiffuse）目前只在带网格的 MOD 里随网格一起替换");
+            if(b.groups.isEmpty()&&textureOnly(ini))check(false,"所选 INI "+ini.file.getName()+" 是纯贴图 MOD：只把贴图换到游戏自己的模型上，没有自己的网格（IB 和顶点缓冲）。GIBox 还不支持纯贴图 MOD；脸部贴图（FaceHeadDiffuse）目前只在带网格的 MOD 里随网格一起替换"+textureDiag(src,ini,id,dest,o,log));
             check(!b.groups.isEmpty(),"所选 INI "+ini.file.getName()+" 没有可转换的模型绘制："+(o.variants?"已开启款式枚举；请检查是否为纯贴图配置、部件全部跳过或依赖未支持的外部绘制命令":"当前只转换默认款式；可在手动转换中开启‘转换全部款式’，并检查部件映射及外部绘制命令"));
             Set<String> shown=new LinkedHashSet<>();
             Object replaceWhen=null;

@@ -24,9 +24,11 @@ class UnityReader {
  using TypeName=char*(*)(Ptr);using Free=void(*)(void*);using Invoke=Ptr(*)(Ptr,Ptr,void**,Ptr*);
  using New=Ptr(*)(Ptr);using Unbox=void*(*)(Ptr);using Pin=uint32_t(*)(Ptr,bool);using Unpin=void(*)(uint32_t);
  using StringLength=int32_t(*)(Ptr);using StringChars=const uint16_t*(*)(Ptr);using ArrayLength=uintptr_t(*)(Ptr);
+ using ObjectClass=Ptr(*)(Ptr);using ClassParent=Ptr(*)(Ptr);using ClassText=const char*(*)(Ptr);
  Domain domain{};Assemblies assemblies{};Image image{};Class klass{};Methods methods{};Name methodName{};
  Count paramCount{};Param param{};Image returnType{};TypeName typeName{};Free release{};Invoke invoke{};
  New objectNew{};Unbox unbox{};Pin pin{};Unpin unpin{};StringLength stringLength{};StringChars stringChars{};ArrayLength arrayLength{};
+ ObjectClass objectClass{};ClassParent classParent{};ClassText className{},classNamespace{};std::map<std::string,Ptr> inheritedCache;
  std::map<std::string,Ptr> classes;std::map<std::string,Ptr> methodCache;
  struct Property {int id,type;std::string name;};
  struct Schema {Ptr shader=0;uint32_t root=0;std::string key;std::vector<Property> properties;};
@@ -39,6 +41,9 @@ class UnityReader {
   symbol(typeName,"il2cpp_type_get_name");symbol(release,"il2cpp_free");symbol(invoke,"il2cpp_runtime_invoke");
   symbol(objectNew,"il2cpp_object_new",false);symbol(unbox,"il2cpp_object_unbox");symbol(pin,"il2cpp_gchandle_new");symbol(unpin,"il2cpp_gchandle_free");
   symbol(stringLength,"il2cpp_string_length");symbol(stringChars,"il2cpp_string_chars");symbol(arrayLength,"il2cpp_array_length",false);
+  // Optional: the object's own class and its parents, so a method is looked up on the class the object really has.
+  symbol(objectClass,"il2cpp_object_get_class",false);symbol(classParent,"il2cpp_class_get_parent",false);
+  symbol(className,"il2cpp_class_get_name",false);symbol(classNamespace,"il2cpp_class_get_namespace",false);
   return unavailable.empty();}
  struct Roots {UnityReader& r;std::vector<uint32_t> handles;
   explicit Roots(UnityReader& x):r(x){}~Roots(){for(auto h:handles)r.unpin(h);}
@@ -99,7 +104,66 @@ class UnityReader {
     out[key]=has?property(roots,"MaterialPropertyBlock",b,p):"absent";}
    // MPB is managed; its own finalizer releases its native copy after roots are dropped. Never write it to Renderer.
   }catch(const std::exception& ex){out[prefix+"status"]=missing(ex.what());}}
+ // The class chain of a live object, most derived first ("UnityEngine.Texture2D", "UnityEngine.Texture", ...).
+ std::vector<std::pair<Ptr,std::string>> classChain(Ptr obj){require(objectClass&&classParent&&className&&classNamespace,"missing export il2cpp_object_get_class / il2cpp_class_get_parent / il2cpp_class_get_name / il2cpp_class_get_namespace");
+  require(obj&&load<Ptr>(obj+0x10),"object expired");std::vector<std::pair<Ptr,std::string>> out;Ptr c=objectClass(obj);require(c!=0,"object class unavailable");
+  for(unsigned depth=0;c&&depth<16;depth++,c=classParent(c)){const char* n=className(c);const char* ns=classNamespace(c);out.push_back({c,std::string(ns&&*ns?std::string(ns)+".":"")+(n?n:"?")});}return out;}
+ static bool is(const std::vector<std::pair<Ptr,std::string>>& chain,const char* cls){for(auto& c:chain)if(c.second==cls)return true;return false;}
+ // A method by name, parameter and return types, on the object's class or the nearest parent that declares it
+ // (an override is found before the method it overrides). The same signature checks as method().
+ Ptr inherited(const std::vector<std::pair<Ptr,std::string>>& chain,const std::string& name,const std::vector<std::string>& args,const std::string& result){
+  require(!chain.empty(),"class chain");auto key=pointer(chain[0].first)+"::"+name+"->"+result;for(auto& a:args)key+="|"+a;
+  auto old=inheritedCache.find(key);if(old!=inheritedCache.end())return old->second;require(inheritedCache.size()<4096,"method cache bound");Ptr found=0;
+  for(auto& c:chain){void* it=nullptr;unsigned bounded=0;
+   while(Ptr m=methods(c.first,&it)){require(++bounded<=4096,"Unity method enumeration bound");const char* n=methodName(m);
+    if(!n||name!=n||paramCount(m)!=args.size()||type(returnType(m))!=result)continue;
+    bool same=true;for(size_t i=0;i<args.size();i++)same=same&&type(param(m,uint32_t(i)))==args[i];
+    if(same){require(!found,"ambiguous Unity method "+c.second+"::"+name);found=m;}}
+   if(found)break;}
+  inheritedCache[key]=found;return found;}
+ Ptr invokeOn(Roots& roots,const std::vector<std::pair<Ptr,std::string>>& chain,Ptr self,const std::string& name,const std::vector<std::string>& types,const std::string& result,std::vector<void*> args={}){
+  Ptr m=inherited(chain,name,types,result);require(m!=0,"no method "+name+"("+[&]{std::string t;for(auto& x:types)t+=(t.empty()?"":",")+x;return t;}()+") -> "+result+" on "+chain[0].second+" or its parents (stripped or not in this engine)");
+  Ptr exception=0;Ptr out=invoke(m,self,args.empty()?nullptr:args.data(),&exception);require(exception==0,"managed exception in "+chain[0].second+"::"+name);return roots.add(out);}
+ // A boxed enum as the engine names it (System.Enum.ToString on the boxed value) plus its number.
+ std::string enumText(Roots& roots,Ptr boxed){int v=value<int>(boxed);std::string n=read([&]{auto chain=classChain(boxed);return string(invokeOn(roots,chain,boxed,"ToString",{},"System.String"));});
+  return std::to_string(v)+(n.find("未采集:")==0?"":" ("+n+")");}
  public:
+ // Per-submesh layout of a Mesh, through the engine's own managed Mesh methods (by name and signature; no RVA, no
+ // native layout). Each value is read on its own: one the engine lacks is reported, the others are still read.
+ struct Submesh {bool known=false;uint32_t start=0,count=0;std::string base,topology,error;};
+ struct MeshLayout {std::string status,cls,submeshCount,vertexCount,readable,indexFormat;int submeshes=-1;std::vector<Submesh> subs;};
+ MeshLayout meshLayout(Ptr mesh,unsigned limit=64){MeshLayout out;
+  if(!init()){out.status=missing(unavailable);return out;}
+  try{Roots roots(*this);roots.add(mesh);auto chain=classChain(mesh);out.cls=chain[0].second;require(is(chain,"UnityEngine.Mesh"),"not a UnityEngine.Mesh: "+out.cls);
+   auto i32=[&](const char* n){return read([&]{return std::to_string(value<int>(invokeOn(roots,chain,mesh,n,{},"System.Int32")));});};
+   out.submeshCount=i32("get_subMeshCount");out.vertexCount=i32("get_vertexCount");
+   out.readable=read([&]{return value<bool>(invokeOn(roots,chain,mesh,"get_isReadable",{},"System.Boolean"))?std::string("true"):std::string("false");});
+   out.indexFormat=read([&]{return enumText(roots,invokeOn(roots,chain,mesh,"get_indexFormat",{},"UnityEngine.Rendering.IndexFormat"));});
+   if(out.submeshCount.find("未采集:")==0){out.status="submesh layout unavailable: "+out.submeshCount;return out;}
+   int n=std::stoi(out.submeshCount);out.submeshes=n;if(n<0||unsigned(n)>limit){out.status="submesh count "+std::to_string(n)+" outside 0.."+std::to_string(limit)+"; not read";return out;}
+   for(int i=0;i<n;i++){Submesh sm;int k=i;
+    try{sm.start=value<uint32_t>(invokeOn(roots,chain,mesh,"GetIndexStart",{"System.Int32"},"System.UInt32",{&k}));
+     sm.count=value<uint32_t>(invokeOn(roots,chain,mesh,"GetIndexCount",{"System.Int32"},"System.UInt32",{&k}));sm.known=true;}
+    catch(const std::exception& ex){sm.error=ex.what();}
+    sm.base=read([&]{return std::to_string(value<uint32_t>(invokeOn(roots,chain,mesh,"GetBaseVertex",{"System.Int32"},"System.UInt32",{&k})));});
+    sm.topology=read([&]{return enumText(roots,invokeOn(roots,chain,mesh,"GetTopology",{"System.Int32"},"UnityEngine.MeshTopology",{&k}));});
+    out.subs.push_back(std::move(sm));}
+   out.status="read";}
+  catch(const std::exception& ex){out.status=missing(ex.what());}
+  return out;}
+ // Size and format of a texture, the same way; format only through the class the object really is.
+ struct TextureLayout {std::string status,cls,width,height,mips,format;};
+ TextureLayout textureLayout(Ptr tex){TextureLayout out;
+  if(!init()){out.status=missing(unavailable);return out;}
+  try{Roots roots(*this);roots.add(tex);auto chain=classChain(tex);out.cls=chain[0].second;require(is(chain,"UnityEngine.Texture"),"not a UnityEngine.Texture: "+out.cls);
+   auto i32=[&](const char* n){return read([&]{return std::to_string(value<int>(invokeOn(roots,chain,tex,n,{},"System.Int32")));});};
+   out.width=i32("get_width");out.height=i32("get_height");
+   if(is(chain,"UnityEngine.Texture2D")){out.mips=i32("get_mipmapCount");out.format=read([&]{return enumText(roots,invokeOn(roots,chain,tex,"get_format",{},"UnityEngine.TextureFormat"));});}
+   else if(is(chain,"UnityEngine.RenderTexture")){out.mips=missing("render texture");out.format=read([&]{return enumText(roots,invokeOn(roots,chain,tex,"get_format",{},"UnityEngine.RenderTextureFormat"));});}
+   else{out.mips=missing("not a Texture2D");out.format=missing("format is read only on Texture2D / RenderTexture ("+out.cls+")");}
+   out.status="read";}
+  catch(const std::exception& ex){out.status=missing(ex.what());}
+  return out;}
  explicit UnityReader(std::function<Ptr(const char*)> f):lookup(std::move(f)){}
  ~UnityReader(){if(unpin)for(auto& x:schemas)unpin(x.second.root);}
  const std::map<std::string,std::string>& descriptions()const{return schemaText;}

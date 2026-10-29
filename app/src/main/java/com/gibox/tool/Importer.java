@@ -136,7 +136,7 @@ public final class Importer {
         // full model the mod is made for: it is not used. The game records the full model the next time the character appears.
         String lodLibrary = recorded != null ? recorded.lodMesh : ""; if (!lodLibrary.isEmpty()) recorded = null;
         ModelConverter.Options opt = new ModelConverter.Options().mapping(o.containsKey("map") ? o.get("map") : "").variants(true).replace(true).fallback("Body").ini(ini);
-        opt.animationBoneFallback(animationBoneFallback(mod));
+        opt.animationBoneFallback(animationBoneFallback(mod)).textureDiag(textureDiagDir(modelsRoot));
         opt.core(request -> { try { return NativeBridge.draws(request); } catch (UnsatisfiedLinkError e) { throw new IllegalStateException("3dm 后端不可用：" + e.getMessage()); } });
         opt.rehearsal(request -> { try { return NativeBridge.rehearse(request); } catch (UnsatisfiedLinkError e) { throw new IllegalStateException("逻辑核心预演不可用：" + e.getMessage()); } });
         if (o.containsKey("ini")) log.append("INI 方案：").append(o.get("ini")).append('\n');
@@ -178,6 +178,9 @@ public final class Importer {
         }
         return new ArrayList<>(byName.values());
     }
-    /** Removes the mod's copy in the Mods folder and its converted model. */
+    /** GIBox/texture-diag, next to the models folder: read-only diagnostics of texture-only mods (TextureDiag). */
+    public static File textureDiagDir(File modelsRoot) { return new File(modelsRoot.getAbsoluteFile().getParentFile(), TextureDiag.DIR); }
+    /** Removes the mod's copy in the Mods folder, its converted model and a texture-only diagnostic of that name. */
     public static void delete(Mod m) throws Exception { if (m.model != null) ModelConverter.remove(m.model); if (m.source != null) ModelConverter.remove(m.source); }
+    public static void delete(Mod m, File modelsRoot) throws Exception { delete(m); TextureDiag.remove(textureDiagDir(modelsRoot), m.name); }
 }

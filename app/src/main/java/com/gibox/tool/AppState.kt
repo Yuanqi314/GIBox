@@ -339,7 +339,7 @@ class AppState(private val activity: Activity) {
             title = "删除 ${label(mod.name)}", text = "删除 Mods 里的这份 MOD 和转换好的模型？导入时选的原文件不受影响。",
             confirm = "删除", dismiss = "取消", destructive = true,
             onConfirm = {
-                try { Control.disable(game, mod.name); Importer.delete(mod); Labels.set(labelsFile, mod.name, null); AppLog.info(game, LOGGER, "删除 ${mod.name}") }
+                try { Control.disable(game, mod.name); Importer.delete(mod, modelsRoot); Labels.set(labelsFile, mod.name, null); AppLog.info(game, LOGGER, "删除 ${mod.name}") }
                 catch (e: Throwable) { fail("删除", e, null) }
                 if (stack.lastOrNull() == Screen.Detail(mod.name)) closeTop()
                 refresh()

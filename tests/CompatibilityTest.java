@@ -163,6 +163,18 @@ public final class CompatibilityTest {
         File tex=GimiPatternsTest.mod(base,"texture-only","[Constants]\nglobal $active\n[TextureOverrideBodyA]\nhash = d5ae71a3\nmatch_first_index = 0\nResource\\GIMI\\Diffuse = ref ResourceBodyDiffuse\nrun = CommandList\\GIMI\\SetTextures\n[TextureOverrideEyes]\nhash = 848c5980\nps-t1 = ResourceBodyDiffuse\n[ResourceBodyDiffuse]\nfilename = CitlaliHeadDiffuse.dds\n");
         StringBuilder tl=new StringBuilder();String why="";try{ModelConverter.convert(tex,null,new File(base,"texture-only-out"),10000107,new ModelConverter.Options().variants(true).core(core),DECODE,tl);}catch(IllegalArgumentException e){why=e.getMessage();}
         ok(why.contains("是纯贴图 MOD")&&!tl.toString().contains("未导入辅助 INI：Citlali.ini")&&tl.toString().contains("3dm 后端未用于本次转换：INI 没有模型绘制"),"a texture-only mod is named as one: "+why+"\n"+tl);
+        // With a diagnostic folder (the App's GIBox/texture-diag): the INI's rules written for the game side, read-only;
+        // a later conversion under that name that is not texture-only takes the stale diagnostic away.
+        File diagDir=new File(base,"texture-diag");StringBuilder dl=new StringBuilder();String dwhy="";
+        try{ModelConverter.convert(tex,null,new File(base,"texture-only-diag"),10000107,new ModelConverter.Options().variants(true).textureDiag(diagDir),DECODE,dl);}catch(IllegalArgumentException e){dwhy=e.getMessage();}
+        File diag=new File(diagDir,"texture-only-diag.json");Map<String,Object> dj=diag.isFile()?Json.obj(Json.read(diag,4L<<20),"diag"):new LinkedHashMap<>();
+        List<Object> drules=dj.containsKey("rules")?Json.arr(dj.get("rules"),"rules",0,100):new ArrayList<>();
+        ok(dwhy.contains("是纯贴图 MOD")&&dwhy.contains("已写出只读诊断 texture-diag/texture-only-diag.json")&&"gibox-texture-diag".equals(dj.get("format"))&&drules.size()==2
+            &&String.valueOf(drules.get(0)).contains("first=0")&&String.valueOf(drules.get(0)).contains("kind=segment")&&String.valueOf(drules.get(0)).contains("role=diffuse")&&String.valueOf(drules.get(0)).contains("external=[CommandList\\GIMI\\SetTextures]")
+            &&String.valueOf(drules.get(1)).contains("kind=hash-unknown")&&String.valueOf(drules.get(1)).contains("slot=ps-t1")&&dl.toString().contains("texture-diag-ini TextureOverrideBodyA: hash=d5ae71a3 match_first_index=0 kind=segment")
+            &&!new File(base,"texture-only-diag").exists(),"a texture-only mod gets its read-only diagnostic: "+dwhy+"\n"+dl+"\n"+dj);
+        ModelConverter.convert(src,null,new File(base,"texture-only-diag"),10000107,new ModelConverter.Options().textureDiag(diagDir),DECODE,new StringBuilder());
+        ok(!diag.exists(),"a mod that converts leaves no texture diagnostic of that name");
         StringBuilder failed=new StringBuilder();ModelConverter.convert(src,null,new File(base,"backend-failed"),10000107,new ModelConverter.Options().core(r->"{\"ok\":false,\"reason\":\"no core\"}"),DECODE,failed);
         ok(failed.toString().contains("3dm 后端未用于本次转换：逻辑核心不能运行这个 INI：no core；按转换器自己的求值"),"a core that cannot run leaves the converter's own evaluation: "+failed);
     }

@@ -11,6 +11,8 @@ flags=['-std=c++17','-Wall','-Wextra','-Werror','-Iapp/src/main/cpp','-Ithird_pa
 run(['g++',*flags,'tests/core_test.cpp','app/src/main/cpp/runtime.cpp','app/src/main/cpp/dds.cpp','-o',out/'core_test'])
 run([out/'core_test'])
 run(['g++',*flags,'-pthread','tests/glow_test.cpp','-o',out/'glow_test'])
+run(['g++',*flags,'tests/texture_diag_test.cpp','-o',out/'texture_diag_test'])
+run([out/'texture_diag_test'])
 run(['g++',*flags,'tests/migoto_test.cpp','-o',out/'migoto_test'])
 run([out/'migoto_test'])
 run(['g++',*flags,'tests/migoto_parity.cpp','-o',out/'migoto_parity'])
