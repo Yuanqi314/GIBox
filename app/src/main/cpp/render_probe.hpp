@@ -131,7 +131,7 @@ class UnityReader {
  // Per-submesh layout of a Mesh, through the engine's own managed Mesh methods (by name and signature; no RVA, no
  // native layout). Each value is read on its own: one the engine lacks is reported, the others are still read.
  struct Submesh {bool known=false;uint32_t start=0,count=0;std::string base,topology,error;};
- struct MeshLayout {std::string status,cls,submeshCount,vertexCount,readable,indexFormat;int submeshes=-1;std::vector<Submesh> subs;};
+ struct MeshLayout {std::string status,cls,source,submeshCount,vertexCount,readable,indexFormat;int submeshes=-1;std::vector<Submesh> subs;};
  MeshLayout meshLayout(Ptr mesh,unsigned limit=64){MeshLayout out;
   if(!init()){out.status=missing(unavailable);return out;}
   try{Roots roots(*this);roots.add(mesh);auto chain=classChain(mesh);out.cls=chain[0].second;require(is(chain,"UnityEngine.Mesh"),"not a UnityEngine.Mesh: "+out.cls);
@@ -148,7 +148,7 @@ class UnityReader {
     sm.base=read([&]{return std::to_string(value<uint32_t>(invokeOn(roots,chain,mesh,"GetBaseVertex",{"System.Int32"},"System.UInt32",{&k})));});
     sm.topology=read([&]{return enumText(roots,invokeOn(roots,chain,mesh,"GetTopology",{"System.Int32"},"UnityEngine.MeshTopology",{&k}));});
     out.subs.push_back(std::move(sm));}
-   out.status="read";}
+   out.status="read";out.source="IL2CPP named methods";}
   catch(const std::exception& ex){out.status=missing(ex.what());}
   return out;}
  // Size and format of a texture, the same way; format only through the class the object really is.

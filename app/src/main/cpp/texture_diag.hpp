@@ -73,6 +73,21 @@ inline std::string letters(const std::string& s){std::string o;for(unsigned char
 // How well a part hint names a renderer: the length of the renderer's name when the hint ends or starts with it.
 inline size_t nameScore(const std::string& hint,const std::string& renderer){auto h=letters(hint),r=letters(normalize(renderer));if(r.empty()||h.empty())return 0;
  bool end=h.size()>=r.size()&&h.compare(h.size()-r.size(),r.size(),r)==0,start=h.compare(0,r.size(),r)==0;return end||start?r.size():0;}
+// The part a game material is made for: "Avatar_Girl_Sword_PlayerGirl_Mat_Hair (Instance) #0" -> "hair".
+inline std::string materialPart(const std::string& name){std::string n;for(unsigned char c:name)n+=char(std::tolower(c));
+ for(const char* cut:{" (instance)","#"}){auto p=n.find(cut);if(p!=std::string::npos)n.resize(p);}auto p=n.rfind("_mat_");return letters(p==std::string::npos?std::string():n.substr(p+5));}
+// How well a part hint names a material's part. GIMI calls the game's hair part "Head" (its Head draws use the game's
+// Hair textures): that naming convention is the one alias, and the reason says so.
+inline size_t partScore(const std::string& hint,const std::string& part,bool* alias=nullptr){if(part.empty())return 0;auto s=nameScore(hint,part);if(alias)*alias=false;
+ if(!s&&part=="hair"&&nameScore(hint,"head")){if(alias)*alias=true;return 4;}return s;}
+// Texture2D.format as this build's TextureFormat enum names it (dump.cs).
+inline std::string textureFormat(int f){static const std::map<int,const char*> names{{1,"Alpha8"},{2,"ARGB4444"},{3,"RGB24"},{4,"RGBA32"},{5,"ARGB32"},{7,"RGB565"},{9,"R16"},{10,"DXT1"},{12,"DXT5"},
+  {13,"RGBA4444"},{14,"BGRA32"},{15,"RHalf"},{16,"RGHalf"},{17,"RGBAHalf"},{18,"RFloat"},{19,"RGFloat"},{20,"RGBAFloat"},{21,"YUY2"},{22,"RGB9e5Float"},{24,"BC6H"},{25,"BC7"},{26,"BC4"},{27,"BC5"},
+  {28,"DXT1Crunched"},{29,"DXT5Crunched"},{30,"PVRTC_RGB2"},{31,"PVRTC_RGBA2"},{32,"PVRTC_RGB4"},{33,"PVRTC_RGBA4"},{34,"ETC_RGB4"},{35,"ATC_RGB4"},{36,"ATC_RGBA8"},{41,"EAC_R"},{42,"EAC_R_SIGNED"},
+  {43,"EAC_RG"},{44,"EAC_RG_SIGNED"},{45,"ETC2_RGB"},{46,"ETC2_RGBA1"},{47,"ETC2_RGBA8"},{48,"ASTC_RGB_4x4"},{49,"ASTC_RGB_5x5"},{50,"ASTC_RGB_6x6"},{51,"ASTC_RGB_8x8"},{52,"ASTC_RGB_10x10"},
+  {53,"ASTC_RGB_12x12"},{54,"ASTC_RGBA_4x4"},{55,"ASTC_RGBA_5x5"},{56,"ASTC_RGBA_6x6"},{57,"ASTC_RGBA_8x8"},{58,"ASTC_RGBA_10x10"},{59,"ASTC_RGBA_12x12"},{60,"ETC_RGB4_3DS"},{61,"ETC_RGBA8_3DS"},
+  {62,"RG16"},{63,"R8"},{64,"ETC_RGB4Crunched"},{65,"ETC2_RGBA8Crunched"},{66,"R16Unorm"},{67,"RUInt"},{68,"R8UInt"},{70,"RGBAUInt"}};
+ auto it=names.find(f);return std::to_string(f)+" ("+(it==names.end()?"not in this build's TextureFormat":it->second)+")";}
 inline std::string hexOf(Ptr p){char b[24];std::snprintf(b,sizeof b,"0x%llx",(unsigned long long)p);return b;}
 inline std::string label(const Renderer& r){return r.name+"#"+hexOf(r.native);}
 // The game properties phase 2 would put a role on, among those the material has; "待诊断" when none or unknown.
@@ -83,7 +98,7 @@ inline std::string orDash(const std::string& s){return s.empty()?std::string("-"
 inline std::string textureText(const Texture& t){return t.property+(t.texture?"="+(t.name.empty()?std::string("(unnamed)"):t.name)+(t.width.empty()?"":" "+t.width+"x"+t.height)+(t.format.empty()?"":" "+t.format)+(t.mips.empty()?"":" mips "+t.mips):std::string("=null"))+(t.status.empty()?"":" ["+t.status+"]");}
 inline std::string plan(const Doc& d,const Rule& r,const Material* m){std::string out;
  for(auto& b:r.textures){std::string target="待诊断";
-  if(m)for(auto* p:candidates(b.role)){for(auto& t:m->textures)if(t.property==p){target=std::string(p)+" (material has it; current "+(t.texture?t.name+" "+t.width+"x"+t.height:std::string("null"))+")";break;}if(target!="待诊断")break;}
+  if(m)for(auto* p:candidates(b.role)){for(auto& t:m->textures)if(t.property==p){target=std::string(p)+" (material has it; current "+(t.texture?t.name+(t.width.empty()?"":" "+t.width+"x"+t.height)+(t.format.empty()||t.format.find("未采集:")==0?"":" "+t.format):std::string("null"))+")";break;}if(target!="待诊断")break;}
   if(target=="待诊断")target+=b.role=="unknown"?" (slot role unknown)":m?" (no candidate property on this material)":" (no material)";
   auto res=d.resources.find(b.resource);std::string size=res==d.resources.end()?"":res->second.width>=0?" "+std::to_string(res->second.width)+"x"+std::to_string(res->second.height)+" "+res->second.format:res->second.error.empty()?"":" ("+res->second.error+")";
   out+=(out.empty()?"":"; ")+b.slot+" "+b.resource+size+" ["+b.role+"]"+(b.condition.empty()?"":" if "+b.condition)+" -> "+target;}
@@ -100,6 +115,12 @@ inline std::vector<Match> match(const Doc& d,const std::vector<Renderer>& rs){
   if(size_t(sub)<mats&&size_t(sub)+1<subs){m.reasons.push_back(std::to_string(mats)+" materials, "+std::to_string(subs)+" submeshes: slot "+std::to_string(sub)+" by position (counts differ)");return false;}
   if(size_t(sub)>=mats){m.reasons.push_back("submesh "+std::to_string(sub)+" has no material slot ("+std::to_string(mats)+" materials, "+std::to_string(subs)+" submeshes)");m.slot=-1;return false;}
   m.reasons.push_back("last submesh with "+std::to_string(mats)+" materials for "+std::to_string(subs)+" submeshes: standard Unity draws the extra materials over it too; unverified on this engine");return false;};
+ // The material slot named for the part (Mat_Hair, Mat_Body, ...), when exactly one is.
+ auto slotByName=[&](const Renderer& R,const std::string& hint,bool& alias){int hit=-1;size_t best=0;unsigned tie=0;
+  for(size_t i=0;i<R.materials.size();i++){bool a=false;auto sc=partScore(hint,materialPart(R.materials[i].name),&a);if(!sc)continue;if(sc>best){best=sc;hit=int(i);tie=0;alias=a;}else if(sc==best)tie++;}
+  return tie?-1:hit;};
+ // The renderer the other segments of a hash name, when they name exactly one: a PC index buffer is one Android mesh (assumed).
+ auto groupRenderer=[&](const std::string& hash){std::set<int> named;for(auto& x:d.rules)if(x.hash==hash&&x.kind=="segment"){auto h=nameHits(x);if(h.size()==1)named.insert(h[0]);}return named.size()==1?*named.begin():-1;};
  // Rules without match_first_index for a hash others split go last: they follow what the segments matched.
  std::vector<size_t> order;for(size_t k=0;k<d.rules.size();k++)if(d.rules[k].kind!="whole-ib")order.push_back(k);for(size_t k=0;k<d.rules.size();k++)if(d.rules[k].kind=="whole-ib")order.push_back(k);
  for(size_t k:order){const Rule& r=d.rules[k];Match m;m.rule=k;
@@ -114,8 +135,9 @@ inline std::vector<Match> match(const Doc& d,const std::vector<Renderer>& rs){
    // submeshes of only one of them (index starts, not order); otherwise the part name, which only makes it likely.
    if(exact.size()>1&&group.size()>1){std::vector<std::pair<int,int>> whole;for(auto& h:exact)if(groupExact(h.first)==group.size())whole.push_back(h);
     if(whole.size()==1){m.reasons.push_back(std::to_string(exact.size())+" renderers have a submesh starting at "+std::to_string(r.first)+"; only "+label(rs[size_t(whole[0].first)])+" has all "+std::to_string(group.size())+" of the hash's match_first_index values as submesh starts");exact=whole;}}
-   if(exact.size()>1&&!names.empty()){std::vector<std::pair<int,int>> named;for(auto& h:exact)if(std::find(names.begin(),names.end(),h.first)!=names.end())named.push_back(h);
-    if(named.size()==1){m.reasons.push_back(std::to_string(exact.size())+" renderers have a submesh starting at "+std::to_string(r.first)+"; the part name picks "+label(rs[size_t(named[0].first)]));exact=named;m.verdict=Verdict::Likely;}}
+   if(exact.size()>1){std::vector<int> pick=names;bool byGroup=false;if(pick.empty()){int g=groupRenderer(r.hash);if(g>=0){pick.push_back(g);byGroup=true;}}
+    std::vector<std::pair<int,int>> named;for(auto& h:exact)if(std::find(pick.begin(),pick.end(),h.first)!=pick.end())named.push_back(h);
+    if(named.size()==1){m.reasons.push_back(std::to_string(exact.size())+" renderers have a submesh starting at "+std::to_string(r.first)+"; "+(byGroup?"the hash's other segments name ":"the part name picks ")+label(rs[size_t(named[0].first)]));exact=named;m.verdict=Verdict::Likely;}}
    if(exact.size()==1){auto [i,j]=exact[0];const auto& R=rs[size_t(i)];const auto& sm=R.layout.subs[size_t(j)];m.renderer=i;m.submesh=j;m.slot=j;
     m.reasons.push_back("submesh "+std::to_string(j)+" indexStart "+std::to_string(sm.start)+" = match_first_index");
     unsigned all=groupExact(i);bool complete=all==group.size();m.reasons.push_back(std::to_string(all)+" of the hash's "+std::to_string(group.size())+" match_first_index values are submesh starts of this renderer");
@@ -125,6 +147,9 @@ inline std::vector<Match> match(const Doc& d,const std::vector<Renderer>& rs){
     bool merged=false;for(long long f:group)if(f>r.first&&uint64_t(f)<uint64_t(sm.start)+sm.count){merged=true;bool same=sameTextures(r.first,f,r.hash);
      m.reasons.push_back("PC segment "+std::to_string(f)+" lies inside this submesh too (PC draws merged into one slot): "+(same?"same textures, one material covers both":"different textures, one material cannot carry both"));if(!same)countOk=false;}
     bool slotSure=slotOf(R,j,m);
+    {bool alias=false;int byName=slotByName(R,r.hint,alias);if(byName==j)m.reasons.push_back("material "+R.materials[size_t(j)].name+" is named for the part"+(alias?" (GIMI Head = game Hair)":""));
+     else if(byName>=0){m.reasons.push_back("but material "+R.materials[size_t(byName)].name+" (slot "+std::to_string(byName)+") is the one named for the part");slotSure=false;}}
+    if(R.lod)m.reasons.push_back("renderer shows a lower LOD ("+R.meshName+")");
     if(!names.empty()&&std::find(names.begin(),names.end(),i)==names.end()){m.reasons.push_back("the part name '"+r.hint+"' points at "+nameText+" instead");slotSure=false;}
     else if(!names.empty())m.reasons.push_back("the part name '"+r.hint+"' agrees");
     if(m.verdict!=Verdict::Likely)m.verdict=complete&&countOk&&slotSure?Verdict::Confirmed:(merged&&!countOk?Verdict::Ambiguous:Verdict::Likely);
@@ -135,18 +160,29 @@ inline std::vector<Match> match(const Doc& d,const std::vector<Renderer>& rs){
     // The renderer where the hash's other segments start submeshes is the one it most likely went into.
     std::vector<std::pair<int,int>> fit;unsigned most=0;for(auto& h:inside){unsigned n=groupExact(h.first);if(n>most){most=n;fit.clear();}if(n&&n==most)fit.push_back(h);}
     if(fit.size()==1){m.renderer=fit[0].first;m.submesh=fit[0].second;m.slot=fit[0].second;m.reasons.push_back("most of the hash's other segments ("+std::to_string(most)+") start submeshes of "+label(rs[size_t(m.renderer)])+": most likely merged into its submesh "+std::to_string(m.submesh));}
+    for(auto& h:inside)if(rs[size_t(h.first)].lod){m.reasons.push_back(label(rs[size_t(h.first)])+" shows a lower LOD ("+rs[size_t(h.first)].meshName+"): its index layout is its own, so this says nothing about merging; read again when the full mesh is shown");break;}
     out.push_back(m);continue;}
-   // No index layout to compare: the name, the counts and the order; never more than likely.
-   std::vector<int> unread;for(int i:names)if(!rs[size_t(i)].known())unread.push_back(i);
-   if(names.size()==1&&!unread.empty()){const auto& R=rs[size_t(names[0])];size_t pos=size_t(std::find(group.begin(),group.end(),r.first)-group.begin());
-    size_t subs=R.layout.submeshes>=0?size_t(R.layout.submeshes):R.submeshes;m.renderer=names[0];m.reasons.push_back("indexStart not readable on "+label(R)+(R.layout.status.empty()?"":" ("+R.layout.status+")"));
-    m.reasons.push_back("the part name '"+r.hint+"' names it; segment "+std::to_string(pos)+" of "+std::to_string(group.size())+", "+std::to_string(subs)+" submeshes, "+std::to_string(R.materials.size())+" materials");
-    if(group.size()==subs&&subs==R.materials.size()){m.submesh=int(pos);m.slot=int(pos);m.verdict=Verdict::Likely;m.reasons.push_back("counts agree: slot "+std::to_string(pos)+" by order only (order alone is not proof)");}
-    else{m.verdict=Verdict::Ambiguous;m.reasons.push_back("counts differ: no slot by order");}
+   // No index layout to compare: the renderer by name (or by the hash's other segments), the slot by the material's
+   // name and by the segment's place among the hash's segments; never more than likely.
+   int target=names.size()==1?names[0]:-1;bool viaGroup=false;if(target<0&&names.empty()){target=groupRenderer(r.hash);viaGroup=target>=0;}
+   if(target>=0&&!rs[size_t(target)].known()){const auto& R=rs[size_t(target)];size_t pos=size_t(std::find(group.begin(),group.end(),r.first)-group.begin());
+    size_t subs=R.layout.submeshes>=0?size_t(R.layout.submeshes):R.submeshes;m.renderer=target;m.reasons.push_back("indexStart not readable on "+label(R)+(R.layout.status.empty()?"":" ("+R.layout.status+")"));
+    m.reasons.push_back(viaGroup?"the part name '"+r.hint+"' names no renderer; another segment of hash "+r.hash+" names "+label(R)+" (one PC index buffer taken as one Android mesh)":"the part name '"+r.hint+"' names it");
+    m.reasons.push_back("segment "+std::to_string(pos)+" of "+std::to_string(group.size())+", "+std::to_string(subs)+" submeshes, "+std::to_string(R.materials.size())+" materials");
+    bool counts=group.size()==subs&&subs==R.materials.size(),alias=false;int byName=slotByName(R,r.hint,alias);
+    if(byName>=0){m.slot=byName;m.reasons.push_back("material "+R.materials[size_t(byName)].name+" (slot "+std::to_string(byName)+") is named for the part"+(alias?" (GIMI Head = game Hair, a naming convention)":""));
+     if(counts&&size_t(byName)==pos){m.submesh=byName;m.verdict=Verdict::Likely;m.reasons.push_back("material name and segment order agree (still no index evidence)");}
+     else if(counts){m.verdict=Verdict::Ambiguous;m.reasons.push_back("material name says slot "+std::to_string(byName)+", segment order says "+std::to_string(pos));}
+     else{m.verdict=Verdict::Likely;m.reasons.push_back("counts differ; slot by material name only");}}
+    else if(counts){m.submesh=int(pos);m.slot=int(pos);m.verdict=Verdict::Likely;m.reasons.push_back("counts agree: slot "+std::to_string(pos)+" by order only (order alone is not proof)");}
+    else{m.verdict=Verdict::Ambiguous;m.reasons.push_back("counts differ and no material is named for the part: no slot");}
+    if(R.lod)m.reasons.push_back("renderer shows a lower LOD ("+R.meshName+"): read again when the full mesh is shown");
     out.push_back(m);continue;}
    if(names.size()>1){m.verdict=Verdict::Ambiguous;for(int i:names)m.candidates.push_back(label(rs[size_t(i)]));m.reasons.push_back("no submesh starts at "+std::to_string(r.first)+" where the layout is readable, and the part name fits several renderers");out.push_back(m);continue;}
-   m.verdict=Verdict::None;m.reasons.push_back(std::string("no renderer has a submesh starting at ")+std::to_string(r.first)+(unknown?" among those whose layout is readable":"")+(names.empty()?"; the part name '"+r.hint+"' names no renderer":"; "+nameText+" (by name) starts none there"));
-   m.reasons.push_back("so either Android's index order differs from the PC one, or the hash belongs to another character / outfit");out.push_back(m);continue;}
+   m.reasons.push_back(std::string("no renderer has a submesh starting at ")+std::to_string(r.first)+(unknown?" among those whose layout is readable":"")+(target<0?"; the part name '"+r.hint+"' names no renderer":"; "+label(rs[size_t(target)])+(viaGroup?" (by the hash's other segments)":" (by name)")+" starts none there"));
+   // A lower LOD has its own index buffer: no conclusion about the PC order from it.
+   if(target>=0&&rs[size_t(target)].lod){m.verdict=Verdict::Ambiguous;m.renderer=target;{bool alias=false;int byName=slotByName(rs[size_t(target)],r.hint,alias);if(byName>=0){m.slot=byName;m.reasons.push_back("material slot "+std::to_string(byName)+" is named for the part");}}m.reasons.push_back(label(rs[size_t(target)])+" shows a lower LOD ("+rs[size_t(target)].meshName+"), whose index layout is its own; read again when the full mesh is shown");out.push_back(m);continue;}
+   m.verdict=Verdict::None;m.reasons.push_back("so either Android's index order differs from the PC one, or the hash belongs to another character / outfit");out.push_back(m);continue;}
   if(r.kind=="whole-ib"){m.reasons.push_back("no match_first_index: 3DMigoto applies it to every draw of hash "+r.hash);
    std::set<int> hit;for(auto& x:out)if(x.renderer>=0&&d.rules[x.rule].hash==r.hash&&(x.verdict==Verdict::Confirmed||x.verdict==Verdict::Likely))hit.insert(x.renderer);
    if(hit.size()==1){m.renderer=*hit.begin();m.verdict=Verdict::Likely;m.reasons.push_back("the hash's segments match "+label(rs[size_t(m.renderer)])+": every slot of it");}
@@ -184,7 +220,7 @@ inline std::string rendererLine(const Renderer& r,unsigned character){
  return "character="+std::to_string(character)+" renderer="+label(r)+" mesh="+r.meshName+"#"+hexOf(r.mesh)+" lod="+(r.lod?"lower (by name)":"full (by name)")+" vertices="+std::to_string(r.vertices)
   +" submeshes(native)="+std::to_string(r.submeshes)+" subMeshCount="+orDash(r.layout.submeshCount)+" vertexCount="+orDash(r.layout.vertexCount)+" bones="+std::to_string(r.bones)+" readable="+orDash(r.layout.readable)+" indexFormat="+orDash(r.layout.indexFormat)
   +" materials="+std::to_string(r.materials.size())+" avatar="+(r.avatar.empty()?"-":r.avatar)+(r.takenBy.empty()?"":" taken-over-by="+r.takenBy+" (game mesh/materials read)")+(r.swap.empty()?"":" texture-swap="+r.swap)
-  +(r.layout.status=="read"?"":" layout="+r.layout.status)+(r.error.empty()?"":" error="+r.error);}
+  +(r.layout.status=="read"?" layout-source="+orDash(r.layout.source):" layout="+r.layout.status)+(r.error.empty()?"":" error="+r.error);}
 inline std::vector<std::string> submeshLines(const Renderer& r){std::vector<std::string> out;
  for(size_t i=0;i<r.layout.subs.size();i++){auto& s=r.layout.subs[i];std::string slot=i<r.materials.size()?std::to_string(i)+" ("+r.materials[i].name+")":"none";
   out.push_back(label(r)+" submesh="+std::to_string(i)+(s.known?" indexStart="+std::to_string(s.start)+" indexCount="+std::to_string(s.count):" range="+s.error)+" baseVertex="+s.base+" topology="+s.topology+" material-slot-by-position="+slot);}

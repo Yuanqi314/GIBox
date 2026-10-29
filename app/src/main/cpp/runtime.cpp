@@ -387,7 +387,28 @@ struct Runtime::Impl {
  // Per-submesh ranges and texture sizes come through named, signature-checked IL2CPP methods (render_probe.hpp);
  // where the engine lacks them, the lines say so and matching uses names and counts (never "confirmed").
  static constexpr const char* texDiagNames[]={"_MainTex","_LightMapTex","_LightMap","_LightmapTex","_Lightmap","_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex",
-  "_ShadowRampTex","_RampTex","_FaceMapTex","_MaterialMasksTex","_MTMap","_MTSpecularRamp","_EmissionTex","_DissolveTex","_FaceShadowTex"};
+  "_ShadowRampTex","_RampTex","_FaceMapTex","_MaterialMasksTex","_MTMap","_MTSpecularRamp","_EmissionTex","_DissolveTex","_FaceShadowTex",
+  "_PackedShadowRampTex","_ShadowRamp","_RampMap","_MaskTex","_MainMaskTex","_FaceMaskTex","_StockingsTex","_NyxStateRampTex","_NyxStateTex","_NyxRampTex"};
+ Ptr texDiagTexture2D=0;   // Texture2D's class (Texture2D.whiteTexture's; abi::textureType, as makeTexture uses it)
+ // What the named IL2CPP path could not read (this build exports none of it): the submesh ranges and counts through the
+ // engine's own Mesh getters (abi::mesh*). Submesh indices stay below get_subMeshCount(), which GetIndexStart checks too.
+ void texDiagMesh(Ptr mesh,renderprobe::UnityReader::MeshLayout& l){if(l.status=="read")return;const std::string named=l.status;
+  try{int n=e.call<int32_t>(abi::meshSubmeshes,mesh,Ptr(0));l=renderprobe::UnityReader::MeshLayout{};l.submeshCount=std::to_string(n);
+   l.vertexCount=std::to_string(e.call<int32_t>(abi::meshVertices,mesh,Ptr(0)));l.readable=(e.call<uint32_t>(abi::meshReadable,mesh,Ptr(0))&1u)?"true":"false";
+   l.indexFormat=renderprobe::missing("this build has no Mesh.get_indexFormat");l.submeshes=n;
+   if(n<0||n>64){l.status="subMeshCount "+std::to_string(n)+" outside 0..64; ranges not read";return;}
+   for(int i=0;i<n;i++){renderprobe::UnityReader::Submesh sm;sm.start=e.call<uint32_t>(abi::meshIndexStart,mesh,i,Ptr(0));sm.count=e.call<uint32_t>(abi::meshIndexCount,mesh,i,Ptr(0));sm.known=true;
+    sm.base=renderprobe::missing("this build has no Mesh.GetBaseVertex");sm.topology=renderprobe::missing("this build has no Mesh.GetTopology");l.subs.push_back(sm);}
+   l.status="read";l.source="engine Mesh getters (dump.cs RVAs)";}
+  catch(const std::exception& ex){l.status=renderprobe::missing(std::string("engine Mesh getters: ")+ex.what()+"; named path: "+named);}}
+ // Size of any texture, format and mips of a Texture2D, the same way.
+ void texDiagTexture(texdiag::Texture& t){
+  try{if(!texDiagTexture2D){Ptr w=e.call<Ptr>(abi::textureType);if(alive(w))texDiagTexture2D=load<Ptr>(w);}
+   t.width=std::to_string(e.call<int32_t>(abi::textureWidth,t.texture,Ptr(0)));t.height=std::to_string(e.call<int32_t>(abi::textureHeight,t.texture,Ptr(0)));t.status.clear();
+   if(texDiagTexture2D&&load<Ptr>(t.texture)==texDiagTexture2D){t.cls="UnityEngine.Texture2D";int f=e.call<int32_t>(abi::textureFormat,t.texture,Ptr(0));t.format=texdiag::textureFormat(f);
+    t.mips=std::to_string(e.call<int32_t>(abi::textureMips,t.texture,Ptr(0)));}
+   else{t.format=renderprobe::missing("not a Texture2D");t.mips.clear();}}
+  catch(const std::exception& ex){t.status=renderprobe::missing(ex.what());}}
  void texDiagLog(const std::string& state,const std::string& key,const std::string& line){auto& old=texDiagLogged[key];if(old==line)return;
   if(texDiagLogged.size()>4096){texDiagLogged.clear();}texDiagLogged[key]=line;log(state,line);}
  std::string texDiagKey(Ptr r){auto a=attachments.find(r);bool ours=a!=attachments.end()&&a->second->native==load<Ptr>(r+0x10);
@@ -401,7 +422,7 @@ struct Runtime::Impl {
    try{info.avatar=avatarIdentity(r);}catch(const std::exception&){}
    Ptr mesh=ours?a->second->original:e.get(abi::getMesh,r);info.mesh=mesh;
    if(alive(mesh)){auto fp=fingerprint(mesh,true);info.meshName=fp.mesh;info.vertices=fp.vertices;info.submeshes=fp.submeshes;info.bones=fp.bones;info.lod=lowerLod(fp.mesh);
-    info.layout=texDiagReader->meshLayout(mesh);}
+    info.layout=texDiagReader->meshLayout(mesh);texDiagMesh(mesh,info.layout);}
    else info.error="no live mesh";
    Ptr arr=ours?a->second->originalMaterials:e.get(abi::getMaterials,r);if(arr){pin(roots,arr);
     for(Ptr m:pointers(arr,64)){texdiag::Material mat;mat.material=m;
@@ -410,9 +431,9 @@ struct Runtime::Impl {
       std::vector<int32_t> ids;Ptr idArr=e.get(glow::rvaGetTextureIds,m);
       if(idArr){pin(roots,idArr);auto n=length(idArr,64);for(uint64_t i=0;i<n;i++)ids.push_back(load<int32_t>(idArr+0x20+4*i));}
       else{mat.error="texture property list unavailable; candidate names checked instead";for(auto* n:texDiagNames)if(e.call<uint32_t>(abi::hasProperty,m,managedName(n),Ptr(0))&1u)ids.push_back(slotId(n));}
-      for(int32_t id:ids){texdiag::Texture t;auto nm=named.find(id);t.property=nm==named.end()?"#"+std::to_string(id):nm->second;t.id=id;t.texture=e.call<Ptr>(glow::rvaGetTexture,m,id,Ptr(0));
+      for(int32_t id:ids){texdiag::Texture t;auto nm=named.find(id);auto learned=nm==named.end()?glow::trace().property(id):std::string();t.property=nm!=named.end()?nm->second:!learned.empty()?learned:"#"+std::to_string(id);t.id=id;t.texture=e.call<Ptr>(glow::rvaGetTexture,m,id,Ptr(0));
        if(t.texture&&alive(t.texture)){t.name=name(t.texture);auto l=texDiagReader->textureLayout(t.texture);
-        t.cls=l.cls;t.width=l.width;t.height=l.height;t.mips=l.mips;t.format=l.format;if(l.status!="read")t.status=l.status;}
+        t.cls=l.cls;t.width=l.width;t.height=l.height;t.mips=l.mips;t.format=l.format;if(l.status!="read"){t.status=l.status;texDiagTexture(t);}}
        else if(t.texture)t.status="texture destroyed";
        mat.textures.push_back(std::move(t));}}
      catch(const std::exception& ex){mat.error=ex.what();}

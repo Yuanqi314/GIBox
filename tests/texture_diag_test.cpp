@@ -63,6 +63,32 @@ int main(){
  assert(has(rendererLine(rs[3],10000107),"layout=未采集: missing export il2cpp_runtime_invoke")&&has(submeshLines(rs[0])[1],"submesh=1 indexStart=25002 indexCount=3000 baseVertex=0 topology=0 (Triangles) material-slot-by-position=1 (BodyMat1)"));
  assert(has(materialLines(rs[0])[0],"slot=0 material=BodyMat0#0x100 shader=miHoYo/Character textures=[_MainTex=Tex 2048x2048 4 (RGBA32)"));
  assert(has(ruleLine(d,d.rules[1]),"kind=segment part=body letter=A textures=[resource\\gimi\\diffuse=rbody1[diffuse] if $colour == 0"));
+ // The device log of 0.7.49 (anemolumine, Lumine 10000007): one Body renderer (Body_LOD1 at the time) with the materials
+ // Mat_Hair / Mat_Body / Mat_Dress, Brow / Face / Face_Eye with Mat_Face; the INI splits hash dfb54407 into Head, ModBody, ModDress.
+ Doc lumine=parse(R"J({"format":"gibox-texture-diag","version":1,"name":"anemolumine","character":10000007,"rules":[
+  {"section":"TextureOverrideTravelerGirlHead","part":"TravelerGirlHead","hint":"head","hash":"dfb54407","first":0,"kind":"segment","textures":[{"slot":"ps-t0","resource":"rhead","role":"diffuse","condition":"","via":""}]},
+  {"section":"TextureOverrideTravelerGirlModBody","part":"TravelerGirlModBody","hint":"modbody","hash":"dfb54407","first":6915,"kind":"segment","textures":[{"slot":"ps-t0","resource":"rbody","role":"diffuse","condition":"","via":""}]},
+  {"section":"TextureOverrideTravelerGirlModDress","part":"TravelerGirlModDress","hint":"moddress","hash":"dfb54407","first":40413,"kind":"segment","textures":[{"slot":"ps-t0","resource":"rbody","role":"diffuse","condition":"","via":""}]}],
+  "resources":[{"name":"rbody","file":"b.dds","exists":true,"kind":"dds","width":4096,"height":4096,"format":"DXGI 99 (BC7_UNORM_SRGB)","mips":1}]})J","/x/anemolumine.json");
+ auto lumineWorld=[&](bool readable,bool lod,std::vector<std::pair<uint32_t,uint32_t>> subs){std::vector<Renderer> w{renderer("Body",0x10,subs,3,readable),renderer("Brow",0x20,{{0,60}},1,readable),renderer("Face",0x30,{{0,3000}},1,readable),renderer("Face_Eye",0x40,{{0,2000}},1,readable)};
+  const char* parts[]={"Hair","Body","Dress"};for(int i=0;i<3;i++)w[0].materials[size_t(i)].name=std::string("Avatar_Girl_Sword_PlayerGirl_Mat_")+parts[i]+" (Instance) #"+std::to_string(i);
+  for(size_t i=1;i<4;i++){w[i].materials[0].name="Avatar_Girl_Sword_PlayerGirl_Mat_Face (Instance) #"+std::to_string(i+2);}w[0].lod=lod;w[0].meshName=lod?"Body_LOD1":"Body";return w;};
+ // As on the device (no layout): every segment on Body, the slot named by its material and by order; never confirmed.
+ auto dev=lumineWorld(false,true,{{0,1},{1,1},{2,1}});auto lm=match(lumine,dev);
+ for(int k=0;k<3;k++){assert(lm[size_t(k)].verdict==Verdict::Likely&&lm[size_t(k)].renderer==0&&lm[size_t(k)].slot==k);}
+ assert(has(matchLine(lumine,lm[0],dev),"another segment of hash dfb54407 names Body#0x10")&&has(matchLine(lumine,lm[0],dev),"(GIMI Head = game Hair, a naming convention)")&&has(matchLine(lumine,lm[0],dev),"material name and segment order agree")&&has(matchLine(lumine,lm[0],dev),"lower LOD (Body_LOD1)"));
+ assert(has(matchLine(lumine,lm[2],dev),"Mat_Dress (Instance) #2 (slot 2) is named for the part"));
+ // The full mesh keeping the PC index order: confirmed by index starts, material names agreeing.
+ auto full=lumineWorld(true,false,{{0,6915},{6915,33498},{40413,9000}});auto fm=match(lumine,full);
+ for(int k=0;k<3;k++)assert(fm[size_t(k)].verdict==Verdict::Confirmed&&fm[size_t(k)].renderer==0&&fm[size_t(k)].slot==k);
+ assert(has(matchLine(lumine,fm[0],full),"only Body#0x10 has all 3")&&has(matchLine(lumine,fm[0],full),"is named for the part (GIMI Head = game Hair)"));
+ // The lower LOD read: its own index layout, never taken as merged PC segments or as a mismatch of the PC order.
+ auto low=lumineWorld(true,true,{{0,3000},{3000,12000},{15000,4000}});auto wm=match(lumine,low);
+ assert(wm[0].verdict==Verdict::Likely&&wm[0].renderer==0&&has(matchLine(lumine,wm[0],low),"the hash's other segments name Body#0x10"));
+ assert(wm[1].verdict==Verdict::Ambiguous&&has(matchLine(lumine,wm[1],low),"its index layout is its own"));
+ assert(wm[2].verdict==Verdict::Ambiguous&&has(matchLine(lumine,wm[2],low),"whose index layout is its own"));
+ assert(textureFormat(47)=="47 (ETC2_RGBA8)"&&textureFormat(99)=="99 (not in this build's TextureFormat)"&&materialPart("Avatar_Girl_Sword_PlayerGirl_Mat_Hair (Instance) #0")=="hair");
+ if(std::getenv("TEXDIAG_PRINT")){for(auto& m:lm)std::cout<<matchLine(lumine,m,dev)<<"\n";for(auto& m:wm)std::cout<<matchLine(lumine,m,low)<<"\n";}
  if(std::getenv("TEXDIAG_PRINT"))for(auto& m:all)std::cout<<matchLine(d,m,rs)<<"\n";
  std::cout<<"Texture-only diagnostics: PASS (document, index-start / group / name / count / order evidence, merged PC segments, unreadable layouts never confirmed, texture-hash candidates by size, shared slots)\n";
 }

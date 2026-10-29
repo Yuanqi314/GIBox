@@ -65,7 +65,7 @@ void sub(Ptr m,Ptr a,int i,Ptr){assert(i>=0&&unsigned(i)<load<uint32_t>(f->obj.a
  auto& v=f->submeshIndices[{m,i}];v.assign(n,0);if(n)std::memcpy(v.data(),reinterpret_cast<const void*>(a+0x20),4ull*n);}
 Ptr getPos(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getPositions);}Ptr getNorm(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getNormals);}Ptr getUV(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getUV);}Ptr getIdx(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getTriangles);}Ptr getBinds(Ptr p,Ptr){f->bindposeReads++;return f->obj.at(p).arrays.at(abi::getBindposes);}Ptr getColors(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getColors);}Ptr getTangents(Ptr p,Ptr){return f->obj.at(p).arrays.at(abi::getTangents);}
 // Like il2cpp object_new: the managed shell has no native object until the constructor runs.
-Ptr texType(){Ptr d=f->alloc(8);store<Ptr>(d,f->alloc(0x100));return d;}Ptr objectNew(Ptr cls){assert(cls);Ptr p=f->alloc(0x20);f->obj[p]=Obj{"texture","",0,0,0,0,0,0,{}};return p;}
+Ptr texType(){static Ptr d=0;if(!d){d=f->alloc(0x20);store<Ptr>(d,f->kindClass("texture"));store<Ptr>(d+0x10,f->alloc(8));}return d;}/* Texture2D.whiteTexture: its class is Texture2D's */Ptr objectNew(Ptr cls){assert(cls);Ptr p=f->alloc(0x20);f->obj[p]=Obj{"texture","",0,0,0,0,0,0,{}};return p;}
 void texInit(Ptr o,int w,int h,int fmt,int mip,int linear,Ptr){assert(w>0&&h>0&&fmt==4&&mip==0&&(linear==0||linear==1)&&load<Ptr>(o+0x10)==0);Ptr n=f->alloc(0x80);store<Ptr>(o+0x10,n);f->obj[o].native=n;f->textures++;f->textureBytes[o]=unsigned(w*h*4);}
 void texPixels(Ptr o,Ptr data,int n,Ptr){assert(load<Ptr>(o+0x10)&&data&&n>0&&unsigned(n)==f->textureBytes.at(o));}
 // Managed strings live above 4 GiB in the game; a 32-bit truncation must not survive the round trip.
@@ -116,10 +116,20 @@ Ptr resolveGlow(abi::Offset o){
    {glow::rvaGetScaleOffset,reinterpret_cast<Ptr>(&glowZero)},{glow::rvaGetTexture,reinterpret_cast<Ptr>(&glowTexture)},{glow::rvaGetTextureIds,reinterpret_cast<Ptr>(&glowTextureIds)},
    {glow::rvaGetCustomFloat,reinterpret_cast<Ptr>(&glowCustom)},{glow::rvaPropertyToId,reinterpret_cast<Ptr>(&glowPropertyId)}})if(x.first==o)return x.second;
  return 0;}
+// Texture-only diagnostics: the engine's Mesh / Texture getters (index ranges per submesh from texRanges, else one
+// submesh 0..3); every texture 4x4, RGBA32, one mip. Read only: none of them changes anything.
+std::map<Ptr,std::vector<std::pair<uint32_t,uint32_t>>> texRanges;
+int32_t meshSubs(Ptr m,Ptr){auto it=texRanges.find(m);return it!=texRanges.end()?int32_t(it->second.size()):int32_t(load<uint32_t>(f->obj.at(m).shared+0xc0));}
+int32_t meshVerts(Ptr m,Ptr){return int32_t(load<uint32_t>(f->obj.at(m).shared+0x74));}uint32_t meshReadable(Ptr,Ptr){return 0xffffff00u;}
+uint32_t meshStart(Ptr m,int32_t i,Ptr){assert(i>=0&&i<meshSubs(m,0));auto it=texRanges.find(m);return it!=texRanges.end()?it->second[size_t(i)].first:0;}
+uint32_t meshCount(Ptr m,int32_t i,Ptr){assert(i>=0&&i<meshSubs(m,0));auto it=texRanges.find(m);return it!=texRanges.end()?it->second[size_t(i)].second:3;}
+int32_t texSide(Ptr t,Ptr){assert(t&&load<Ptr>(t+0x10));return 4;}int32_t texFormat(Ptr t,Ptr){assert(load<Ptr>(t)==f->kindClass("texture"));return 4;}int32_t texMips(Ptr t,Ptr){assert(load<Ptr>(t)==f->kindClass("texture"));return 1;}
 Ptr resolve(abi::Offset o){if(Ptr g=resolveGlow(o))return g;switch(o){
 #define FN(x,y) case abi::x:return reinterpret_cast<Ptr>(&y)
  FN(getMesh,getMesh);FN(getMaterials,getMaterials);FN(getBones,getBones);FN(getName,getName);FN(getParent,parent);FN(clone,clone);FN(destroy,destroy);FN(pin,pin);FN(unpin,unpin);FN(setMesh,setMesh);FN(setMaterials,setMaterials);FN(arrayNew,newArray);FN(getBindposes,getBinds);FN(getPositions,getPos);FN(getNormals,getNorm);FN(getUV,getUV);FN(getTriangles,getIdx);FN(getColors,getColors);FN(getTangents,getTangents);FN(setColors,setChannel);FN(setTangents,setChannel);FN(setUV2,setChannel);FN(setPositions,setPos);FN(setNormals,setAny);FN(setUV,setAny);FN(setTriangles,setAny);FN(clear,op);FN(setIndexFormat,op);FN(setSubmeshCount,submeshCount);FN(meshUpload,op);FN(meshFinish,action);FN(meshDynamic,action);FN(setSubmeshTriangles,sub);FN(textureType,texType);FN(objectNew,objectNew);FN(textureInit,texInit);FN(texturePixels,texPixels);FN(textureApply,action);FN(mainTexture,setMainTexture);FN(newString,newString);FN(nativeAlloc,nativeAlloc);FN(hasProperty,hasProp);FN(setTexture,setTex);FN(classFromType,classFromType);FN(typeObject,typeObject);FN(findObjectsOfType,findObjects);FN(findObjectsNative,findNative);FN(componentsInChildren,children);FN(gameObject,goOf);FN(wrapperFor,wrapperFor);
  FN(blockShared,slotShared);FN(blockCtor,blockCtor);FN(blockClear,blockClear);FN(blockSetTexture,blockSet);FN(blockGetTexture,blockGet);FN(getSlotBlock,slotGet);FN(setSlotBlock,slotSet);
+ FN(meshSubmeshes,meshSubs);FN(meshVertices,meshVerts);FN(meshReadable,meshReadable);FN(meshIndexStart,meshStart);FN(meshIndexCount,meshCount);
+ FN(textureWidth,texSide);FN(textureHeight,texSide);FN(textureFormat,texFormat);FN(textureMips,texMips);
  FN(allowSlotProps,slotAllowed);FN(setAllowSlotProps,slotAllow);FN(setSlotCustomTexture,slotCustom);
 #undef FN
  default:throw std::runtime_error("Unexpected fake engine call: "+std::to_string(o));}}
@@ -1171,11 +1181,13 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   auto count=[&](const std::string& x){size_t n=0;for(size_t p=log.find(x);p!=std::string::npos;p=log.find(x,p+1))n++;return n;};
   assert(gameWrites==writes&&f->clones==clones&&f->diffuse[mat]==tex&&load<Ptr>(f->obj[body].materials+0x20)==mat);
   assert(count("texture-diag-ini Mod: TextureOverrideModBodyA hash=d5ae71a3 match_first_index=0 priority=0 kind=segment part=body letter=A")==1);
-  assert(count("texture-diag-renderer character=10000107 renderer=Body#")==1&&count("lod=full (by name) vertices=3 submeshes(native)=1")==1);
-  assert(count("texture-diag-unsupported Body#")==1&&count("per-submesh indexStart/indexCount not read (未采集: missing export il2cpp_domain_get)")==1);
-  assert(count("texture-diag-material Body#")==1&&count("shader=miHoYo/Character/Body textures=[_MainTex=Avatar_Tex_Body_Diffuse [未采集: missing export il2cpp_domain_get]]")==1&&count("subMeshCount=- vertexCount=- bones=1 readable=- indexFormat=-")==1);
-  assert(count("texture-diag-match Mod: TextureOverrideModBodyA hash=d5ae71a3 match_first_index=0 -> 高可信候选 renderer=Body#")==1&&count("by order only")==1&&count("-> _MainTex (material has it; current Avatar_Tex_Body_Diffuse")==1);
-  assert(count("texture-diag-match Mod: 1 renderers of 10000107: 0 确定匹配, 1 高可信候选, 0 存在歧义, 0 无法匹配, 1 without textures; nothing was replaced (phase 1)")==1&&count("TextureOverrideModPos ->")==0);
+  // No IL2CPP exports here, as in the game: the engine's own Mesh / Texture getters give the layout and the sizes.
+  assert(count("texture-diag-renderer character=10000107 renderer=Body#")==1&&count("lod=full (by name) vertices=3 submeshes(native)=1 subMeshCount=1 vertexCount=3 bones=1 readable=false indexFormat=未采集: this build has no Mesh.get_indexFormat")==1);
+  assert(count("layout-source=engine Mesh getters (dump.cs RVAs)")==1&&count("texture-diag-unsupported Body#")==0);
+  assert(count("texture-diag-submesh Body#")==1&&count("submesh=0 indexStart=0 indexCount=3 baseVertex=未采集: this build has no Mesh.GetBaseVertex topology=未采集: this build has no Mesh.GetTopology material-slot-by-position=0 (Material)")==1);
+  assert(count("texture-diag-material Body#")==1&&count("shader=miHoYo/Character/Body textures=[_MainTex=Avatar_Tex_Body_Diffuse 4x4 4 (RGBA32) mips 1]")==1);
+  assert(count("texture-diag-match Mod: TextureOverrideModBodyA hash=d5ae71a3 match_first_index=0 -> 确定匹配 renderer=Body#")==1&&count("-> _MainTex (material has it; current Avatar_Tex_Body_Diffuse 4x4 4 (RGBA32))")==1);
+  assert(count("texture-diag-match Mod: 1 renderers of 10000107: 1 确定匹配, 0 高可信候选, 0 存在歧义, 0 无法匹配, 1 without textures; nothing was replaced (phase 1)")==1&&count("TextureOverrideModPos ->")==0);
   assert(count("texture-diag-unsupported "+sharedDiag+"/texture-diag/Broken.json: ")==1&&count("texture-diag-match Other")==0);
   // The game gives the renderer other materials: read and matched again, still nothing written.
   Ptr mat2=f->object("material","Material2");f->diffuse[mat2]=tex;f->obj[body].materials=f->typed("material",mat2);td.tick(5005000);td.tick(5006000);log=text(logFile);

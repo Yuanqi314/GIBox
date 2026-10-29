@@ -118,7 +118,7 @@ final class TextureDiag {
             others.add(x); }
         for (String n : ini.compatibility) notes.add(n);
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("format", "gibox-texture-diag"); out.put("version", VERSION); out.put("name", name); out.put("ini", ModConfig.relative(src, ini.file));
+        out.put("format", "gibox-texture-diag"); out.put("version", VERSION); out.put("name", name); String rel = ModConfig.relative(src, ini.file); out.put("ini", rel.startsWith("..") ? ini.file.getName() : rel);   // the INI may sit outside a switched-on copy
         out.put("character", id); out.put("characterName", Characters.nameOf(id)); out.put("prefix", prefix);
         out.put("phase", "read-only diagnostics: the game side matches and logs, nothing is replaced");
         out.put("rules", rules); out.put("resources", resources); out.put("variables", variables); out.put("otherInis", others); out.put("notes", new ArrayList<Object>(notes));

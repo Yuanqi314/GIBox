@@ -56,7 +56,16 @@ enum Offset:uintptr_t {
  blockCtor=0xe90efac,blockClear=0xe90f120,blockSetTexture=0xe90fbb0,blockGetTexture=0xe910290,
  // Renderer: GetPerMaterialPropertyBlock(block, index), SetPerMaterialPropertyBlock(block, index), AllowPerMaterialProp(),
  // SetAllowPerMaterialProp(bool), SetPerMaterialCustomPropertyTexture(matID, propID, Texture, updateHash).
- getSlotBlock=0x8dc1f84,setSlotBlock=0x8dc1f88,allowSlotProps=0x8dc1f7c,setAllowSlotProps=0x8dc1f80,setSlotCustomTexture=0x8dc2170
+ getSlotBlock=0x8dc1f84,setSlotBlock=0x8dc1f88,allowSlotProps=0x8dc1f7c,setAllowSlotProps=0x8dc1f80,setSlotCustomTexture=0x8dc2170,
+ // Texture-only diagnostics (texture_diag.hpp), read-only getters from dump.cs of this build. This build exports no il2cpp_*
+ // API (0.7.49 device log: "missing export il2cpp_domain_get"), so the named-method path cannot reach them.
+ //   Mesh: get_subMeshCount(), get_vertexCount(), get_isReadable(), and the icalls behind GetIndexStart(int) /
+ //   GetIndexCount(int), GetIndexStartImpl / GetIndexCountImpl (no managed check that could throw through our frames; called
+ //   only for 0 <= submesh < get_subMeshCount()). The build has no Mesh.GetTopology, GetBaseVertex or get_indexFormat.
+ //   Texture: static Internal_GetWidth(Texture) / Internal_GetHeight(Texture) (any texture); Texture2D: get_format(),
+ //   get_mipmapCount() (called only on objects whose class is Texture2D.whiteTexture's: Texture2D is sealed).
+ meshSubmeshes=0x8bb76c8,meshVertices=0x8bb76a4,meshReadable=0x8bb7698,meshIndexStart=0x8bb753c,meshIndexCount=0x8bb7584,
+ textureWidth=0x12b0ab24,textureHeight=0x12b0ab48,textureFormat=0x8fef0f0,textureMips=0x8feeff8
 };
 // First 16 code bytes of the hand-off and binding entries (from the handoff and locator captures);
 // the hand-off hook is installed only when all match.
