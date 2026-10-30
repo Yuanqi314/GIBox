@@ -1225,9 +1225,10 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   Runtime tm(e,pkg,root+"/privateTex",mediaTex,false);uint64_t t=6000000;auto run=[&](uint64_t ms){for(uint64_t end=t+ms;t<end;t+=250)tm.tick(t);};auto log=[&]{return text(logFile);};
   auto count=[&](const std::string& x){auto l=log();size_t n=0;for(size_t p=l.find(x);p!=std::string::npos;p=l.find(x,p+1))n++;return n;};
   run(3000);Ptr ours=f->diffuse[mat];
-  assert(ours&&ours!=gameTex&&count("texture-apply -/direct TexMod: TextureOverrideModBodyA -> character=10000107 Body#")==1&&count("evidence=确定匹配")==1&&count("_MainTex (resource\\gimi\\diffuse rbody, sRGB): Avatar_Tex_Body_Diffuse#")==1&&count("readback=ok")==1);
+  if(std::getenv("TEXMOD_PRINT")){auto l=log();size_t p=0;while((p=l.find("texture-",p))!=std::string::npos){auto e2=l.find('\n',p);std::cerr<<l.substr(p,std::min<size_t>(e2-p,330))<<"\n";p=e2;}}
+  assert(ours&&ours!=gameTex&&count("texture-apply -/direct TexMod: TextureOverrideModBodyA -> character=10000107 Body#")==1&&count("evidence=完整 Mesh 特征与 Body#")==1&&count("texture-map TexMod: 1 confirmed mesh(es) saved to")==1&&count("texture-ready TexMod: 2 Texture2D made on the game thread")==1&&count("texture-timing -/direct TexMod: Body#")==1&&count("_MainTex (resource\\gimi\\diffuse rbody, sRGB): Avatar_Tex_Body_Diffuse#")==1&&count("readback=ok")==1);
   assert(count("skipped ps-t3 rramp [ramp]: no confirmed game property (待诊断)")==1&&count("texture-load -/direct TexMod: 2 textures")==1&&JsonParser(text(sharedTex+"/status.json")).parse().at("detail").string=="TexMod：直接改材质，1 / 1 个槽位已写入");
-  f->diffuse[mat]=gameTex;run(1000);assert(f->diffuse[mat]==ours&&count("_MainTex overwritten by the game (now Avatar_Tex_Body_Diffuse#")==1&&count("writing again (1)")==1);
+  f->diffuse[mat]=gameTex;run(1000);assert(f->diffuse[mat]==ours&&count("_MainTex overwritten by the game (now Avatar_Tex_Body_Diffuse#")==1&&count("noticed by the per-tick check")==1&&count("ms (1)")==1);
   // $colour = 1: the other texture on the same slot.
   write(sharedTex+"/control.json","{\"enabled\":true,\"selected\":[\"TexMod\"],\"variables\":{\"TexMod\":{\"$colour\":1}},\"textureMods\":{\"strategy\":\"direct\"}}");run(1500);
   Ptr ours2=f->diffuse[mat];assert(ours2&&ours2!=ours&&ours2!=gameTex&&count("(variant changed)")==1&&count("_MainTex (resource\\gimi\\diffuse rbody2, sRGB)")>=1);
@@ -1240,7 +1241,7 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   // written on the checked LOD; once the full one is gone it goes back and the LOD keeps the confirmed mapping.
   Ptr lodBody=f->renderer(f->mesh("Body_LOD1",2)),lodMat=load<Ptr>(f->obj[lodBody].materials+0x20);f->diffuse[lodMat]=gameTex;f->world(lodBody);f->scene={lodBody,body};
   control("direct",true,",\"lod\":\"migrate\"");run(4000);
-  assert(f->diffuse[lodMat]!=gameTex&&f->diffuse[mat]!=gameTex&&count("evidence=迁移自 Body#")==1&&count("（核对：渲染器名、网格 body、1 子网格 / 1 材质、槽位材质 ）")==1);
+  assert(f->diffuse[lodMat]!=gameTex&&f->diffuse[mat]!=gameTex&&count("evidence=迁移自 Body#")==1&&count("（核对：渲染器名、网格 body、avatar、1 子网格 / 1 材质、各槽位材质名）")==1);
   // The full one gets another mesh (a page closed, the renderer reused): no longer a target, it goes back; the LOD keeps it.
   Ptr fullMesh=f->obj[body].mesh;f->obj[body].mesh=f->mesh("Other",3);texRanges[f->obj[body].mesh]={{5,3}};f->scene={lodBody};run(3000);
   assert(f->diffuse[mat]==gameTex&&f->diffuse[lodMat]!=gameTex&&count("(no longer a target) | _MainTex: back to")==1);f->obj[body].mesh=fullMesh;
@@ -1274,16 +1275,58 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   run(3000);assert(f->diffuse[mat]!=gameTex);Ptr ours=f->diffuse[mat];
   // The same Mesh object on another renderer in the scene: written by the per-tick scan, the diagnostics not involved.
   Ptr twin=f->renderer(f->obj[body].mesh),tmat=load<Ptr>(f->obj[twin].materials+0x20);f->diffuse[tmat]=gameTex;f->scene={body,twin};run(700);
-  assert(f->diffuse[tmat]==ours&&count("evidence=同一网格：与 Body#")==1);
+  if(std::getenv("TEXMOD_PRINT")){auto l=text(logQ);size_t p=0;while((p=l.find("texture-",p))!=std::string::npos){auto e2=l.find('\n',p);std::cerr<<l.substr(p,std::min<size_t>(e2-p,300))<<"\n";p=e2;}}
+  assert(f->diffuse[tmat]==ours&&count("evidence=完整 Mesh 特征与 Body#")>=1);
   // The hand-off: a runtime instance material is written before the game shows the model; a loaded asset is left to the game.
   Ptr handed=f->renderer(f->obj[body].mesh),hmat=load<Ptr>(f->obj[handed].materials+0x20);f->diffuse[hmat]=gameTex;store<uint32_t>(load<Ptr>(hmat+0x10)+8,uint32_t(-7));
-  Ptr go=f->gameObjectOf({handed});q.spawned(go);q.spawnedAfter();assert(f->diffuse[hmat]==ours&&count("（在游戏交出模型时、显示之前）")==1);
+  Ptr go=f->gameObjectOf({handed});q.spawned(go);q.spawnedAfter();assert(f->diffuse[hmat]==ours&&count("seen by hand-off")==1&&count("texture-handoff TexMod: Avatar_Girl_Catalyst_Citlali_Manekin handed over: 1 renderers read and matched in")>=1);
   Ptr asset=f->renderer(f->obj[body].mesh),amat=load<Ptr>(f->obj[asset].materials+0x20);f->diffuse[amat]=gameTex;Ptr go2=f->gameObjectOf({asset});q.spawned(go2);q.spawnedAfter();
   assert(f->diffuse[amat]==gameTex&&count("still holds the loaded asset material; direct waits for the game's instance")==1);
   // Off: every one of them goes back.
   write(sharedQ+"/control.json","{\"enabled\":true,\"selected\":[],\"textureMods\":{\"strategy\":\"direct\"}}");run(1000);
   assert(f->diffuse[mat]==gameTex&&f->diffuse[tmat]==gameTex&&f->diffuse[hmat]==gameTex);
   q.shutdown();f->world(0);f->scene={};}
+ // 43. The first match at the game's hand-off: no earlier confirmation, the model not yet in the world; the textures were
+ //     prepared once the mod was on, so the hand-off only checks and binds. The mapping is saved and, after a restart,
+ //     used for this build and these rules only; a lower LOD without migration waits and says why; a material the game
+ //     swaps at its mesh binding is written again right there.
+ {std::string mediaH=root+"/mediaHand",sharedH=mediaH+"/"+pkg+"/GIBox",modH=sharedH+"/models/TexMod",logH=sharedH+"/GIBox Log.txt";std::filesystem::create_directories(modH+"/textures");
+  Ptr entity=load<Ptr>(load<Ptr>(load<Ptr>(f->manager+0x10)+0x10)+0x20);store<uint32_t>(entity+0x3a4,10000107);
+  Ptr seed=f->renderer(f->mesh("Seed",3));f->world(seed);f->scene={seed};   // learns the renderer type / GameObject class; not the mod's mesh
+  texRanges[f->obj[seed].mesh]={{9,3}};
+  Bytes px(16,0x7f);write(modH+"/textures/0.rgba",px.data(),px.size());
+  write(modH+"/texture.json",R"J({"format":"gibox-texture-mod","version":1,"name":"TexMod","generation":"h1","character":{"id":10000107},"variants":{"vars":[],"default":{}},
+   "textures":[{"resource":"rbody","file":"textures/0.rgba","width":2,"height":2}],
+   "diag":{"format":"gibox-texture-diag","version":1,"name":"TexMod","character":10000107,"rules":[{"section":"TextureOverrideModBodyA","part":"ModBodyA","hint":"body","hash":"d5ae71a3","first":0,"kind":"segment","textures":[
+    {"slot":"ps-t0","resource":"rbody","role":"diffuse","condition":"","via":""}]}],"resources":[]}})J");
+  write(sharedH+"/control.json","{\"enabled\":true,\"selected\":[\"TexMod\"],\"textureMods\":{\"strategy\":\"clone\"}}");
+  auto count=[&](const std::string& x){auto l=text(logH);size_t n=0;for(size_t p=l.find(x);p!=std::string::npos;p=l.find(x,p+1))n++;return n;};
+  Ptr gameTex=f->object("texture","Avatar_Tex_Body_Diffuse");Ptr fullMesh=f->mesh("Body",3);
+  {Runtime h(e,pkg,root+"/privateHand",mediaH,false);uint64_t t=8000000;auto run=[&](uint64_t ms){for(uint64_t end=t+ms;t<end;t+=100)h.tick(t);};
+   run(1500);if(std::getenv("TEXMOD_PRINT")){auto l=text(logH);size_t p=0;while((p=l.find("texture-",p))!=std::string::npos){auto e2=l.find('\n',p);std::cerr<<l.substr(p,std::min<size_t>(e2-p,300))<<"\n";p=e2;}}
+   assert(count("texture-ready TexMod: 1 Texture2D made on the game thread")==1&&count("INFO texture-apply")==0);
+   Ptr body=f->renderer(fullMesh),mat=load<Ptr>(f->obj[body].materials+0x20);f->diffuse[mat]=gameTex;Ptr go=f->gameObjectOf({body});
+   h.spawned(go);Ptr slot=load<Ptr>(f->obj[body].materials+0x20);
+   assert(slot!=mat&&f->diffuse[slot]!=gameTex&&count("texture-handoff TexMod: Avatar_Girl_Catalyst_Citlali_Manekin handed over: 1 renderers read and matched in")==1&&count("1 slot(s) confirmed by index starts")==1);
+   assert(count("texture-timing -/clone TexMod: Body#")==1&&count("seen by hand-off, matched +0 ms, textures ready ")==1&&count("texture-map TexMod: 1 confirmed mesh(es) saved to")==1&&exists(modH+"/texture-mapping.json"));
+   // The game swaps the material at its own mesh binding: noticed there, not at the next poll.
+   h.spawnedAfter();Ptr fresh=f->object("material","Material");f->diffuse[fresh]=gameTex;f->obj[body].materials=f->typed("material",fresh);h.meshBound(load<Ptr>(body+0x10));
+   Ptr again=load<Ptr>(f->obj[body].materials+0x20);assert(again!=fresh&&f->diffuse[again]!=gameTex&&count("noticed by the game's mesh binding")==1);
+   // A lower LOD handed over without migration: waits, with the reason.
+   Ptr low=f->renderer(f->mesh("Body_LOD1",2)),lmat=load<Ptr>(f->obj[low].materials+0x20);f->diffuse[lmat]=gameTex;h.spawned(f->gameObjectOf({low}));
+   assert(f->diffuse[lmat]==gameTex&&count("waits: lower LOD Body_LOD1: the setting writes only what the full mesh confirmed")==1);
+   h.shutdown();}
+  // A restart: the saved mapping is checked and used; a new hand-off is written before any diagnostics ran.
+  {Runtime h(e,pkg,root+"/privateHand",mediaH,false);uint64_t t=9000000;auto run=[&](uint64_t ms){for(uint64_t end=t+ms;t<end;t+=100)h.tick(t);};run(1500);
+   assert(count("texture-map TexMod: saved mapping in use: 1 mesh(es) for build 2b4dd731")==1);
+   Ptr body=f->renderer(fullMesh),mat=load<Ptr>(f->obj[body].materials+0x20);f->diffuse[mat]=gameTex;h.spawned(f->gameObjectOf({body}));
+   Ptr slot=load<Ptr>(f->obj[body].materials+0x20);assert(slot!=mat&&f->diffuse[slot]!=gameTex);h.shutdown();}
+  // Another game build: the saved mapping is not used.
+  {auto m=text(modH+"/texture-mapping.json");auto at=m.find(abi::buildId);assert(at!=std::string::npos);m.replace(at,8,"00000000");write(modH+"/texture-mapping.json",m);
+   Runtime h(e,pkg,root+"/privateHand",mediaH,false);uint64_t t=10000000;for(uint64_t end=t+1500;t<end;t+=100)h.tick(t);
+   assert(count("saved mapping not used: made for another game build")==1);h.shutdown();}
+  if(std::getenv("TEXMOD_PRINT")){auto l=text(logH);size_t p=0;while((p=l.find("texture-",p))!=std::string::npos){auto e2=l.find('\n',p);auto x=l.substr(p,std::min<size_t>(e2-p,330));if(x.find("texture-diag")!=0)std::cerr<<"H| "<<x<<"\n";p=e2;}}
+  f->world(0);f->scene={};}
  std::filesystem::remove_all(root);
  std::cout<<"Native runtime: PASS (texture-only diagnostics read-only and cached; logic core: outfits by what the logic selects, App value as input, off, not finite and missing variable refused; App key presses as core key events (cycle, toggle, back, taken once, not replayed at start, refused when not a cycle/toggle key or the core is off), persist saved atomically per model and restored over the App table, not for another INI; driven outfit models (the program picks by clock and keys, the App table not pushed); frames by what the draws select, as FrameLoop, a selection no frame has keeps the frame, no match at the start keeps FrameLoop, switch off; face texture swaps: written, copies tracked, fresh materials, restored, assets copied; direct textures: written, put back, game copies tracked, assets and shared materials copied; merged draws: hidden and non-contiguous ranges, variant switches, separateDraws rebuild; slot textures by property block and custom texture, glow trace windows and read-back, structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, glow experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }
