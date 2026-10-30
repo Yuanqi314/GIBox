@@ -1241,7 +1241,9 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   Ptr lodBody=f->renderer(f->mesh("Body_LOD1",2)),lodMat=load<Ptr>(f->obj[lodBody].materials+0x20);f->diffuse[lodMat]=gameTex;f->world(lodBody);f->scene={lodBody,body};
   control("direct",true,",\"lod\":\"migrate\"");run(4000);
   assert(f->diffuse[lodMat]!=gameTex&&f->diffuse[mat]!=gameTex&&count("evidence=迁移自 Body#")==1&&count("（核对：渲染器名、网格 body、1 子网格 / 1 材质、槽位材质 ）")==1);
-  f->scene={lodBody};run(3000);assert(f->diffuse[mat]==gameTex&&f->diffuse[lodMat]!=gameTex&&count("(no longer a target) | _MainTex: back to")==1);
+  // The full one gets another mesh (a page closed, the renderer reused): no longer a target, it goes back; the LOD keeps it.
+  Ptr fullMesh=f->obj[body].mesh;f->obj[body].mesh=f->mesh("Other",3);texRanges[f->obj[body].mesh]={{5,3}};f->scene={lodBody};run(3000);
+  assert(f->diffuse[mat]==gameTex&&f->diffuse[lodMat]!=gameTex&&count("(no longer a target) | _MainTex: back to")==1);f->obj[body].mesh=fullMesh;
   control("direct",false,",\"lod\":\"migrate\"");run(1000);assert(f->diffuse[lodMat]==gameTex);f->world(body);f->scene={};run(1000);
   // diagnose: no game writes at all.
   control("diagnose",true);unsigned writes=gameWrites;run(2000);assert(gameWrites==writes&&f->diffuse[mat]==gameTex&&JsonParser(text(sharedTex+"/status.json")).parse().at("detail").string=="TexMod：只诊断，不写入（设置里可换策略）");
@@ -1255,6 +1257,33 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   assert(count("the source material is destroyed; our copy stays on the slot")==1&&count("T2-1 clone restore: FAILED")==1&&count("texture-test T2 stopped: a restore failed (rounds left: 1)")==1&&alive(copy)&&count("texture-apply T2-2")==0);
   if(std::getenv("TEXMOD_PRINT")){auto l=log();size_t p=0;while((p=l.find("texture-test",p))!=std::string::npos){auto e2=l.find('\n',p);std::cerr<<l.substr(p,std::min<size_t>(e2-p,600))<<"\n";p=e2;}}
   store<Ptr>(mat+0x10,nat);tm.shutdown();f->world(0);}
+ // 42. A confirmed Mesh shown by another renderer (the party / details page): written as soon as it is seen, without the
+ //     diagnostics reading it again; at the game's hand-off even before it is shown, except that "direct" leaves a
+ //     loaded asset material alone there (writing it would reach every copy made from it).
+ {std::string mediaQ=root+"/mediaQuick",sharedQ=mediaQ+"/"+pkg+"/GIBox",modQ=sharedQ+"/models/TexMod",logQ=sharedQ+"/GIBox Log.txt";std::filesystem::create_directories(modQ+"/textures");
+  Ptr entity=load<Ptr>(load<Ptr>(load<Ptr>(f->manager+0x10)+0x10)+0x20);store<uint32_t>(entity+0x3a4,10000107);
+  Ptr body=f->renderer(f->mesh("Body",3)),mat=load<Ptr>(f->obj[body].materials+0x20),gameTex=f->object("texture","Avatar_Tex_Body_Diffuse");f->diffuse[mat]=gameTex;f->world(body);f->scene={body};
+  Bytes px(16,0x7f);write(modQ+"/textures/0.rgba",px.data(),px.size());
+  write(modQ+"/texture.json",R"J({"format":"gibox-texture-mod","version":1,"name":"TexMod","generation":"q1","character":{"id":10000107},"variants":{"vars":[],"default":{}},
+   "textures":[{"resource":"rbody","file":"textures/0.rgba","width":2,"height":2}],
+   "diag":{"format":"gibox-texture-diag","version":1,"name":"TexMod","character":10000107,"rules":[{"section":"TextureOverrideModBodyA","part":"ModBodyA","hint":"body","hash":"d5ae71a3","first":0,"kind":"segment","textures":[
+    {"slot":"ps-t0","resource":"rbody","role":"diffuse","condition":"","via":""}]}],"resources":[]}})J");
+  write(sharedQ+"/control.json","{\"enabled\":true,\"selected\":[\"TexMod\"],\"textureMods\":{\"strategy\":\"direct\"}}");
+  Runtime q(e,pkg,root+"/privateQuick",mediaQ,false);uint64_t t=7000000;auto run=[&](uint64_t ms){for(uint64_t end=t+ms;t<end;t+=100)q.tick(t);};
+  auto count=[&](const std::string& x){auto l=text(logQ);size_t n=0;for(size_t p=l.find(x);p!=std::string::npos;p=l.find(x,p+1))n++;return n;};
+  run(3000);assert(f->diffuse[mat]!=gameTex);Ptr ours=f->diffuse[mat];
+  // The same Mesh object on another renderer in the scene: written by the per-tick scan, the diagnostics not involved.
+  Ptr twin=f->renderer(f->obj[body].mesh),tmat=load<Ptr>(f->obj[twin].materials+0x20);f->diffuse[tmat]=gameTex;f->scene={body,twin};run(700);
+  assert(f->diffuse[tmat]==ours&&count("evidence=同一网格：与 Body#")==1);
+  // The hand-off: a runtime instance material is written before the game shows the model; a loaded asset is left to the game.
+  Ptr handed=f->renderer(f->obj[body].mesh),hmat=load<Ptr>(f->obj[handed].materials+0x20);f->diffuse[hmat]=gameTex;store<uint32_t>(load<Ptr>(hmat+0x10)+8,uint32_t(-7));
+  Ptr go=f->gameObjectOf({handed});q.spawned(go);q.spawnedAfter();assert(f->diffuse[hmat]==ours&&count("（在游戏交出模型时、显示之前）")==1);
+  Ptr asset=f->renderer(f->obj[body].mesh),amat=load<Ptr>(f->obj[asset].materials+0x20);f->diffuse[amat]=gameTex;Ptr go2=f->gameObjectOf({asset});q.spawned(go2);q.spawnedAfter();
+  assert(f->diffuse[amat]==gameTex&&count("still holds the loaded asset material; direct waits for the game's instance")==1);
+  // Off: every one of them goes back.
+  write(sharedQ+"/control.json","{\"enabled\":true,\"selected\":[],\"textureMods\":{\"strategy\":\"direct\"}}");run(1000);
+  assert(f->diffuse[mat]==gameTex&&f->diffuse[tmat]==gameTex&&f->diffuse[hmat]==gameTex);
+  q.shutdown();f->world(0);f->scene={};}
  std::filesystem::remove_all(root);
  std::cout<<"Native runtime: PASS (texture-only diagnostics read-only and cached; logic core: outfits by what the logic selects, App value as input, off, not finite and missing variable refused; App key presses as core key events (cycle, toggle, back, taken once, not replayed at start, refused when not a cycle/toggle key or the core is off), persist saved atomically per model and restored over the App table, not for another INI; driven outfit models (the program picks by clock and keys, the App table not pushed); frames by what the draws select, as FrameLoop, a selection no frame has keeps the frame, no match at the start keeps FrameLoop, switch off; face texture swaps: written, copies tracked, fresh materials, restored, assets copied; direct textures: written, put back, game copies tracked, assets and shared materials copied; merged draws: hidden and non-contiguous ranges, variant switches, separateDraws rebuild; slot textures by property block and custom texture, glow trace windows and read-back, structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, glow experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }
