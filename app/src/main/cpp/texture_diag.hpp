@@ -76,9 +76,10 @@ inline std::string letters(const std::string& s){std::string o;for(unsigned char
 // How well a part hint names a renderer: the length of the renderer's name when the hint ends or starts with it.
 inline size_t nameScore(const std::string& hint,const std::string& renderer){auto h=letters(hint),r=letters(normalize(renderer));if(r.empty()||h.empty())return 0;
  bool end=h.size()>=r.size()&&h.compare(h.size()-r.size(),r.size(),r)==0,start=h.compare(0,r.size(),r)==0;return end||start?r.size():0;}
-// The part a game material is made for: "Avatar_Girl_Sword_PlayerGirl_Mat_Hair (Instance) #0" -> "hair".
+// The part a game material is made for: "Avatar_Girl_Sword_PlayerGirl_Mat_Hair (Instance) #0" -> "hair"; also for
+// the game's instance of a copy, "..._Mat_Hair(Clone) (Instance) #1".
 inline std::string materialPart(const std::string& name){std::string n;for(unsigned char c:name)n+=char(std::tolower(c));
- for(const char* cut:{" (instance)","#"}){auto p=n.find(cut);if(p!=std::string::npos)n.resize(p);}auto p=n.rfind("_mat_");return letters(p==std::string::npos?std::string():n.substr(p+5));}
+ for(const char* cut:{" (instance)","(clone)","#"}){auto p=n.find(cut);if(p!=std::string::npos)n.resize(p);}auto p=n.rfind("_mat_");return letters(p==std::string::npos?std::string():n.substr(p+5));}
 // How well a part hint names a material's part. GIMI calls the game's hair part "Head" (its Head draws use the game's
 // Hair textures): that naming convention is the one alias, and the reason says so.
 inline size_t partScore(const std::string& hint,const std::string& part,bool* alias=nullptr){if(part.empty())return 0;auto s=nameScore(hint,part);if(alias)*alias=false;

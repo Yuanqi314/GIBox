@@ -88,7 +88,7 @@ int main(){
  auto low=lumineWorld(true,true,{{0,4218},{4218,16011},{20229,1944}});auto wm=match(lumine,low);
  for(int k=0;k<3;k++){assert(wm[size_t(k)].verdict==Verdict::Likely&&wm[size_t(k)].renderer==0&&wm[size_t(k)].slot==k&&has(matchLine(lumine,wm[size_t(k)],low),"its index layout is its own, not comparable with the PC full mesh"));}
  assert(!has2(matchLine(lumine,wm[1],low),"merged")&&has(matchLine(lumine,wm[0],low),"material name and segment order agree"));
- assert(textureFormat(47)=="47 (ETC2_RGBA8)"&&textureFormat(99)=="99 (not in this build's TextureFormat)"&&materialPart("Avatar_Girl_Sword_PlayerGirl_Mat_Hair (Instance) #0")=="hair");
+ assert(textureFormat(47)=="47 (ETC2_RGBA8)"&&textureFormat(99)=="99 (not in this build's TextureFormat)"&&materialPart("Avatar_Girl_Sword_PlayerGirl_Mat_Hair (Instance) #0")=="hair"&&materialPart("Avatar_Girl_Bow_Linnea_Mat_Hair(Clone) (Instance) #1")=="hair");
  // Conditions as TextureDiag writes them, and what a rule writes for given values.
  {std::map<std::string,int> v{{"$colour",1},{"$x",0}};std::string why;
   assert(condition("",v,why)&&condition("$colour == 1",v,why)&&!condition("$colour == 0",v,why)&&condition("!($colour == 0) && $colour == 1",v,why)&&condition("$x == 1 || $colour >= 1",v,why)&&why.empty());

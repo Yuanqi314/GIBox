@@ -537,9 +537,11 @@ struct Runtime::Impl {
  struct TexStore:Owned {std::string generation;std::map<std::string,Ptr> made;std::vector<std::pair<std::string,bool>> wanted;size_t next=0;uint64_t ms=0,bytes=0,ticks=0,readyAt=0;bool done=false;};
  std::map<std::string,std::unique_ptr<TexStore>> texStores;std::vector<std::unique_ptr<TexStore>> texStoresKept;
  struct TexDone {texdiag::Write write;Ptr before=0,ours=0;};
- struct TexSlot {std::string rule,evidence,label,mesh,plan;size_t ruleIndex=0;Ptr renderer=0,native=0,material=0,materialNative=0,clone=0;int slot=-1;bool lod=false;std::vector<TexDone> writes;unsigned again=0;bool gaveUp=false;uint64_t writtenAt=0;};
+ struct TexSlot {std::string rule,evidence,label,mesh,plan;size_t ruleIndex=0;Ptr renderer=0,native=0,material=0,materialNative=0,clone=0;int slot=-1;bool lod=false;std::vector<TexDone> writes;unsigned again=0;bool gaveUp=false;uint64_t writtenAt=0;
+  bool adopted=false;Ptr copy=0,source=0;};   // adopted: material is the game's instance made from ours (copy / source: our copy it came from, the material that copy replaced)
  struct TexLive:Owned {std::string path,mod,strategy,test;std::vector<TexSlot> slots;std::set<std::string> said;};
  std::map<std::string,std::unique_ptr<TexLive>> texLive;std::vector<std::unique_ptr<TexLive>> texStranded;
+ Owned texKept;   // our copies the game made an instance from, put back but not destroyed while their renderer lives (it may hold them)
  std::map<std::string,std::vector<texdiag::Match>> texMatches;std::map<std::string,std::vector<texdiag::Renderer>> texMatchLive;
  struct TexBase {Ptr renderer=0,native=0,material=0;int slot=-1;std::map<std::string,Ptr> textures;std::string label;};
  struct TexTest {long long seen=-1,request=0;std::vector<std::string> strategies;size_t round=0;int phase=0;uint64_t until=0;int observeMs=4000;std::vector<TexBase> base;bool active=false;
@@ -676,14 +678,14 @@ struct Runtime::Impl {
   Ptr mat=current[size_t(t.slot)];require(alive(mat),"slot material destroyed");line+=" material="+texMaterial(mat);
   std::string shared;for(auto& kv:texDiagSeen){if(kv.first==t.renderer||!alive(kv.first))continue;for(auto& x:kv.second.info.materials)if(x.material==mat)shared+=(shared.empty()?"":", ")+texdiag::label(kv.second.info);}
   if(!shared.empty())line+=" shared-with="+shared;
-  if(L.strategy=="direct"&&instanceId(mat)>=0)line+=" (a loaded asset: a direct write changes every user of it until restored)";
   auto ids=texIds(mat);Ptr target=mat;
   if(L.strategy=="clone"){Ptr c=clone(L,mat);s.clone=c;target=c;line+=" copy="+hex(c);}
   pin(L,mat);s.material=mat;s.materialNative=load<Ptr>(mat+0x10);bool ok=true;
   for(auto& w:plan){int32_t id=slotId(w.property.c_str());if(std::find(ids.begin(),ids.end(),id)==ids.end()){line+=" | "+w.property+": the material has no such texture property; not written";continue;}
    std::string note;Ptr ours=texOurs(L,px,w,note);Ptr before=e.call<Ptr>(glow::rvaGetTexture,target,id,Ptr(0));if(alive(before))pin(L,before);putTexture(target,w.property.c_str(),ours);
    Ptr back=e.call<Ptr>(glow::rvaGetTexture,target,id,Ptr(0));ok=ok&&back==ours;s.writes.push_back({w,before,ours});
-   line+=" | "+w.property+" ("+w.slot+" "+w.resource+(w.linear?", linear":", sRGB")+"): "+texDescribe(before)+" -> "+texDescribe(ours)+note+" readback="+(back==ours?"ok":"FAILED, now "+texDescribe(back));}
+   line+=" | "+w.property+" ("+w.slot+" "+w.resource+(w.linear?", linear":", sRGB")+"): "+texDescribe(before)+" -> "+texDescribe(ours)+note+" readback="+(back==ours?"ok":"FAILED, now "+texDescribe(back));
+   if(texOursTexture(before))line+=" (the material already carried ours: made from one we wrote; its original texture is not known here)";}
   for(auto& k:skipped)line+=" | skipped "+k;
   if(s.writes.empty())line+=" | nothing to write";
   if(s.clone){std::vector<Ptr> next=current;next[size_t(t.slot)]=s.clone;Owned tmp;try{e.set(abi::setMaterials,t.renderer,array(tmp,arr,next.data(),next.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);
@@ -694,9 +696,28 @@ struct Runtime::Impl {
    std::string ready="textures made on demand";{auto st=texStores.find(L.path);if(st!=texStores.end()&&st->second&&st->second->readyAt){auto r=st->second->readyAt;ready="textures ready "+(r<=tt.seen?std::to_string(tt.seen-r)+" ms before it was seen":"+"+std::to_string(r-tt.seen)+" ms after it was seen");}}
    log("texture-timing",texTag(L)+": "+t.label+" seen by "+tt.via+", matched "+(tt.matched?"+"+std::to_string(tt.matched-tt.seen)+" ms":std::string("before (saved / confirmed mapping)"))+", "+ready+", first write +"+std::to_string(now-tt.seen)+" ms"+(t.evidence.find("迁移")!=std::string::npos?" (migrated LOD)":""));}
   texPending.erase(t.renderer);return ok;}
+ // Our textures on m (a material off the slot or the game's instance made from ours) back to what they replaced.
+ bool texPutBack(Ptr m,const TexSlot& s,std::string& line,const std::string& what){bool ok=true;if(!alive(m)){line+=" | "+what+" "+hex(m)+": gone";return true;}
+  for(auto& w:s.writes){int32_t id=slotId(w.write.property.c_str());Ptr now=e.call<Ptr>(glow::rvaGetTexture,m,id,Ptr(0));if(now!=w.ours)continue;
+   putTexture(m,w.write.property.c_str(),w.before);Ptr back=e.call<Ptr>(glow::rvaGetTexture,m,id,Ptr(0));bool good=back==w.before;ok=ok&&good;
+   line+=" | "+what+" "+w.write.property+": back to "+texDescribe(w.before)+(good?" (verified)":" FAILED, now "+texDescribe(back));}
+  return ok;}
+ // Every texture we wrote is on m: the game made it from our copy or from the material we wrote.
+ bool texDerived(const TexSlot& s,Ptr on){if(!alive(on)||on==s.material||on==s.clone||on==s.copy||s.writes.empty())return false;
+  for(auto& w:s.writes){if(e.call<Ptr>(glow::rvaGetTexture,on,slotId(w.write.property.c_str()),Ptr(0))!=w.ours)return false;}return true;}
+ // The slot follows the game's instance made from ours. Our copy it came from stays alive (the game may hold it); a
+ // material we wrote that is now off the slot gets its textures back. The textures it replaced stay the ones to restore.
+ bool texAdopt(TexLive& L,TexSlot& s,Ptr on,std::string& line){bool ok=true;
+  if(s.clone){line="our copy "+hex(s.clone)+" and already carries our textures, so it stays on the slot and is watched in place (not copied again: the game drives its own instance, e.g. the entrance glow); our copy is kept alive";s.copy=s.clone;s.source=s.material;s.clone=0;}
+  else{line=std::string(s.adopted?"the game's earlier instance ":"the material we wrote ")+hex(s.material)+" and already carries our textures, so it stays on the slot and is watched in place";ok=texPutBack(s.material,s,line,"the material off the slot");}
+  pin(L,on);s.material=on;s.materialNative=load<Ptr>(on+0x10);s.adopted=true;return ok;}
+ // The game put our earlier copy back: the slot is our copy again, the instance it had made off the slot gets its textures back.
+ void texResume(TexSlot& s,std::string& line){texPutBack(s.material,s,line,"the game's instance off the slot");s.clone=s.copy;s.copy=0;s.material=s.source;s.source=0;s.materialNative=alive(s.material)?load<Ptr>(s.material+0x10):0;s.adopted=false;}
  // Puts back one slot; false when something of ours could not be taken off (then nothing of ours is destroyed).
  bool texRestore(TexLive& L,TexSlot& s,const std::string& why){std::string line=texTag(L)+": "+s.rule+" on "+s.label+" slot "+std::to_string(s.slot)+" ("+why+")";bool ok=true;
   bool live=alive(s.renderer)&&load<Ptr>(s.renderer+0x10)==s.native;
+  if(s.copy&&live){Ptr arr=e.get(abi::getMaterials,s.renderer);auto list=arr?pointers(arr,64):std::vector<Ptr>{};if(size_t(s.slot)<list.size()&&list[size_t(s.slot)]==s.copy){texResume(s,line);line+=" | the game had put our copy back";}}
+  if(s.adopted)line+=": the game's instance "+hex(s.material)+" made from ours";
   if(s.clone){if(live){Ptr arr=e.get(abi::getMaterials,s.renderer);auto list=arr?pointers(arr,64):std::vector<Ptr>{};
      if(size_t(s.slot)<list.size()&&list[size_t(s.slot)]==s.clone){if(alive(s.material)){list[size_t(s.slot)]=s.material;Owned tmp;try{e.set(abi::setMaterials,s.renderer,array(tmp,arr,list.data(),list.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);
        Ptr now=e.get(abi::getMaterials,s.renderer);Ptr on=now?pointers(now,64)[size_t(s.slot)]:0;ok=on==s.material;line+=std::string(": source material back ")+(ok?"(verified)":"FAILED, slot holds "+hex(on));}
@@ -709,6 +730,10 @@ struct Runtime::Impl {
     Ptr now=e.call<Ptr>(glow::rvaGetTexture,s.material,id,Ptr(0));if(now!=w.ours){line+=" | "+w.write.property+": now "+texDescribe(now)+" (changed by the game); left";continue;}
     putTexture(s.material,w.write.property.c_str(),w.before);Ptr back=e.call<Ptr>(glow::rvaGetTexture,s.material,id,Ptr(0));bool good=back==w.before;ok=ok&&good;
     line+=" | "+w.write.property+": back to "+texDescribe(w.before)+(good?" (verified)":" FAILED, now "+texDescribe(back));}
+  // Our copy the game made its instance from: its textures back; destroyed only once its renderer is gone.
+  if(s.copy){bool good=texPutBack(s.copy,s,line,"our earlier copy");ok=ok&&good;
+   if(good){auto& v=L.objects;v.erase(std::remove(v.begin(),v.end(),s.copy),v.end());
+    if(live&&alive(s.copy)){texKept.objects.push_back(s.copy);line+="; our earlier copy kept alive (the game made its instance from it and may still hold it)";}else{if(alive(s.copy))e.action(abi::destroy,s.copy);line+="; our earlier copy destroyed";}s.copy=0;}}
   log("texture-restore",line+(ok?"":"; RESTORE FAILED"));return ok;}
  bool texRestoreAll(TexLive& L,const std::string& why){bool ok=true;for(auto& s:L.slots)ok=texRestore(L,s,why)&&ok;L.slots.clear();return ok;}
  void texDrop(std::unique_ptr<TexLive> L,bool ok){if(ok){freeOwned(*L);return;}log("texture-restore",texTag(*L)+": something of ours stays in the game; its textures and copies are kept alive (not destroyed)");texStranded.push_back(std::move(L));}
@@ -719,15 +744,28 @@ struct Runtime::Impl {
  void texWatchRenderer(TexLive& L,const texdiag::TextureMod& m,const std::map<std::string,Texture>& px,Ptr r,const std::string& via){
   bool any=false;for(auto& s:L.slots)any=any||(s.renderer==r&&!s.gaveUp);if(!any||!alive(r))return;Ptr arr=e.get(abi::getMaterials,r);if(!arr)return;auto list=pointers(arr,64);
   for(auto& s:L.slots){if(s.renderer!=r||s.gaveUp||size_t(s.slot)>=list.size())continue;Ptr on=list[size_t(s.slot)];std::string event;
+   std::string head=texTag(L)+": "+s.rule+" on "+s.label+" slot "+std::to_string(s.slot)+": ";
+   // The game put back our copy it had made its instance from: the slot is ours again, watched as a copy.
+   if(s.copy&&on==s.copy){std::string line;texResume(s,line);log("texture-event",head+"the game put our earlier copy back on the slot; ours again, watched as a copy"+line+"; noticed by "+via);continue;}
+   bool derived=on!=(s.clone?s.clone:s.material)&&texDerived(s,on);
    if(s.clone){if(on!=s.clone)event="the game put "+(alive(on)?texMaterial(on):hex(on))+" in place of our copy";}
    else if(on!=s.material)event="the game put "+(alive(on)?texMaterial(on):hex(on))+" in place of "+hex(s.material);
    else for(auto& w:s.writes){Ptr now=e.call<Ptr>(glow::rvaGetTexture,s.material,slotId(w.write.property.c_str()),Ptr(0));if(now!=w.ours){event=w.write.property+" overwritten by the game (now "+texDescribe(now)+")";break;}}
    if(event.empty()){continue;}uint64_t noticed=texClock(),since=s.writtenAt?noticed-s.writtenAt:0;
-   if(++s.again>16){s.gaveUp=true;log("texture-event",texTag(L)+": "+s.rule+" on "+s.label+" slot "+std::to_string(s.slot)+": "+event+"; done again 16 times, stops here");continue;}
-   unsigned again=s.again;TexTarget t{s.renderer,s.native,s.slot,s.ruleIndex,s.evidence,s.label,s.mesh,s.lod};
+   if(++s.again>16){s.gaveUp=true;log("texture-event",head+event+"; done again 16 times, stops here");continue;}
+   unsigned again=s.again;std::string when="; noticed by "+via+" "+std::to_string(since)+" ms after our write";
+   // A material the game made from ours (its per-renderer instance of our copy or of the material we wrote, as the
+   // details page's entrance does) already carries our textures and is what the game goes on driving (the entrance
+   // glow): it stays on the slot and is watched in place. Copying it again would show a still of the effect.
+   if(derived){std::string line;bool ok=texAdopt(L,s,on,line);log("texture-event",head+event+"; it was made from "+line+(ok?"":"; RESTORE FAILED")+when+" ("+std::to_string(again)+")");continue;}
+   // The game's instance made from ours lost a texture: written again in it, not copied.
+   if(s.adopted&&on==s.material){std::string line;for(auto& w:s.writes){int32_t id=slotId(w.write.property.c_str());Ptr now=e.call<Ptr>(glow::rvaGetTexture,s.material,id,Ptr(0));if(now==w.ours)continue;
+      putTexture(s.material,w.write.property.c_str(),w.ours);Ptr back=e.call<Ptr>(glow::rvaGetTexture,s.material,id,Ptr(0));line+=" | "+w.write.property+": "+texDescribe(now)+" -> "+texDescribe(w.ours)+" readback="+(back==w.ours?"ok":"FAILED, now "+texDescribe(back));}
+    s.writtenAt=texClock();log("texture-event",head+event+"; written again in the game's instance made from ours (not copied)"+line+when+" ("+std::to_string(again)+")");continue;}
+   TexTarget t{s.renderer,s.native,s.slot,s.ruleIndex,s.evidence,s.label,s.mesh,s.lod};
    bool restored=texRestore(L,s,"re-apply after the game's change");if(!restored){s.gaveUp=true;continue;}
    try{texApply(L,m,px,t,s);s.again=again;}catch(const std::exception& ex){log("texture-error",texTag(L)+": "+ex.what());s.gaveUp=true;continue;}
-   log("texture-event",texTag(L)+": "+s.rule+" on "+s.label+" slot "+std::to_string(s.slot)+": "+event+"; noticed by "+via+" "+std::to_string(since)+" ms after our write, written again within "+std::to_string(texClock()-noticed)+" ms ("+std::to_string(again)+")");}}
+   log("texture-event",head+event+when+", written again within "+std::to_string(texClock()-noticed)+" ms ("+std::to_string(again)+")");}}
  bool texLiveFor(const std::string& path,const TexDiagFile& f,const std::string& strategy,const std::string& test,TexLive*& out,std::shared_ptr<std::map<std::string,Texture>>& px,std::string& why){
   out=nullptr;if(!texPixelsReady(path,f,px,why))return false;auto& L=texLive[path];
   if(!L){L=std::make_unique<TexLive>();L->path=path;L->mod=f.mod->name;L->strategy=strategy;L->test=test;uint64_t bytes=0,ms=0;{std::lock_guard<std::mutex> l(sm);auto& p=texPixels[path];bytes=p.bytes;ms=p.ms;}
@@ -743,14 +781,19 @@ struct Runtime::Impl {
    std::vector<Ptr> pool;try{pool=worldRenderers();}catch(const std::exception&){}for(auto& sn:seen)pool.push_back(sn.renderer);for(Ptr r:texPending)pool.push_back(r);
    for(Ptr r:pool)texQuickApply(*L,kv.first,*f->second.mod,*px,r,"scan",false);}}
  // A renderer with no slot yet: written when its mesh is a mapped one and the textures are ready; else the wait is said.
+ // A model the game handed over first shows the loaded asset material, then the game's instance made from it: direct
+ // waits for the instance on every path (writing the asset reaches every copy made from it, and an instance made from
+ // a written asset would hide the texture to restore).
+ bool texAssetWait(TexLive& L,const TexTarget& t,const std::string& via){if(L.strategy!="direct")return false;Ptr arr=e.get(abi::getMaterials,t.renderer);auto mats=arr?pointers(arr,64):std::vector<Ptr>{};
+  if(size_t(t.slot)>=mats.size()||instanceId(mats[size_t(t.slot)])<0){return false;}texPending.insert(t.renderer);
+  texSay(L,"asset|"+hex(t.renderer),"texture-wait",texTag(L)+": "+t.label+" ("+via+") still holds the loaded asset material; direct waits for the game's instance (writing the asset would reach every copy made from it)");return true;}
  void texQuickApply(TexLive& L,const std::string& path,const texdiag::TextureMod& m,const std::map<std::string,Texture>& px,Ptr r,const std::string& via,bool handoff){
   try{if(!alive(r)||attachments.count(r)||swapped.count(r))return;for(auto& x:L.slots)if(x.renderer==r)return;
    std::string why;auto targets=texRecordTargets(path,m,r,why);Ptr native=load<Ptr>(r+0x10);
    if(targets.empty()){if(!why.empty())texSay(L,"wait|"+hex(r)+"|"+why,"texture-wait",texTag(L)+": "+rendererName(r)+"#"+hex(native)+" waits: "+why);return;}
    texSeen(native,via);auto& tt=texTimes[native];if(!tt.matched)tt.matched=texClock();
    if(!texStoreReady(path,why)){texPending.insert(r);texSay(L,"ready|"+hex(r),"texture-wait",texTag(L)+": "+targets[0].label+" matched ("+via+") but waits: "+why);return;}
-   if(L.strategy=="direct"&&handoff){Ptr arr=e.get(abi::getMaterials,r);auto mats=arr?pointers(arr,64):std::vector<Ptr>{};
-    for(auto& t:targets)if(size_t(t.slot)<mats.size()&&instanceId(mats[size_t(t.slot)])>=0){texPending.insert(r);texSay(L,"asset|"+hex(r),"texture-wait",texTag(L)+": "+t.label+" at the hand-off still holds the loaded asset material; direct waits for the game's instance (writing the asset would reach every copy made from it)");return;}}
+   for(auto& t:targets)if(texAssetWait(L,t,via))return;
    for(auto& t:targets){TexSlot fresh;texApply(L,m,px,t,fresh);L.slots.push_back(std::move(fresh));}if(handoff)texHanded.push_back(r);}
   catch(const std::exception& ex){texSay(L,"quick|"+hex(r)+"|"+ex.what(),"texture-error",texTag(L)+": "+ex.what());}}
  // The game's model hand-off (Runtime::spawned), before it shows the model: its renderers are read and matched here
@@ -788,8 +831,9 @@ struct Runtime::Impl {
  bool texVerify(const std::vector<TexBase>& base,std::string& report){bool ok=true;
   for(auto& b:base){std::string r=b.label+" slot "+std::to_string(b.slot)+": ";if(!alive(b.renderer)||load<Ptr>(b.renderer+0x10)!=b.native){report+=r+"renderer gone; ";continue;}
    Ptr arr=e.get(abi::getMaterials,b.renderer);auto list=arr?pointers(arr,64):std::vector<Ptr>{};Ptr on=size_t(b.slot)<list.size()?list[size_t(b.slot)]:0;
-   bool ours=false;for(auto& kv:texLive)if(kv.second)for(auto& s:kv.second->slots)ours=ours||s.clone==on;for(auto& L:texStranded)for(auto& o:L->objects)ours=ours||o==on;
-   if(on!=b.material){if(ours){ok=false;report+=r+"our copy is still on the slot; ";}else report+=r+"the game replaced the material ("+hex(b.material)+" -> "+hex(on)+"), not counted; ";continue;}
+   bool ours=false;for(auto& kv:texLive)if(kv.second)for(auto& s:kv.second->slots)ours=ours||s.clone==on;for(auto& L:texStranded)for(auto& o:L->objects)ours=ours||o==on;for(auto& o:texKept.objects)ours=ours||o==on;
+   if(on!=b.material){std::string still;if(alive(on))for(auto& kv:b.textures)if(texOursTexture(e.call<Ptr>(glow::rvaGetTexture,on,slotId(kv.first.c_str()),Ptr(0))))still+=" "+kv.first;
+    if(ours){ok=false;report+=r+"our copy is still on the slot; ";}else if(!still.empty()){ok=false;report+=r+"the game's material "+hex(on)+" in its place still carries ours:"+still+"; ";}else report+=r+"the game replaced the material ("+hex(b.material)+" -> "+hex(on)+"), not counted; ";continue;}
    for(auto& kv:b.textures){Ptr now=e.call<Ptr>(glow::rvaGetTexture,on,slotId(kv.first.c_str()),Ptr(0));bool mine=texOursTexture(now);
     if(now==kv.second){continue;}if(mine){ok=false;report+=r+kv.first+" still ours; ";}else report+=r+kv.first+" changed by the game ("+texDescribe(kv.second)+" -> "+texDescribe(now)+"), not counted; ";}
    if(ok)report+=r+"as saved; ";}
@@ -830,7 +874,7 @@ struct Runtime::Impl {
     if(still&&plan==it->plan){++it;continue;}bool ok=texRestore(*L,*it,still?"variant changed":"no longer a target");if(!ok){failed=true;break;}it=L->slots.erase(it);}
    if(failed){texDrop(std::move(texLive[kv.first]),false);texLive.erase(kv.first);status+=(status.empty()?"":"；")+who+"还原失败，已停止";continue;}
    size_t done=0;for(auto& t:targets){TexSlot* s=nullptr;for(auto& x:L->slots)if(x.renderer==t.renderer&&x.slot==t.slot)s=&x;
-    try{if(s){if(!s->gaveUp)done++;continue;}texSeen(t.native,"scan");auto& tt=texTimes[t.native];if(!tt.matched)tt.matched=texClock();TexSlot fresh;bool ok=texApply(*L,m,*px,t,fresh);L->slots.push_back(std::move(fresh));if(ok)done++;}
+    try{if(s){if(!s->gaveUp)done++;continue;}if(texAssetWait(*L,t,"scan"))continue;texSeen(t.native,"scan");auto& tt=texTimes[t.native];if(!tt.matched)tt.matched=texClock();TexSlot fresh;bool ok=texApply(*L,m,*px,t,fresh);L->slots.push_back(std::move(fresh));if(ok)done++;}
     catch(const std::exception& ex){texSay(*L,"err|"+hex(t.renderer)+"|"+std::to_string(t.slot)+"|"+ex.what(),"texture-error",texTag(*L)+": "+t.label+" slot "+std::to_string(t.slot)+": "+ex.what());}}
    if(targets.empty())status+=(status.empty()?"":"；")+who+"等待映射（没有确定匹配的槽位："+(ctl.tex.lod=="migrate"?"打开队伍预览或角色详情让完整模型出现一次":"大世界多为低精度模型；打开队伍预览或角色详情，或允许迁移到 LOD")+"）";
    else{status+=(status.empty()?"":"；")+who+(strategy=="direct"?"直接改材质":"克隆材质")+"，"+std::to_string(done)+" / "+std::to_string(targets.size())+" 个槽位已写入";texApplied=texApplied||done>0;}}

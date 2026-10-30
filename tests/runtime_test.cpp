@@ -1213,6 +1213,7 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
  {std::string mediaTex=root+"/mediaTex",sharedTex=mediaTex+"/"+pkg+"/GIBox",modDir=sharedTex+"/models/TexMod",logFile=sharedTex+"/GIBox Log.txt";std::filesystem::create_directories(modDir+"/textures");
   Ptr entity=load<Ptr>(load<Ptr>(load<Ptr>(f->manager+0x10)+0x10)+0x20);store<uint32_t>(entity+0x3a4,10000107);
   Ptr body=f->renderer(f->mesh("Body",3)),mat=load<Ptr>(f->obj[body].materials+0x20),gameTex=f->object("texture","Avatar_Tex_Body_Diffuse");f->diffuse[mat]=gameTex;f->world(body);f->scene={};
+  store<uint32_t>(load<Ptr>(mat+0x10)+8,uint32_t(-3));   // the field's materials are the game's instances ("direct" leaves a loaded asset alone)
   Bytes px(16,0x7f);write(modDir+"/textures/0.rgba",px.data(),px.size());write(modDir+"/textures/1.rgba",px.data(),px.size());
   write(modDir+"/texture.json",R"J({"format":"gibox-texture-mod","version":1,"name":"TexMod","generation":"t1","character":{"id":10000107},
    "variants":{"vars":[{"name":"$colour","values":[0,1]}],"default":{"$colour":0}},
@@ -1237,9 +1238,19 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   assert(f->diffuse[mat]==gameTex&&count("(strategy clone) | _MainTex: back to Avatar_Tex_Body_Diffuse#")==1&&count("(verified)")>=1&&slot!=mat&&alive(slot)&&f->diffuse[slot]&&f->diffuse[slot]!=gameTex&&count("texture-apply -/clone TexMod")==1&&count("slot readback=ok (our copy)")==1);
   // Off: the material back, our copy destroyed.
   control("clone",false);run(1000);assert(load<Ptr>(f->obj[body].materials+0x20)==mat&&!alive(slot)&&f->diffuse[mat]==gameTex&&count("(mod switched off): source material back (verified); copy destroyed")==1);
+  // The game makes its own instance from our copy (as the details page's entrance does): it carries our texture, so it
+  // stays on the slot and is not copied again (the game goes on driving it). Off: its texture back, the slot left to
+  // the game, our copy kept alive while the renderer lives.
+  control("clone",true);run(1500);slot=load<Ptr>(f->obj[body].materials+0x20);assert(slot!=mat&&f->diffuse[slot]!=gameTex);
+  unsigned made=f->clones;Ptr inst=clone(slot,0);f->obj[inst].name="Material(Clone) (Instance)";store<uint32_t>(load<Ptr>(inst+0x10)+8,uint32_t(-9));f->obj[body].materials=f->typed("material",inst);run(1000);
+  assert(load<Ptr>(f->obj[body].materials+0x20)==inst&&f->diffuse[inst]==f->diffuse[slot]&&f->clones==made+1&&count("; it was made from our copy ")==1&&alive(slot));
+  f->diffuse[inst]=gameTex;run(500);assert(f->diffuse[inst]!=gameTex&&f->clones==made+1&&count("written again in the game's instance made from ours (not copied)")==1);
+  control("clone",false);run(1000);
+  assert(load<Ptr>(f->obj[body].materials+0x20)==inst&&f->diffuse[inst]==gameTex&&f->diffuse[slot]==gameTex&&alive(slot)&&count("our earlier copy kept alive")==1&&count("RESTORE FAILED")==0);
+  f->obj[body].materials=f->typed("material",mat);
   // LOD migration: the field shows Body_LOD1, the party page the full Body. The slot confirmed on the full mesh is also
   // written on the checked LOD; once the full one is gone it goes back and the LOD keeps the confirmed mapping.
-  Ptr lodBody=f->renderer(f->mesh("Body_LOD1",2)),lodMat=load<Ptr>(f->obj[lodBody].materials+0x20);f->diffuse[lodMat]=gameTex;f->world(lodBody);f->scene={lodBody,body};
+  Ptr lodBody=f->renderer(f->mesh("Body_LOD1",2)),lodMat=load<Ptr>(f->obj[lodBody].materials+0x20);f->diffuse[lodMat]=gameTex;store<uint32_t>(load<Ptr>(lodMat+0x10)+8,uint32_t(-4));f->world(lodBody);f->scene={lodBody,body};
   control("direct",true,",\"lod\":\"migrate\"");run(4000);
   assert(f->diffuse[lodMat]!=gameTex&&f->diffuse[mat]!=gameTex&&count("evidence=迁移自 Body#")==1&&count("（核对：渲染器名、网格 body、avatar、1 子网格 / 1 材质、各槽位材质名）")==1);
   // The full one gets another mesh (a page closed, the renderer reused): no longer a target, it goes back; the LOD keeps it.
@@ -1263,7 +1274,7 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
  //     loaded asset material alone there (writing it would reach every copy made from it).
  {std::string mediaQ=root+"/mediaQuick",sharedQ=mediaQ+"/"+pkg+"/GIBox",modQ=sharedQ+"/models/TexMod",logQ=sharedQ+"/GIBox Log.txt";std::filesystem::create_directories(modQ+"/textures");
   Ptr entity=load<Ptr>(load<Ptr>(load<Ptr>(f->manager+0x10)+0x10)+0x20);store<uint32_t>(entity+0x3a4,10000107);
-  Ptr body=f->renderer(f->mesh("Body",3)),mat=load<Ptr>(f->obj[body].materials+0x20),gameTex=f->object("texture","Avatar_Tex_Body_Diffuse");f->diffuse[mat]=gameTex;f->world(body);f->scene={body};
+  Ptr body=f->renderer(f->mesh("Body",3)),mat=load<Ptr>(f->obj[body].materials+0x20),gameTex=f->object("texture","Avatar_Tex_Body_Diffuse");f->diffuse[mat]=gameTex;f->world(body);f->scene={body};store<uint32_t>(load<Ptr>(mat+0x10)+8,uint32_t(-5));
   Bytes px(16,0x7f);write(modQ+"/textures/0.rgba",px.data(),px.size());
   write(modQ+"/texture.json",R"J({"format":"gibox-texture-mod","version":1,"name":"TexMod","generation":"q1","character":{"id":10000107},"variants":{"vars":[],"default":{}},
    "textures":[{"resource":"rbody","file":"textures/0.rgba","width":2,"height":2}],
@@ -1274,7 +1285,7 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   auto count=[&](const std::string& x){auto l=text(logQ);size_t n=0;for(size_t p=l.find(x);p!=std::string::npos;p=l.find(x,p+1))n++;return n;};
   run(3000);assert(f->diffuse[mat]!=gameTex);Ptr ours=f->diffuse[mat];
   // The same Mesh object on another renderer in the scene: written by the per-tick scan, the diagnostics not involved.
-  Ptr twin=f->renderer(f->obj[body].mesh),tmat=load<Ptr>(f->obj[twin].materials+0x20);f->diffuse[tmat]=gameTex;f->scene={body,twin};run(700);
+  Ptr twin=f->renderer(f->obj[body].mesh),tmat=load<Ptr>(f->obj[twin].materials+0x20);f->diffuse[tmat]=gameTex;store<uint32_t>(load<Ptr>(tmat+0x10)+8,uint32_t(-6));f->scene={body,twin};run(700);
   if(std::getenv("TEXMOD_PRINT")){auto l=text(logQ);size_t p=0;while((p=l.find("texture-",p))!=std::string::npos){auto e2=l.find('\n',p);std::cerr<<l.substr(p,std::min<size_t>(e2-p,300))<<"\n";p=e2;}}
   assert(f->diffuse[tmat]==ours&&count("evidence=完整 Mesh 特征与 Body#")>=1);
   // The hand-off: a runtime instance material is written before the game shows the model; a loaded asset is left to the game.
@@ -1282,9 +1293,15 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   Ptr go=f->gameObjectOf({handed});q.spawned(go);q.spawnedAfter();assert(f->diffuse[hmat]==ours&&count("seen by hand-off")==1&&count("texture-handoff TexMod: Avatar_Girl_Catalyst_Citlali_Manekin handed over: 1 renderers read and matched in")>=1);
   Ptr asset=f->renderer(f->obj[body].mesh),amat=load<Ptr>(f->obj[asset].materials+0x20);f->diffuse[amat]=gameTex;Ptr go2=f->gameObjectOf({asset});q.spawned(go2);q.spawnedAfter();
   assert(f->diffuse[amat]==gameTex&&count("still holds the loaded asset material; direct waits for the game's instance")==1);
+  run(500);assert(f->diffuse[amat]==gameTex);   // the per-tick scan waits too
+  Ptr ainst=clone(amat,0);store<uint32_t>(load<Ptr>(ainst+0x10)+8,uint32_t(-11));f->obj[asset].materials=f->typed("material",ainst);run(300);assert(f->diffuse[ainst]==ours&&f->diffuse[amat]==gameTex);
+  // The game makes its instance from a material we wrote: the instance carries ours and is followed, the material off
+  // the slot gets its texture back, and switching off restores the instance to the texture saved first.
+  Ptr minst=clone(mat,0);store<uint32_t>(load<Ptr>(minst+0x10)+8,uint32_t(-13));f->obj[body].materials=f->typed("material",minst);run(300);
+  assert(f->diffuse[minst]==ours&&f->diffuse[mat]==gameTex&&count("; it was made from the material we wrote ")==1&&count("the material off the slot ")==1);
   // Off: every one of them goes back.
   write(sharedQ+"/control.json","{\"enabled\":true,\"selected\":[],\"textureMods\":{\"strategy\":\"direct\"}}");run(1000);
-  assert(f->diffuse[mat]==gameTex&&f->diffuse[tmat]==gameTex&&f->diffuse[hmat]==gameTex);
+  assert(f->diffuse[mat]==gameTex&&f->diffuse[tmat]==gameTex&&f->diffuse[hmat]==gameTex&&f->diffuse[ainst]==gameTex&&f->diffuse[minst]==gameTex);
   q.shutdown();f->world(0);f->scene={};}
  // 43. The first match at the game's hand-off: no earlier confirmation, the model not yet in the world; the textures were
  //     prepared once the mod was on, so the hand-off only checks and binds. The mapping is saved and, after a restart,
