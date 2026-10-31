@@ -10,6 +10,7 @@
 #include <thread>
 #include "dobby.h"
 #include "handoff_diagnostics.hpp"
+#include "vk_capture.hpp"
 
 namespace {
 std::atomic<bool> started{false};std::unique_ptr<ms::Runtime> runtime;
@@ -61,6 +62,10 @@ void bootStatus(const std::string& pkg,const std::string& state,const std::strin
 }
 extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv* env,jclass,jstring jp,jstring jd){try{
  auto pkg=jstringValue(env,jp),priv=jstringValue(env,jd);ms::require(pkg=="com.miHoYo.Yuanshen"||pkg=="com.miHoYo.ys.bilibili","Unsupported package");if(started.exchange(true))return;
+ // The index-buffer hash diagnostic (vk_capture.hpp) hooks the Vulkan loader now, before the game makes its device;
+ // only when control.json textureMods.ibHash is true at this start (switching it later takes a restart).
+ {bool on=false;try{auto c=ms::JsonParser(ms::text(sharedDir(pkg)+"/control.json")).parse();const auto& t=c.at("textureMods");on=t.type==ms::Json::Object&&t.at("ibHash").type==ms::Json::Bool&&t.at("ibHash").boolean;}catch(const std::exception&){}
+  if(on){std::string detail;bool ok=false;try{ok=ms::vkhook::install(detail);}catch(const std::exception& e){detail=e.what();}bootLog(pkg,ok?"vulkan-capture":"vulkan-capture-disabled",ok?"installed: "+detail+" (read-only index-buffer hashes)":detail);}}
  std::thread([pkg,priv]{try{bootStatus(pkg,"waiting","等待 libyuanshen.so");Image image;for(unsigned n=0;n<480&&!image.base;n++){dl_iterate_phdr(findImage,&image);if(!image.base)std::this_thread::sleep_for(std::chrono::milliseconds(500));}ms::require(image.base!=0,"libyuanshen.so load timeout");
  auto actual=ms::loadedBuildId(image.base,image.ph,image.count,sizeof(ElfW(Phdr)));if(actual!=ms::abi::buildId){bootStatus(pkg,"buildid-mismatch","实际 Build ID："+actual);return;}
  ms::Engine engine(image.base);

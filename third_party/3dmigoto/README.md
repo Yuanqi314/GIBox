@@ -28,12 +28,16 @@
 | `migoto/ini.hpp` | `DirectX11/IniHandler.cpp` | `ParseIniStream`、`ParseIniSectionLine`、`ParseIniKeyValLine`、`ParseIniPreamble`（`namespace =`、`condition =`）、`get_namespaced_section_name`、`get_namespaced_var_name_lower`、CommandListSections / RegularSections 表 |
 | `migoto/expr.hpp` | `DirectX11/CommandList.cpp`、`DirectX11/CommandList.h`、`util.h` / `util.cpp` | `tokenise`、`group_parenthesis`、`transform_operators_*` 及其在 `CommandListExpression::parse` 里的顺序、`DEFINE_OPERATOR` 运算符表、`CommandListSyntaxTree::finalise`、`ParseFloatToken`、`FindVariableTokenEnd` / `NamespaceScanner`、`valid_variable_name`、`ParseIniParamName`、`ParamOverrideTypeNames`、`operand_allowed_in_context`、`static_evaluate`、`random()` 的取值范围 |
 | `migoto/engine.hpp` | `DirectX11/CommandList.cpp`、`DirectX11/IniHandler.cpp`、`DirectX11/Override.cpp`、`DirectX11/HackerDXGI.cpp`、`DirectX11/HackerContext.cpp`、`DirectX11/ResourceHash.cpp` | `ParseCommandList`、`ParseCommandListLine`、`AddCommandToList`（pre/post 放置）、局部变量与作用域、`if / elif / else if / else / endif` 的解析和 `IfCommand::run`、`RunExplicitCommandList`、`CheckTextureOverrideCommand`、`handling`、`VariableAssignment`、绘制命令的键、`_RunCommandList`（递归上限 256、abort）、`process_texture_filter`、`ParseConstantsSection` / `RegisterGlobalVariable`、TextureOverride 的设置键与排序（`TextureOverrideLess`）、`matches_draw_info`、`parse_fuzzy_numeric_match_expression`（数值形式）、按键类型、条件、cycle（wrap、smart）、hold 的全局保存、transition、按键的 run；`RunFrameActions` / `Present` 的执行顺序、`[Constants]` 的 pre/post、`BeforeDraw` / `AfterDraw` |
+| `vk_capture.hpp`（0.7.56） | `DirectX11/HackerDevice.cpp`、`util.h`、`crc32c-hw-1.0.5/src/crc32c.cpp` | `HackerDevice::CreateBuffer` 的缓冲区 hash：`crc32c_hw(0, 数据, ByteWidth)` 后接 `crc32c_hw(hash, D3D11_BUFFER_DESC, 24)`；`crc32c_hw` → `crc32c_append` 的语义（CRC-32C，种子和结果取反，可接续）。CRC 用标准查表或 ARMv8 CRC32C 指令重写，没有拷贝上游实现；PC 端 desc 的取值未知，所以按几种用法分别计算 |
 | `migoto/adapters.hpp` | 无上游代码 | 导入端静态扫描、游戏端会话（建立在上面的移植之上，所以同样 GPLv3） |
 
 完整 SHA-256：
 
 ```
 f6755f648133dc81796c22f09ca2ab2ec854df49fc169d515a81c8f76c2d1c2a  COPYING.txt
+c1a4cb71ef32263af151b7a068a63fcc4444c7e5c87446ab4ab4f9453306ea82  DirectX11/HackerDevice.cpp
+ad5c22e00cf91ce7725ef3b7a3e83afa6a72c6dc7c0457782aba0ffa3422babe  util.h
+3bfccc071a664ccc0d12eb685fb1ee95f5ca841a3e38ea44ebc778ba2c152e80  crc32c-hw-1.0.5/src/crc32c.cpp
 24d325a6aaef77e1b43436cab23a2cbb054f4fb325df679953c1886282271848  AUTHORS.txt
 8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903  LICENSE.GPL.txt
 ce07e1404d6668207a29f64067c294a274ac79ca3a32aee79a5eb0d69bc46aa3  DirectX11/CommandList.cpp

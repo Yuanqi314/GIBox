@@ -217,6 +217,11 @@ class AppState(private val activity: Activity) {
         Control.setTextureMods(game, key, value)
         AppLog.info(game, LOGGER, "纯贴图 $key = $value")
     }
+    fun textureModsFlag(key: String): Boolean = Control.textureModsFlag(game, key)
+    fun setTextureModsFlag(key: String, value: Boolean) = save("保存纯贴图设置") {
+        Control.setTextureMods(game, key, value)
+        AppLog.info(game, LOGGER, "纯贴图 $key = $value")
+    }
     fun startTextureTest() = save("开始轮测") {
         val n = Control.requestTextureTest(game, 4000)
         AppLog.info(game, LOGGER, "纯贴图轮测 #$n：直接改材质 → 克隆材质，各观察 4 秒")

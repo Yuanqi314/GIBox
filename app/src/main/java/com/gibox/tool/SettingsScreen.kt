@@ -137,8 +137,9 @@ fun SettingsScreen(state: AppState) {
                 val rev = state.revision
                 val strategy = remember(rev) { state.textureMods("strategy", "diagnose") }
                 val lod = remember(rev) { state.textureMods("lod", "full") }
+                val ibHash = remember(rev) { state.textureModsFlag("ibHash") }
                 SettingsGroup(title = { SectionTitle("纯贴图 MOD（实验）") }, verticalArrangement = gap) {
-                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(0, 3)) {
+                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(0, 4)) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("替换策略", style = MaterialTheme.typography.titleSmall)
                             Text("只写确定匹配的槽位，只写 diffuse（_MainTex）和 lightmap（_LightMapTex）；切换策略会先还原。日志 texture-apply / texture-restore 记录写到了谁、有没有被覆盖、能否还原。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -149,7 +150,7 @@ fun SettingsScreen(state: AppState) {
                             }
                         }
                     }
-                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(1, 3)) {
+                    SegmentedListItem(shapes = ListItemDefaults.segmentedShapes(1, 4)) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("低精度模型（LOD）", style = MaterialTheme.typography.titleSmall)
                             Text("大世界里常显示 Body_LOD1；完整模型多在队伍预览、角色详情里。迁移只用于渲染器名、网格、子网格数、材质数和槽位材质名都核对一致的 LOD。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -164,8 +165,15 @@ fun SettingsScreen(state: AppState) {
                         title = { Text("开始轮测") },
                         subtitle = { Text("角色在场时：直接改材质、克隆材质各一轮，每轮保存基线 → 写入 → 读回 → 观察 4 秒 → 还原 → 核对还原；还原失败就停。首次出场、冷启动要重新进场景或重启才能测") },
                         icon = { Icon(Icons.Filled.Build, contentDescription = null) },
-                        shapes = ListItemDefaults.segmentedShapes(2, 3),
+                        shapes = ListItemDefaults.segmentedShapes(2, 4),
                         onClick = { state.startTextureTest() },
+                    )
+                    SettingsSwitch(
+                        state = ibHash,
+                        title = { Text("索引 hash 诊断（Vulkan）") },
+                        subtitle = { Text("只读，不改画面。下次启动游戏生效：读取游戏上传的索引数据，按 3DMigoto 的算法算 hash，和 MOD 里的 hash 比对。结果看日志 ib-hash / ib-candidate / ib-capture，完整列表在 ib-hashes.txt") },
+                        shapes = ListItemDefaults.segmentedShapes(3, 4),
+                        onCheckedChange = { state.setTextureModsFlag("ibHash", it) },
                     )
                 }
             }

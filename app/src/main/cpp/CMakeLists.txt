@@ -13,7 +13,7 @@ FetchContent_Declare(dobby_source
  GIT_REPOSITORY https://github.com/jmpews/Dobby.git
  GIT_TAG 0932d69c320e786672361ab53825ba8f4245e9d3)
 FetchContent_MakeAvailable(dobby_source)
-add_library(gibox SHARED runtime.cpp bootstrap.cpp dds.cpp)
+add_library(gibox SHARED runtime.cpp bootstrap.cpp dds.cpp vk_hook.cpp)
 target_include_directories(gibox PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/bcdec")
 target_link_libraries(gibox PRIVATE dobby_static log dl)
 # Frame pointers: the glow trace walks two frames up from a hooked call to name its callers.

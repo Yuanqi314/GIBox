@@ -1,5 +1,6 @@
 // Fake managed objects exercise runtime state transitions without a game process.
 #include "runtime.hpp"
+#include "vk_capture.hpp"
 #include "glow_trace.hpp"
 #include "texture_diag.hpp"
 #include "json.hpp"
@@ -1230,6 +1231,10 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   assert(ours&&ours!=gameTex&&count("texture-apply -/direct TexMod: TextureOverrideModBodyA -> character=10000107 Body#")==1&&count("evidence=完整 Mesh 特征与 Body#")==1&&count("texture-map TexMod: 1 confirmed mesh(es) saved to")==1&&count("texture-ready TexMod: 2 Texture2D made on the game thread")==1&&count("texture-timing -/direct TexMod: Body#")==1&&count("_MainTex (resource\\gimi\\diffuse rbody, sRGB): Avatar_Tex_Body_Diffuse#")==1&&count("readback=ok")==1);
   assert(count("skipped ps-t3 rramp [ramp]: no confirmed game property (待诊断)")==1&&count("texture-load -/direct TexMod: 2 textures")==1&&JsonParser(text(sharedTex+"/status.json")).parse().at("detail").string=="TexMod：直接改材质，1 / 1 个槽位已写入");
   f->diffuse[mat]=gameTex;run(1000);assert(f->diffuse[mat]==ours&&count("_MainTex overwritten by the game (now Avatar_Tex_Body_Diffuse#")==1&&count("noticed by the per-tick check")==1&&count("ms (1)")==1);
+  // Another character in control: the slot stays (this character's own renderer, hidden meanwhile); back again, the
+  // texture is already there and nothing is written again.
+  size_t restores=count("texture-restore");store<uint32_t>(entity+0x3a4,10000126);run(1000);size_t applies=count("texture-apply");assert(f->diffuse[mat]==ours&&count("(another character)")==0&&count("texture-restore")==restores);
+  store<uint32_t>(entity+0x3a4,10000107);run(1000);assert(f->diffuse[mat]==ours&&count("texture-apply")==applies&&count("texture-restore")==restores);
   // $colour = 1: the other texture on the same slot.
   write(sharedTex+"/control.json","{\"enabled\":true,\"selected\":[\"TexMod\"],\"variables\":{\"TexMod\":{\"$colour\":1}},\"textureMods\":{\"strategy\":\"direct\"}}");run(1500);
   Ptr ours2=f->diffuse[mat];assert(ours2&&ours2!=ours&&ours2!=gameTex&&count("(variant changed)")==1&&count("_MainTex (resource\\gimi\\diffuse rbody2, sRGB)")>=1);
@@ -1268,7 +1273,21 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   Ptr nat=load<Ptr>(mat+0x10);store<Ptr>(mat+0x10,0);run(3000);
   assert(count("the source material is destroyed; our copy stays on the slot")==1&&count("T2-1 clone restore: FAILED")==1&&count("texture-test T2 stopped: a restore failed (rounds left: 1)")==1&&alive(copy)&&count("texture-apply T2-2")==0);
   if(std::getenv("TEXMOD_PRINT")){auto l=log();size_t p=0;while((p=l.find("texture-test",p))!=std::string::npos){auto e2=l.find('\n',p);std::cerr<<l.substr(p,std::min<size_t>(e2-p,600))<<"\n";p=e2;}}
-  store<Ptr>(mat+0x10,nat);tm.shutdown();f->world(0);}
+  store<Ptr>(mat+0x10,nat);
+  // Index-buffer hashes (vk_capture.hpp): an upload whose hash a rule names is logged with the meshes of its index count;
+  // the Body mesh confirmed by its submesh starts (3 indices) is shown next to the uploads of that count, every hash listed.
+  {auto& T=ms::vkcap::tracker();T.installed(true,"");uint16_t idx[3]={0,1,2};uint8_t staging[6];std::memcpy(staging,idx,6);
+   T.created(0x100,6,0x40);T.created(0x200,6,0x1);T.bound(0x200,0x300,0);T.mapped(0x300,0,6,staging);ms::vkcap::Copy c{0,0,6};T.copied(0x200,0x100,&c,1);
+   char hx[12];std::snprintf(hx,sizeof hx,"%08x",ms::vkcap::ibHashes(staging,6)[1].value);std::filesystem::create_directories(sharedTex+"/models/IbMod");
+   write(sharedTex+"/models/IbMod/texture.json",std::string(R"J({"format":"gibox-texture-mod","version":1,"name":"IbMod","generation":"i1","character":{"id":10000107},"variants":{"vars":[],"default":{}},"textures":[],
+    "diag":{"format":"gibox-texture-diag","version":1,"name":"IbMod","character":10000107,"rules":[{"section":"TextureOverrideIb","part":"Ib","hint":"ib","hash":")J")+hx+R"J(","first":0,"kind":"segment","textures":[]}],"resources":[]}})J");
+   run(3000);
+   if(std::getenv("TEXMOD_PRINT")){auto l=log();size_t p=0;while((p=l.find("ib-",p))!=std::string::npos){auto e2=l.find('\n',p);std::cerr<<l.substr(p,std::min<size_t>(e2-p,500))<<"\n";p=e2;}}
+   assert(count(std::string("ib-hash ")+hx+" (IbMod/TextureOverrideIb) equals upload #1 (staging copy, 6 bytes = 3 16-bit / - 32-bit indices, largest 16-bit value 2, first 16-bit values 0 1 2) read as uploaded, desc Usage=DEFAULT; meshes with this index count: Body#")==1);
+   assert(count(") mesh Body (3 indices, confirmed by submesh starts; its rules' hash d5ae71a3) and upload #1 (staging copy")==1&&count("ib-candidate TexMod: Body#")==1&&count("no hash equal")==1&&count("ib-capture 1 index uploads read (0 MiB): copy regions into index buffers 1")==1);
+   assert(text(sharedTex+"/ib-hashes.txt").find(std::string("#1 6 bytes via staging copy buffer 0x100+0 max16 2 | 0=")) !=std::string::npos);
+   T.installed(false,"");std::filesystem::remove_all(sharedTex+"/models/IbMod");}
+  tm.shutdown();f->world(0);}
  // 42. A confirmed Mesh shown by another renderer (the party / details page): written as soon as it is seen, without the
  //     diagnostics reading it again; at the game's hand-off even before it is shown, except that "direct" leaves a
  //     loaded asset material alone there (writing it would reach every copy made from it).

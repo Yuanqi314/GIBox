@@ -5,6 +5,7 @@
 #include "texture_diag.hpp"
 #include "glow_trace.hpp"
 #include "logic_game.hpp"
+#include "vk_capture.hpp"
 #include <chrono>
 #include <atomic>
 #include <cctype>
@@ -530,7 +531,8 @@ struct Runtime::Impl {
  // Texture2D on the game thread one per tick, so a hand-off only checks and binds. Every write is read back and watched
  // (every tick, at the game's mesh binding and right after its hand-off callback): a material the game replaced or a
  // texture it overwrote is logged and done again (16 times at most). Switching the mod or strategy off, a test round,
- // another character and shutdown put back what was there and check it; what cannot be taken off stays alive.
+ // and shutdown put back what was there and check it (another character does not: the slots stay on this character's
+ // renderers while they live); what cannot be taken off stays alive.
  struct TexPixels {std::string generation,error;std::shared_ptr<std::map<std::string,Texture>> pixels;uint64_t bytes=0,ms=0;bool loading=false;};
  std::map<std::string,TexPixels> texPixels;   // texture.json path -> decoded textures (the worker fills it, under sm)
  // Texture2D made from them, per mod (not per strategy or test round): kept while the mod is on.
@@ -852,9 +854,13 @@ struct Runtime::Impl {
    if(!ok){log("texture-test","T"+std::to_string(texTest.request)+" stopped: a restore failed (rounds left: "+std::to_string(texTest.strategies.size()-texTest.round-1)+")");texTest.active=false;}
    else if(++texTest.round<texTest.strategies.size())texTest.phase=1;else{log("texture-test","T"+std::to_string(texTest.request)+" done: "+std::to_string(texTest.strategies.size())+" rounds, every restore verified");texTest.active=false;}
    return;}
-  // Whatever no longer matches what is wanted goes back first.
-  for(auto it=texLive.begin();it!=texLive.end();){if(!it->second){it=texLive.erase(it);continue;}auto f=texDiagDocs.find(it->first);bool keep=f!=texDiagDocs.end()&&f->second.mod&&texModOn(f->second.mod->name)&&ch.entity&&f->second.mod->character==ch.config&&strategy!="diagnose"&&it->second->strategy==strategy&&it->second->test==test;
-   if(keep){++it;continue;}std::string why=f==texDiagDocs.end()||!f->second.mod?"mod removed":!texModOn(f->second.mod->name)?"mod switched off":!ch.entity||f->second.mod->character!=ch.config?"another character":test!=it->second->test?(test.empty()?"test round over":"test round "+test):"strategy "+strategy;
+  // Whatever no longer matches what is wanted goes back first. Switching to another character does not: the slots sit
+  // on this character's own renderers (checked when written), stay watched while hidden and are there on the way back.
+  for(auto it=texLive.begin();it!=texLive.end();){if(!it->second){it=texLive.erase(it);continue;}auto f=texDiagDocs.find(it->first);bool keep=f!=texDiagDocs.end()&&f->second.mod&&texModOn(f->second.mod->name)&&strategy!="diagnose"&&it->second->strategy==strategy&&it->second->test==test;
+   if(keep){auto& L=*it->second;bool failed=false;   // a renderer that is gone goes back whoever is controlled
+    for(auto s=L.slots.begin();s!=L.slots.end();){if(alive(s->renderer)&&load<Ptr>(s->renderer+0x10)==s->native){++s;continue;}if(!texRestore(L,*s,"renderer gone")){failed=true;break;}s=L.slots.erase(s);}
+    if(!failed){++it;continue;}texDrop(std::move(it->second),false);it=texLive.erase(it);continue;}
+   std::string why=f==texDiagDocs.end()||!f->second.mod?"mod removed":!texModOn(f->second.mod->name)?"mod switched off":test!=it->second->test?(test.empty()?"test round over":"test round "+test):"strategy "+strategy;
    bool ok=texRestoreAll(*it->second,why);texDrop(std::move(it->second),ok);it=texLive.erase(it);}
   if(!any){if(texTest.active){log("texture-test","T"+std::to_string(texTest.request)+" stopped: no texture-only mod is switched on");texTest.active=false;}return;}
   if(texTest.active&&texTest.phase==1){texTest.base=texBaseline();if(texTest.base.empty()){log("texture-test",test+": no confirmed slot on the current character (open the party page or the character details for the full mesh, or allow LOD migration); stopped");texTest.active=false;return;}
@@ -880,6 +886,48 @@ struct Runtime::Impl {
    else{status+=(status.empty()?"":"；")+who+(strategy=="direct"?"直接改材质":"克隆材质")+"，"+std::to_string(done)+" / "+std::to_string(targets.size())+" 个槽位已写入";texApplied=texApplied||done>0;}}
   texStatus=status;
   if(texTest.active&&texTest.phase==2&&now>=texTest.until)texTest.phase=3;}
+
+ // ---------------------------------------------------------------- index-buffer hashes (vk_capture.hpp, 0.7.56)
+ // Read-only, off unless control.json textureMods.ibHash was on when the game started. Each index upload the Vulkan
+ // wrappers read is checked against every texture-only mod's rule hashes (as 3DMigoto would hash the same bytes on PC);
+ // a mesh already confirmed by its submesh starts is shown next to the uploads of its index count with all their hashes,
+ // equal or not, so the comparison can be read either way. Every upload also goes to ib-hashes.txt (20000 lines at most).
+ std::vector<vkcap::Blob> ibBlobs;uint64_t ibAt=0,ibSince=0,ibReported=0,ibFileLines=0;std::string ibWantedKey;bool ibSaidNothing=false,ibFileStarted=false;std::set<std::string> ibSaid;
+ static std::string hex8(uint32_t v){char b[12];std::snprintf(b,sizeof b,"%08x",v);return b;}
+ static uint64_t meshIndices(const std::vector<std::pair<uint32_t,uint32_t>>& subs){uint64_t n=0;for(auto& s:subs)n=std::max<uint64_t>(n,uint64_t(s.first)+s.second);return n;}
+ std::string ibDescribe(const vkcap::Blob& b){std::string head;for(auto v:b.head16)head+=(head.empty()?"":" ")+std::to_string(v);
+  return "upload #"+std::to_string(b.seq)+" ("+b.via+", "+std::to_string(b.bytes)+" bytes = "+std::to_string(b.bytes/2)+" 16-bit / "+(b.bytes%4?std::string("-"):std::to_string(b.bytes/4))+" 32-bit indices, largest 16-bit value "+std::to_string(b.max16)+", first 16-bit values "+head+")";}
+ // The meshes of the diagnosed renderers whose index count is n (16-bit or 32-bit reading of the upload).
+ std::string ibMeshes(const vkcap::Blob& b){std::string out;std::set<std::string> seen;
+  for(auto& kv:texDiagSeen){auto& i=kv.second.info;uint64_t n=0;for(auto& s:i.layout.subs)if(s.known)n=std::max<uint64_t>(n,uint64_t(s.start)+s.count);
+   if(!n||(n*2!=b.bytes&&n*4!=b.bytes)){continue;}auto k=i.meshName+"|"+i.name;if(!seen.insert(k).second)continue;out+=(out.empty()?"":", ")+texdiag::label(i)+" mesh "+i.meshName+" ("+std::to_string(n)+" indices, "+(n*2==b.bytes?"16":"32")+"-bit)";}
+  return out.empty()?"none of the diagnosed renderers has that index count":out;}
+ void ibHashTick(uint64_t now){auto& T=vkcap::tracker();if(!T.enabled)return;if(!ibSince)ibSince=now;if(now<ibAt)return;ibAt=now+1000;
+  auto fresh=T.take();std::string dump;
+  for(auto& b:fresh){if(ibFileLines>=20000)break;ibFileLines++;dump+="#"+std::to_string(b.seq)+" "+std::to_string(b.bytes)+" bytes via "+b.via+" buffer "+hex(b.buffer)+"+"+std::to_string(b.offset)+" max16 "+std::to_string(b.max16)+" |";
+   for(auto& h:b.hashes){dump+=" "+std::to_string(h.variant)+"="+hex8(h.value);}dump+="\n";}
+  if(!dump.empty()){auto file=shared+"/ib-hashes.txt";bool start=!ibFileStarted;ibFileStarted=true;
+   worker.post([file,dump,start]{std::ofstream o(file,start?std::ios::trunc:std::ios::app);if(start)o<<"# index uploads read by the Vulkan wrappers; variant = format*4+kind (see vk_capture.hpp)\n";o<<dump;});}
+  for(auto& b:fresh){if(ibBlobs.size()>=50000)ibBlobs.erase(ibBlobs.begin(),ibBlobs.begin()+10000);ibBlobs.push_back(std::move(b));}
+  // What the mods ask for: rule hash -> the rules naming it.
+  std::map<uint32_t,std::string> wanted;std::string key;
+  for(auto& kv:texDiagDocs){if(!kv.second.mod)continue;auto& m=*kv.second.mod;for(auto& r:m.doc.rules){if(r.hash.size()!=8)continue;uint32_t v=0;bool ok=true;for(char c:r.hash){int d=std::isdigit(uint8_t(c))?c-'0':(c>='a'&&c<='f')?c-'a'+10:(c>='A'&&c<='F')?c-'A'+10:-1;ok=ok&&d>=0;v=v*16+uint32_t(d<0?0:d);}
+    if(!ok){continue;}auto& w=wanted[v];if(w.find(m.name+"/"+r.section)==std::string::npos)w+=(w.empty()?"":", ")+m.name+"/"+r.section;}}
+  for(auto& kv:wanted){key+=hex8(kv.first)+kv.second;}bool all=key!=ibWantedKey;ibWantedKey=key;   // new rules: every upload kept is checked again
+  size_t from=all?0:ibBlobs.size()-std::min(ibBlobs.size(),fresh.size());
+  for(size_t i=from;i<ibBlobs.size();i++){auto& b=ibBlobs[i];for(auto& h:b.hashes){auto w=wanted.find(h.value);if(w==wanted.end())continue;
+    if(!ibSaid.insert("hit|"+std::to_string(b.seq)+"|"+std::to_string(h.variant)).second)continue;
+    log("ib-hash",hex8(h.value)+" ("+w->second+") equals "+ibDescribe(b)+" read "+vkcap::variantName(h.variant)+"; meshes with this index count: "+ibMeshes(b));}}
+  // A mesh confirmed by its submesh starts: the uploads of its index count, with every hash, against its rules' hashes.
+  for(auto& kv:texRecords){auto f=texDiagDocs.find(kv.first);if(f==texDiagDocs.end()||!f->second.mod)continue;auto& m=*f->second.mod;
+   for(auto& rec:kv.second){uint64_t n=meshIndices(rec.subs);if(!n)continue;std::string want;for(auto& sl:rec.slots)for(auto& r:m.doc.rules){std::string h=r.hash;for(auto& c:h)c=char(std::tolower(uint8_t(c)));if(r.section==sl.second&&want.find(h)==std::string::npos)want+=(want.empty()?"":" ")+h;}
+    unsigned shown=0;for(auto& b:ibBlobs){if(b.bytes!=n*2&&b.bytes!=n*4)continue;auto k="rec|"+m.name+"|"+rec.mesh+"|"+std::to_string(b.seq);if(ibSaid.count(k)){shown++;continue;}if(shown>=8)break;shown++;ibSaid.insert(k);
+     std::string hs;bool equal=false;for(auto& h:b.hashes){hs+=(hs.empty()?"":"; ")+vkcap::variantName(h.variant)+" "+hex8(h.value);equal=equal||want.find(hex8(h.value))!=std::string::npos;}
+     log("ib-candidate",m.name+": "+rec.from+" mesh "+rec.mesh+" ("+std::to_string(n)+" indices, confirmed by submesh starts; its rules' hash "+want+") and "+ibDescribe(b)+": "+(equal?"a hash is EQUAL":"no hash equal")+" | "+hs);}}}
+  auto st=T.stats();
+  if(st.uploads!=ibReported&&(now-ibSince>=10000||ibReported==0)){ibReported=st.uploads;
+   log("ib-capture",std::to_string(st.uploads)+" index uploads read ("+std::to_string(st.bytes>>20)+" MiB): copy regions into index buffers "+std::to_string(st.copies)+", first binds of mapped index buffers "+std::to_string(st.mappedBinds)+"; not read: source not mapped "+std::to_string(st.notMapped)+", out of range "+std::to_string(st.outOfRange)+", over 64 MiB "+std::to_string(st.tooLarge)+", queue full "+std::to_string(st.dropped)+"; Vulkan lookups wrapped "+std::to_string(st.wrapped)+", left unwrapped (not exported by the loader) "+std::to_string(st.resolved-st.wrapped));}
+  if(!ibSaidNothing&&st.wrapped==0&&now-ibSince>=60000){ibSaidNothing=true;log("ib-capture","the game looked up none of the wrapped Vulkan functions since GIBox started: it may draw with OpenGL ES, or it looked them up before GIBox loaded; nothing to read");}}
 
  // ---------------------------------------------------------------- switch-in glow trace (debug + experiments.glowTrace)
  // The hooks (glow_trace.hpp) keep every write to the objects registered here: each attachment's renderer, its
@@ -2450,6 +2498,7 @@ struct Runtime::Impl {
    glowTick();
    try{textureDiagTick(now);}catch(const std::exception& ex){log("texture-diag-unsupported",std::string("diagnostics stopped this round: ")+ex.what());}
    try{textureModTick(now);}catch(const std::exception& ex){log("texture-error",std::string("texture-only mods this round: ")+ex.what());}
+   try{ibHashTick(now);}catch(const std::exception& ex){log("ib-capture",std::string("this round: ")+ex.what());}
    // Reuse the verified Type discovery only here, on the existing serial Tick.
    // Diagnostic hooks never call Runtime::Impl and never scan all objects.
    if(handoff::canSeed()&&now>=handoffTypeRetry){handoffTypeRetry=now+1000;

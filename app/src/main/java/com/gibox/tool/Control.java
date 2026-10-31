@@ -78,8 +78,10 @@ public final class Control {
      *  writes) / direct (the game's material gets the texture) / clone (a copy of the material does); "lod" full (only a
      *  slot confirmed on the full mesh is written) / migrate (a confirmed slot also on a checked lower LOD); "testRequest"
      *  a counter: each new value runs the test rounds over "testStrategies", "observeMs" each (save, apply, read back,
-     *  observe, restore, verify; a failed restore stops them). */
+     *  observe, restore, verify; a failed restore stops them); "ibHash" true: the index-buffer hash diagnostic (Vulkan,
+     *  read-only), read by the game only when it starts. */
     public static String textureMods(String pkg, String key, String fallback) { JSONObject x = load(pkg).optJSONObject("textureMods"); return x == null ? fallback : x.optString(key, fallback); }
+    public static boolean textureModsFlag(String pkg, String key) { JSONObject x = load(pkg).optJSONObject("textureMods"); return x != null && x.optBoolean(key, false); }
     public static synchronized void setTextureMods(String pkg, String key, Object value) throws Exception {
         JSONObject j = load(pkg); JSONObject x = j.optJSONObject("textureMods"); if (x == null) x = new JSONObject(); x.put(key, value); j.put("textureMods", x); save(pkg, j);
     }
