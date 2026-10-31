@@ -1263,6 +1263,13 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   assert(f->diffuse[mat]==gameTex&&f->diffuse[lodMat]!=gameTex&&count("(no longer a target) | _MainTex: back to")==1);f->obj[body].mesh=fullMesh;
   control("direct",false,",\"lod\":\"migrate\"");run(1000);assert(f->diffuse[lodMat]==gameTex);f->world(body);f->scene={};run(1000);
   // diagnose: no game writes at all.
+  // auto: the game's own instance (instance id < 0) is written in place; a loaded asset is copied first.
+  control("auto",true);run(1500);assert(load<Ptr>(f->obj[body].materials+0x20)==mat&&f->diffuse[mat]!=gameTex&&count("auto: the game's own instance, written in place")==1);
+  assert(JsonParser(text(sharedTex+"/status.json")).parse().at("detail").string=="TexMod：自动，1 / 1 个槽位已写入");
+  control("auto",false);run(1000);assert(f->diffuse[mat]==gameTex);
+  store<uint32_t>(load<Ptr>(mat+0x10)+8,7);control("auto",true);run(1500);Ptr acopy=load<Ptr>(f->obj[body].materials+0x20);
+  assert(acopy!=mat&&f->diffuse[acopy]!=gameTex&&f->diffuse[mat]==gameTex&&count("auto: a loaded asset, copied")==1);
+  control("auto",false);run(1000);assert(load<Ptr>(f->obj[body].materials+0x20)==mat&&f->diffuse[mat]==gameTex);store<uint32_t>(load<Ptr>(mat+0x10)+8,uint32_t(-3));
   control("diagnose",true);unsigned writes=gameWrites;run(2000);assert(gameWrites==writes&&f->diffuse[mat]==gameTex&&JsonParser(text(sharedTex+"/status.json")).parse().at("detail").string=="TexMod：只诊断，不写入（设置里可换策略）");
   // Test rounds: direct, then clone; each restore verified against the saved slot.
   control("diagnose",true,",\"testRequest\":1,\"testStrategies\":[\"direct\",\"clone\"],\"observeMs\":1000");run(6000);

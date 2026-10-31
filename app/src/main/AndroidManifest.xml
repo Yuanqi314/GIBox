@@ -9,6 +9,9 @@
         <package android:name="com.miHoYo.ys.bilibili"/>
         <intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="text/plain"/></intent>
         <intent><action android:name="android.intent.action.SEND"/><data android:mimeType="text/plain"/></intent>
+        <!-- 打开文件夹: the same chooser as the log's share button, for the folder MIME types file managers register. -->
+        <intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="vnd.android.document/directory"/></intent>
+        <intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="resource/folder"/></intent>
     </queries>
     <application android:label="GIBox" android:theme="@style/Theme.GIBox" android:allowBackup="false">
         <provider android:name=".DirectoryProvider" android:authorities="com.gibox.tool.documents"

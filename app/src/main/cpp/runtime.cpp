@@ -55,7 +55,9 @@ struct Experiments {bool gameMaterials=false,neutralColors=false,noUv2=false,glo
 // keys: the App's presses of a model's [Key] sections (model.json logic.keys), numbered; each is taken once, by number.
 struct KeyPress {long long seq=0;size_t file=0;std::string section;bool back=false;bool operator==(const KeyPress& o)const{return seq==o.seq&&file==o.file&&section==o.section&&back==o.back;}};
 // Texture-only mods (control.json "textureMods", 0.7.52): strategy diagnose / direct / clone, lod full / migrate, test rounds.
-struct TexModControl {std::string strategy="diagnose",lod="full";long long testRequest=0;std::vector<std::string> testStrategies{"direct","clone"};int observeMs=4000;};
+// auto (0.7.60): the game's own per-renderer instance is written in place (its effects keep running on it); a loaded asset
+// or a material another renderer shows is copied first, and the game's instance made from that copy is followed in place.
+struct TexModControl {std::string strategy="diagnose",lod="full";long long testRequest=0;std::vector<std::string> testStrategies{"auto","direct","clone"};int observeMs=4000;};
 struct ControlState {TexModControl tex;Experiments exp;bool enabled=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;std::map<std::string,std::vector<KeyPress>> keys;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"Control JSON object");ControlState s;
@@ -75,8 +77,8 @@ ControlState parseControl(const std::string& raw){
    require(k.at("section").type==Json::String&&!k.at("section").string.empty()&&k.at("section").string.size()<=256,"Key press section");x.section=k.at("section").string;x.back=k.at("back").type==Json::Bool&&k.at("back").boolean;s.keys[model.first].push_back(x);}}
  s.logLevel=logThreshold(c);
  const auto& t=c.at("textureMods");if(t.type==Json::Object){auto text=[&](const char* k,const char* fallback,std::initializer_list<const char*> allowed){const auto& v=t.at(k);if(v.type!=Json::String)return std::string(fallback);for(auto* a:allowed)if(v.string==a)return v.string;return std::string(fallback);};
-  s.tex.strategy=text("strategy","diagnose",{"diagnose","direct","clone"});s.tex.lod=text("lod","full",{"full","migrate"});s.tex.testRequest=integerOf(t.at("testRequest"));require(s.tex.testRequest>=0,"textureMods.testRequest");
-  const auto& ts=t.at("testStrategies");if(ts.type==Json::Array){s.tex.testStrategies.clear();for(auto& v:ts.array)if(v.type==Json::String&&(v.string=="direct"||v.string=="clone")&&s.tex.testStrategies.size()<4)s.tex.testStrategies.push_back(v.string);if(s.tex.testStrategies.empty())s.tex.testStrategies={"direct","clone"};}
+  s.tex.strategy=text("strategy","diagnose",{"diagnose","auto","direct","clone"});s.tex.lod=text("lod","full",{"full","migrate"});s.tex.testRequest=integerOf(t.at("testRequest"));require(s.tex.testRequest>=0,"textureMods.testRequest");
+  const auto& ts=t.at("testStrategies");if(ts.type==Json::Array){s.tex.testStrategies.clear();for(auto& v:ts.array)if(v.type==Json::String&&(v.string=="auto"||v.string=="direct"||v.string=="clone")&&s.tex.testStrategies.size()<4)s.tex.testStrategies.push_back(v.string);if(s.tex.testStrategies.empty())s.tex.testStrategies={"auto","direct","clone"};}
   auto ms=integerOf(t.at("observeMs"));if(ms)s.tex.observeMs=int(std::min<long long>(60000,std::max<long long>(1000,ms)));}
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
   s.exp.gameMaterials=flag("gameMaterials");s.exp.neutralColors=flag("neutralColors");s.exp.noUv2=flag("noUv2");s.exp.glowTrace=flag("glowTrace");s.exp.separateDraws=flag("separateDraws");s.exp.logicCore=flag("logicCore");
@@ -682,7 +684,9 @@ struct Runtime::Impl {
   std::string shared;for(auto& kv:texDiagSeen){if(kv.first==t.renderer||!alive(kv.first))continue;for(auto& x:kv.second.info.materials)if(x.material==mat)shared+=(shared.empty()?"":", ")+texdiag::label(kv.second.info);}
   if(!shared.empty())line+=" shared-with="+shared;
   auto ids=texIds(mat);Ptr target=mat;
-  if(L.strategy=="clone"){Ptr c=clone(L,mat);s.clone=c;target=c;line+=" copy="+hex(c);}
+  bool copy=L.strategy=="clone";
+  if(L.strategy=="auto"){copy=instanceId(mat)>=0||!shared.empty();line+=copy?(instanceId(mat)>=0?" auto: a loaded asset, copied":" auto: shown by another renderer too, copied"):" auto: the game's own instance, written in place";}
+  if(copy){Ptr c=clone(L,mat);s.clone=c;target=c;line+=" copy="+hex(c);}
   pin(L,mat);s.material=mat;s.materialNative=load<Ptr>(mat+0x10);bool ok=true;
   for(auto& w:plan){int32_t id=slotId(w.property.c_str());if(std::find(ids.begin(),ids.end(),id)==ids.end()){line+=" | "+w.property+": the material has no such texture property; not written";continue;}
    std::string note;Ptr ours=texOurs(L,px,w,note);Ptr before=e.call<Ptr>(glow::rvaGetTexture,target,id,Ptr(0));if(alive(before))pin(L,before);putTexture(target,w.property.c_str(),ours);
@@ -884,7 +888,7 @@ struct Runtime::Impl {
     try{if(s){if(!s->gaveUp)done++;continue;}if(texAssetWait(*L,t,"scan"))continue;texSeen(t.native,"scan");auto& tt=texTimes[t.native];if(!tt.matched)tt.matched=texClock();TexSlot fresh;bool ok=texApply(*L,m,*px,t,fresh);L->slots.push_back(std::move(fresh));if(ok)done++;}
     catch(const std::exception& ex){texSay(*L,"err|"+hex(t.renderer)+"|"+std::to_string(t.slot)+"|"+ex.what(),"texture-error",texTag(*L)+": "+t.label+" slot "+std::to_string(t.slot)+": "+ex.what());}}
    if(targets.empty())status+=(status.empty()?"":"；")+who+"等待映射（没有确定匹配的槽位："+(ctl.tex.lod=="migrate"?"打开队伍预览或角色详情让完整模型出现一次":"大世界多为低精度模型；打开队伍预览或角色详情，或允许迁移到 LOD")+"）";
-   else{status+=(status.empty()?"":"；")+who+(strategy=="direct"?"直接改材质":"克隆材质")+"，"+std::to_string(done)+" / "+std::to_string(targets.size())+" 个槽位已写入";texApplied=texApplied||done>0;}}
+   else{status+=(status.empty()?"":"；")+who+(strategy=="auto"?"自动":strategy=="direct"?"直接改材质":"克隆材质")+"，"+std::to_string(done)+" / "+std::to_string(targets.size())+" 个槽位已写入";texApplied=texApplied||done>0;}}
   texStatus=status;
   if(texTest.active&&texTest.phase==2&&now>=texTest.until)texTest.phase=3;}
 

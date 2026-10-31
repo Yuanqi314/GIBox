@@ -75,7 +75,8 @@ public final class Control {
         x.put(key, value); j.put("experiments", x); save(pkg, j);
     }
     /** Texture-only mods (control.json "textureMods", read by the game): "strategy" diagnose (default: match and log, no
-     *  writes) / direct (the game's material gets the texture) / clone (a copy of the material does); "lod" full (only a
+     *  writes) / auto (the game's own instance written in place, an asset or shared material copied) / direct (the game's
+     *  material gets the texture) / clone (a copy of the material does); "lod" full (only a
      *  slot confirmed on the full mesh is written) / migrate (a confirmed slot also on a checked lower LOD); "testRequest"
      *  a counter: each new value runs the test rounds over "testStrategies", "observeMs" each (save, apply, read back,
      *  observe, restore, verify; a failed restore stops them); "ibHash" true: the index-buffer hash diagnostic (Vulkan,
@@ -87,7 +88,7 @@ public final class Control {
     }
     public static synchronized long requestTextureTest(String pkg, int observeMs) throws Exception {
         JSONObject j = load(pkg); JSONObject x = j.optJSONObject("textureMods"); if (x == null) x = new JSONObject();
-        long n = x.optLong("testRequest", 0) + 1; x.put("testRequest", n); JSONArray s = new JSONArray(); s.put("direct"); s.put("clone"); x.put("testStrategies", s); x.put("observeMs", observeMs);
+        long n = x.optLong("testRequest", 0) + 1; x.put("testRequest", n); JSONArray s = new JSONArray(); s.put("auto"); s.put("direct"); s.put("clone"); x.put("testStrategies", s); x.put("observeMs", observeMs);
         j.put("textureMods", x); save(pkg, j); return n;
     }
     /** Variant choice per model, read by the runtime from control.json "variables". */

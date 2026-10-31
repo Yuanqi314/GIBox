@@ -41,6 +41,7 @@ fun GIBoxApp(state: AppState) {
             Screen.Settings -> SettingsScreen(state)
             Screen.Log -> LogScreen(state)
             Screen.Manual -> ManualScreen(state)
+            Screen.Debug -> DebugScreen(state)
             is Screen.Character -> CharacterScreen(state, screen.id)
             is Screen.Detail -> DetailScreen(state, screen.name)
             is Screen.Pick -> PickScreen(state, screen)

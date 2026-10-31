@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
-import android.content.ActivityNotFoundException
 import android.content.pm.LabeledIntent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -19,7 +18,6 @@ import androidx.compose.runtime.setValue
 import java.io.File
 import kotlin.concurrent.thread
 
-const val VERSION = "0.7.4"
 const val BUILD_ID = "2b4dd73155e845a2ef698ec500509baa4eb3bfa8"
 private const val LOGGER = "importer"
 
@@ -29,6 +27,8 @@ sealed interface Screen {
     data object Settings : Screen
     data object Log : Screen
     data object Manual : Screen
+    /** Debug and test tools (strategies, test rounds, experiments, bone export, the old manual conversion). */
+    data object Debug : Screen
     /** The mods of one character (id 0: mods without a chosen character). */
     data class Character(val id: Int) : Screen
     data class Detail(val name: String) : Screen
@@ -76,6 +76,14 @@ class AppState(private val activity: Activity) {
         private set
     var logLevel by mutableStateOf("info")
         private set
+    /** This APK's versionName (app/build.gradle.kts), read from the package rather than written in the source. */
+    val appVersion: String = packageInfo(activity.packageName)?.versionName ?: "?"
+    /** The selected game's version as its package states it: versionName up to the first "_", versionCode in brackets. */
+    val gameVersion: String?
+        get() = packageInfo(game)?.let { p ->
+            @Suppress("DEPRECATION") val code = if (Build.VERSION.SDK_INT >= 28) p.longVersionCode else p.versionCode.toLong()
+            "${(p.versionName ?: "?").substringBefore('_')}($code)"
+        }
     var busy by mutableStateOf<Busy?>(null)
         private set
     var prompt by mutableStateOf<Prompt?>(null)
@@ -97,7 +105,7 @@ class AppState(private val activity: Activity) {
     private val labelsFile: File get() = File(activity.filesDir, "labels/$game.json")
 
     init {
-        AppLog.debug(game, "app", "App Start $VERSION")
+        AppLog.debug(game, "app", "App Start $appVersion")
         runCatching { Control.retireExperiments(game) }
         Importer.discardAll(modsRoot)
         refresh()
@@ -224,7 +232,7 @@ class AppState(private val activity: Activity) {
     }
     fun startTextureTest() = save("开始轮测") {
         val n = Control.requestTextureTest(game, 4000)
-        AppLog.info(game, LOGGER, "纯贴图轮测 #$n：直接改材质 → 克隆材质，各观察 4 秒")
+        AppLog.info(game, LOGGER, "纯贴图轮测 #$n：自动 → 直接改材质 → 克隆材质，各观察 4 秒")
         toast("已通知游戏开始轮测 #$n；结果看日志 texture-test")
     }
     /** 显示替换 开/关 for a model with its own on/off switch (model.json "replaceWhen"). */
@@ -399,40 +407,66 @@ class AppState(private val activity: Activity) {
         toast("已复制：$label")
     }
     fun toast(text: String) { Toast.makeText(activity, text, Toast.LENGTH_SHORT).show() }
+    private fun packageInfo(pkg: String): android.content.pm.PackageInfo? = try {
+        @Suppress("DEPRECATION")
+        if (Build.VERSION.SDK_INT >= 33) activity.packageManager.getPackageInfo(pkg, PackageManager.PackageInfoFlags.of(0))
+        else activity.packageManager.getPackageInfo(pkg, 0)
+    } catch (_: PackageManager.NameNotFoundException) { null }
     /**
-     * An implicit VIEW, so the system resolves it to the user's default file manager. Folders on shared storage use the
-     * system's own document URI (com.android.externalstorage.documents), which file managers understand; the private
-     * Mods folder, or a manager that does not take that URI, goes through GIBox's DocumentsProvider with a tree grant.
+     * One system chooser for several ways of handing over the same thing (the log's share button and the folders):
+     * the first intent and its alternates, each app listed once. Android 10+ merges them itself (EXTRA_ALTERNATE_INTENTS);
+     * before that the apps of the alternates that do not take the first are added by hand.
+     */
+    private fun choose(title: String, first: Intent, alternates: List<Intent>) {
+        val chooser = Intent.createChooser(first, title)
+        if (alternates.isNotEmpty()) {
+            if (Build.VERSION.SDK_INT >= 29) chooser.putExtra(Intent.EXTRA_ALTERNATE_INTENTS, alternates.toTypedArray())
+            else {
+                val pm = activity.packageManager
+                val seen = pm.queryIntentActivities(first, 0).map { it.activityInfo.packageName }.toMutableSet()
+                val extra = alternates.flatMap { alt ->
+                    pm.queryIntentActivities(alt, 0).filter { seen.add(it.activityInfo.packageName) }.map {
+                        LabeledIntent(Intent(alt).setClassName(it.activityInfo.packageName, it.activityInfo.name), it.activityInfo.packageName, it.loadLabel(pm), it.iconResource)
+                    }
+                }
+                if (extra.isNotEmpty()) chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, extra.toTypedArray())
+            }
+        }
+        activity.startActivity(chooser)
+    }
+    /**
+     * Like the log's share button: a chooser of the apps that open a folder (VIEW with either folder MIME type file
+     * managers register). Folders on shared storage go as the system's own document URI
+     * (com.android.externalstorage.documents); the private Mods folder, and the shared ones again for managers that do
+     * not take that URI, through GIBox's DocumentsProvider with a tree grant.
      */
     fun openFolder(folder: File) {
         if (folder != modsRoot && !storage) { needStorage(); return }
         try {
             check(folder.isDirectory || folder.mkdirs()) { "无法创建目录：$folder" }
+            val types = listOf(DocumentsContract.Document.MIME_TYPE_DIR, "resource/folder")
+            val views = mutableListOf<Intent>()
             DocumentPaths.externalDocumentId(folder)?.let { external ->
                 val uri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", external)
-                for (mime in listOf(DocumentsContract.Document.MIME_TYPE_DIR, "resource/folder")) {
-                    try { activity.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)); return } catch (_: ActivityNotFoundException) {}
-                }
+                for (mime in types) views += Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
             }
             val id = when (folder) {
                 modsRoot -> "$game:mods"
                 modelsRoot -> "$game:shared/models"
                 boneRoot -> "$game:shared/skeletons"
-                else -> error("不支持的目录：$folder")
+                else -> null
             }
-            val tree = DocumentsContract.buildTreeDocumentUri(DirectoryProvider.AUTHORITY, id)
-            val document = DocumentsContract.buildDocumentUriUsingTree(tree, id)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(document, DocumentsContract.Document.MIME_TYPE_DIR)
-                clipData = ClipData.newRawUri("GIBox 目录", tree)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+            if (id != null) {
+                val tree = DocumentsContract.buildTreeDocumentUri(DirectoryProvider.AUTHORITY, id)
+                val document = DocumentsContract.buildDocumentUriUsingTree(tree, id)
+                for (mime in types) views += Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(document, mime)
+                    clipData = ClipData.newRawUri("GIBox 目录", tree)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+                }
             }
-            try { activity.startActivity(intent) }
-            catch (_: ActivityNotFoundException) {
-                // Some managers register the older folder MIME type. This remains an implicit request to the system.
-                intent.setDataAndType(document, "resource/folder")
-                activity.startActivity(intent)
-            }
+            check(views.isNotEmpty()) { "不支持的目录：$folder" }
+            choose("打开文件夹", views.first(), views.drop(1))
         } catch (e: Throwable) { fail("打开文件夹", e, null) }
     }
     fun shareLog() {
@@ -444,17 +478,7 @@ class AppState(private val activity: Activity) {
             fun grant(i: Intent) = i.apply { clipData = ClipData.newRawUri("运行日志", uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
             val view = grant(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "text/plain"))
             val send = grant(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri))
-            val chooser = Intent.createChooser(view, "打开运行日志")
-            if (Build.VERSION.SDK_INT >= 29) chooser.putExtra(Intent.EXTRA_ALTERNATE_INTENTS, arrayOf(send))
-            else {
-                val pm = activity.packageManager
-                val viewers = pm.queryIntentActivities(view, 0).map { it.activityInfo.packageName }.toSet()
-                val extra = pm.queryIntentActivities(send, 0).filter { it.activityInfo.packageName !in viewers }.map {
-                    LabeledIntent(Intent(send).setClassName(it.activityInfo.packageName, it.activityInfo.name), it.activityInfo.packageName, it.loadLabel(pm), it.iconResource)
-                }
-                if (extra.isNotEmpty()) chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, extra.toTypedArray())
-            }
-            activity.startActivity(chooser)
+            choose("打开运行日志", view, listOf(send))
         } catch (e: Throwable) { fail("分享日志", e, null) }
     }
     fun readLog(): String = AppLog.tail(logFile, 128 * 1024)
