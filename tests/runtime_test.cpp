@@ -1283,7 +1283,7 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
     "diag":{"format":"gibox-texture-diag","version":1,"name":"IbMod","character":10000107,"rules":[{"section":"TextureOverrideIb","part":"Ib","hint":"ib","hash":")J")+hx+R"J(","first":0,"kind":"segment","textures":[]}],"resources":[]}})J");
    run(3000);
    if(std::getenv("TEXMOD_PRINT")){auto l=log();size_t p=0;while((p=l.find("ib-",p))!=std::string::npos){auto e2=l.find('\n',p);std::cerr<<l.substr(p,std::min<size_t>(e2-p,500))<<"\n";p=e2;}}
-   assert(count(std::string("ib-hash ")+hx+" (IbMod/TextureOverrideIb) equals upload #1 (staging copy, 6 bytes = 3 16-bit / - 32-bit indices, largest 16-bit value 2, first 16-bit values 0 1 2) read as uploaded, desc Usage=DEFAULT; meshes with this index count: Body#")==1);
+   assert(count(std::string("ib-hash ")+hx+" (IbMod/TextureOverrideIb) equals upload #1 (staging copy, 6 bytes = 3 16-bit / - 32-bit indices, largest 16-bit value 2, first 16-bit values 0 1 2) read as uploaded, desc DEFAULT, Bind=IB; meshes with this index count: Body#")==1);
    assert(count(") mesh Body (3 indices, confirmed by submesh starts; its rules' hash d5ae71a3) and upload #1 (staging copy")==1&&count("ib-candidate TexMod: Body#")==1&&count("no hash equal")==1&&count("ib-capture 1 index uploads read (0 MiB): copy regions into index buffers 1")==1);
    assert(text(sharedTex+"/ib-hashes.txt").find(std::string("#1 6 bytes via staging copy buffer 0x100+0 max16 2 | 0=")) !=std::string::npos);
    T.installed(false,"");std::filesystem::remove_all(sharedTex+"/models/IbMod");}

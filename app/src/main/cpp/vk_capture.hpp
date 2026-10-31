@@ -8,9 +8,11 @@
 //   hash = data_hash = crc32c_hw(0, pInitialData->pSysMem, pDesc->ByteWidth);
 //   hash = crc32c_hw(hash, pDesc, sizeof(D3D11_BUFFER_DESC));
 // crc32c_hw (util.h) is crc32c_append (crc32c-hw-1.0.5): CRC-32C, the seed and the result inverted, so appending
-// continues the same CRC. The PC desc of an index buffer is not known here: the usages D3D11 allows for one are tried
-// (DEFAULT, IMMUTABLE, DYNAMIC with CPU write), BindFlags = INDEX_BUFFER, the rest 0; and the data as uploaded, widened
-// from 16 to 32 bit, or narrowed from 32 to 16 bit.
+// continues the same CRC. The PC desc is not stored anywhere on Android; the 0.7.57 device capture solved it from the
+// rule hashes of two mods: ByteWidth = the data's size, Usage DEFAULT, BindFlags INDEX_BUFFER | SHADER_RESOURCE |
+// UNORDERED_ACCESS (0x8A, Linnea: head/body/dress, bangs, eyes, book, crystal) or INDEX_BUFFER alone (0x2, the
+// Traveler), CPU access, misc flags and stride 0. Both are hashed, IMMUTABLE too, for the data as uploaded, widened from
+// 16 to 32 bit, or narrowed from 32 to 16 bit.
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -44,14 +46,15 @@ inline uint32_t crc32c(uint32_t seed,const void* data,size_t n){auto* p=static_c
 struct D3D11BufferDesc {uint32_t byteWidth=0,usage=0,bindFlags=0,cpuAccessFlags=0,miscFlags=0,structureByteStride=0;};
 static_assert(sizeof(D3D11BufferDesc)==24,"D3D11_BUFFER_DESC is 24 bytes");
 // variant = format * 4 + kind; format: 0 as uploaded, 1 widened 16->32 bit, 2 narrowed 32->16 bit; kind: 0 the data
-// alone (3DMigoto's data_hash), 1 Usage DEFAULT, 2 IMMUTABLE, 3 DYNAMIC + CPU write.
+// alone (3DMigoto's data_hash), 1 DEFAULT + INDEX_BUFFER, 2 DEFAULT + INDEX_BUFFER | SHADER_RESOURCE | UNORDERED_ACCESS,
+// 3 IMMUTABLE + INDEX_BUFFER.
 struct Hash {uint32_t value=0;uint8_t variant=0;};
 inline std::string variantName(uint8_t v){static const char* formats[]={"as uploaded","16-bit widened to 32-bit","32-bit narrowed to 16-bit"};
- static const char* kinds[]={"data only","desc Usage=DEFAULT","desc Usage=IMMUTABLE","desc Usage=DYNAMIC CPU=WRITE"};
+ static const char* kinds[]={"data only","desc DEFAULT, Bind=IB","desc DEFAULT, Bind=IB|SRV|UAV","desc IMMUTABLE, Bind=IB"};
  return std::string(formats[(v>>2)%3])+", "+kinds[v&3];}
 inline void hashFormat(const uint8_t* p,size_t n,uint8_t format,std::vector<Hash>& out){uint32_t data=crc32c(0,p,n);out.push_back({data,uint8_t(format*4)});
- const uint32_t usages[3][2]={{0,0},{1,0},{2,0x10000}};
- for(uint8_t k=0;k<3;k++){D3D11BufferDesc d;d.byteWidth=uint32_t(n);d.usage=usages[k][0];d.bindFlags=0x2;d.cpuAccessFlags=usages[k][1];out.push_back({crc32c(data,&d,sizeof d),uint8_t(format*4+k+1)});}}
+ const uint32_t kinds[3][2]={{0,0x2},{0,0x8A},{1,0x2}};   // Usage, BindFlags
+ for(uint8_t k=0;k<3;k++){D3D11BufferDesc d;d.byteWidth=uint32_t(n);d.usage=kinds[k][0];d.bindFlags=kinds[k][1];out.push_back({crc32c(data,&d,sizeof d),uint8_t(format*4+k+1)});}}
 inline std::vector<Hash> ibHashes(const uint8_t* p,size_t n){std::vector<Hash> out;hashFormat(p,n,0,out);
  if(n%2==0){std::vector<uint8_t> w(n*2);for(size_t i=0;i<n/2;i++){uint16_t v;std::memcpy(&v,p+2*i,2);uint32_t x=v;std::memcpy(&w[4*i],&x,4);}hashFormat(w.data(),w.size(),1,out);}
  if(n%4==0){std::vector<uint8_t> s(n/2);bool fits=true;for(size_t i=0;fits&&i<n/4;i++){uint32_t v;std::memcpy(&v,p+4*i,4);fits=v<=0xffff;uint16_t x=uint16_t(v);std::memcpy(&s[2*i],&x,2);}
