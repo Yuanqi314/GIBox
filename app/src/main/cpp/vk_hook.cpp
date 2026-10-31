@@ -1,15 +1,29 @@
 // The Vulkan side of the index-buffer hash diagnostic (vk_capture.hpp), off by default. Two exported entry points of
 // the system loader libvulkan.so are hooked, vkGetInstanceProcAddr and vkGetDeviceProcAddr: when the game asks for one
 // of the buffer functions below, it gets a wrapper that tells the tracker what happened and then calls the loader's
-// exported function of that name with the same arguments. No call is skipped or changed; the wrappers only read. Installed at the module's start, before
-// the game creates its Vulkan device; a function the game resolved earlier is simply not seen.
+// exported function of that name with the same arguments. No call is skipped or changed; the wrappers only read.
+// Installed at the module's start, before the game creates its Vulkan device; a function the game resolved earlier is
+// simply not seen.
+//
+// No inline hook (Dobby) in libvulkan.so: on the 0.7.56 device (Android 16, BTI hardware) the system libraries are
+// mapped with branch target checks, so an indirect branch may only land on a "bti" / "paciasp" instruction. Dobby
+// relocated the exported stub's direct "b" into the loader's internal GetInstanceProcAddr as "br x17", which lands on a
+// function only ever reached by direct branches: SIGILL ILL_ILLOPC at its first instruction, x17 = pc. Here exactly one
+// instruction of each stub is rewritten: its direct "b" becomes a direct "b" into a page of ours within 128 MiB, which
+// goes on to the wrapper; the original target is reached from that page by a direct "b" too. A stub of another shape is
+// left alone and its first words are logged.
 #include "vk_capture.hpp"
 #include "dobby.h"
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
+#include <cstring>
+#include <initializer_list>
 #include <dlfcn.h>
 #include <string>
+#include <sys/mman.h>
 #include <type_traits>
+#include <unistd.h>
 
 namespace {
 // The few Vulkan declarations used (vulkan_core.h; LP64 layout, VKAPI_CALL is empty on arm64).
@@ -32,6 +46,7 @@ using CmdCopyBuffer=void(*)(void*,uint64_t,uint64_t,uint32_t,const ms::vkcap::Co
 using CmdBindIndexBuffer=void(*)(void*,uint64_t,uint64_t,int32_t);
 
 GetProc instanceProcOriginal=nullptr,deviceProcOriginal=nullptr;
+PFN onGetDeviceProcAddr(void* device,const char* name);
 std::atomic<CreateBuffer> createBuffer{nullptr};std::atomic<DestroyBuffer> destroyBuffer{nullptr};
 std::atomic<BindBufferMemory> bindBufferMemory{nullptr};std::atomic<BindBufferMemory2> bindBufferMemory2{nullptr},bindBufferMemory2KHR{nullptr};
 std::atomic<MapMemory> mapMemory{nullptr};std::atomic<UnmapMemory> unmapMemory{nullptr};std::atomic<FreeMemory> freeMemory{nullptr};
@@ -65,9 +80,43 @@ PFN wrapped(const char* name,PFN real){if(!real||!name||!T().enabled)return real
  if(n=="vkFreeMemory")return wrap(freeMemory,real,&onFreeMemory);
  if(n=="vkCmdCopyBuffer")return wrap(cmdCopyBuffer,real,&onCmdCopyBuffer);
  if(n=="vkCmdBindIndexBuffer")return wrap(cmdBindIndexBuffer,real,&onCmdBindIndexBuffer);
+ // vkGetDeviceProcAddr looked up through vkGetInstanceProcAddr is the loader's internal function, not the exported stub:
+ // ours instead, which goes through the stub's original target (the same lookup).
+ if(n=="vkGetDeviceProcAddr"&&deviceProcOriginal){T().resolvedName(true);return reinterpret_cast<PFN>(&onGetDeviceProcAddr);}
  return real;}
 PFN onGetInstanceProcAddr(void* instance,const char* name){return wrapped(name,instanceProcOriginal(instance,name));}
 PFN onGetDeviceProcAddr(void* device,const char* name){return wrapped(name,deviceProcOriginal(device,name));}
+}
+
+namespace {
+// ---------------------------------------------------------------- one-instruction redirect
+constexpr uint32_t kB=0x14000000u,kLdrX17=0x58000051u /* ldr x17, #8 */,kBrX17=0xD61F0220u;
+bool isB(uint32_t w){return (w&0xFC000000u)==kB;}
+bool isLanding(uint32_t w){return w==0xD503245Fu||w==0xD503249Fu||w==0xD50324DFu||w==0xD503233Fu;}   // bti c / j / jc, paciasp
+uintptr_t bTarget(uint32_t w,uintptr_t at){int64_t imm=int64_t(w&0x03FFFFFFu);if(imm&0x02000000){imm-=0x04000000;}return uintptr_t(int64_t(at)+imm*4);}
+bool bTo(uintptr_t from,uintptr_t to,uint32_t& out){int64_t d=int64_t(to)-int64_t(from);if(d%4||d<-(int64_t(1)<<27)||d>=(int64_t(1)<<27))return false;out=kB|(uint32_t(d/4)&0x03FFFFFFu);return true;}
+std::string words(uintptr_t at){char b[64];uint32_t w[3];std::memcpy(w,reinterpret_cast<const void*>(at),12);std::snprintf(b,sizeof b,"%08x %08x %08x",w[0],w[1],w[2]);return b;}
+// A page of ours within reach of a direct branch from near (no PROT_BTI: anything may land in it).
+uint32_t* islandNear(uintptr_t near){const size_t page=size_t(sysconf(_SC_PAGESIZE));
+ for(int64_t mb=2;mb<=96;mb+=2)for(int sign:{-1,1}){uintptr_t hint=(uintptr_t(int64_t(near)+sign*mb*(int64_t(1)<<20)))&~uintptr_t(page-1);
+   void* p=mmap(reinterpret_cast<void*>(hint),page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);if(p==MAP_FAILED)continue;
+   int64_t d=int64_t(reinterpret_cast<uintptr_t>(p))-int64_t(near);if(d>-(int64_t(120)<<20)&&d<(int64_t(120)<<20))return static_cast<uint32_t*>(p);munmap(p,page);}
+ return nullptr;}
+// The stub at `at`: [landing pad] b target. Fills island[0..4]: ldr x17, #8; br x17; .quad hook (where the stub's "b"
+// will go), then "b target" (the original, returned). The page must be writable; nothing in the stub is written here:
+// `site` and `jump` are the stub's branch and its new encoding, written by patch() once every entry is ready.
+struct Redirect {uintptr_t site=0;uint32_t jump=0;void* original=nullptr;std::string what;};
+bool prepare(uintptr_t at,void* hook,uint32_t* island,Redirect& r,std::string& why){uint32_t w0,w1;std::memcpy(&w0,reinterpret_cast<const void*>(at),4);std::memcpy(&w1,reinterpret_cast<const void*>(at+4),4);
+ uintptr_t site=0;if(isB(w0))site=at;else if(isLanding(w0)&&isB(w1))site=at+4;const std::string before=words(at);
+ if(!site){why="not a [bti] + b stub, first words "+before;return false;}uint32_t insn;std::memcpy(&insn,reinterpret_cast<const void*>(site),4);uintptr_t target=bTarget(insn,site);
+ uint32_t back,jump;if(!bTo(reinterpret_cast<uintptr_t>(island+4),target,back)||!bTo(site,reinterpret_cast<uintptr_t>(island),jump)){why="our page is out of branch range";return false;}
+ island[0]=kLdrX17;island[1]=kBrX17;uint64_t h=reinterpret_cast<uint64_t>(hook);std::memcpy(island+2,&h,8);island[4]=back;
+ char b[128];std::snprintf(b,sizeof b,"stub %s, its b at +%u now goes through 0x%lx",before.c_str(),unsigned(site-at),static_cast<unsigned long>(reinterpret_cast<uintptr_t>(island)));
+ r.site=site;r.jump=jump;r.original=island+4;r.what=b;return true;}
+// Our page executable, then each stub's branch rewritten (4 bytes, one aligned store).
+bool patch(uint32_t* island,std::initializer_list<Redirect*> rs,std::string& why){const size_t page=size_t(sysconf(_SC_PAGESIZE));void* p=reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(island)&~uintptr_t(page-1));
+ if(mprotect(p,page,PROT_READ|PROT_EXEC)!=0){why="mprotect of our page failed";return false;}__builtin___clear_cache(static_cast<char*>(p),static_cast<char*>(p)+page);
+ for(auto* r:rs){if(DobbyCodePatch(reinterpret_cast<void*>(r->site),reinterpret_cast<uint8_t*>(&r->jump),4)!=0){why="writing a stub's branch failed";return false;}}return true;}
 }
 
 namespace ms::vkhook {
@@ -81,8 +130,15 @@ bool install(std::string& detail){
  get(createBuffer,"vkCreateBuffer");get(destroyBuffer,"vkDestroyBuffer");get(bindBufferMemory,"vkBindBufferMemory");get(bindBufferMemory2,"vkBindBufferMemory2");get(bindBufferMemory2KHR,"vkBindBufferMemory2KHR");
  get(mapMemory,"vkMapMemory");get(unmapMemory,"vkUnmapMemory");get(freeMemory,"vkFreeMemory");get(cmdCopyBuffer,"vkCmdCopyBuffer");get(cmdBindIndexBuffer,"vkCmdBindIndexBuffer");
  if(!createBuffer.load()||!bindBufferMemory.load()||!mapMemory.load()||!cmdCopyBuffer.load()||!cmdBindIndexBuffer.load()){detail="libvulkan.so does not export the buffer functions";vkcap::tracker().installed(false,detail);return false;}
- vkcap::tracker().installed(true,"");   // before the hooks: a lookup through them already wraps
- if(DobbyHook(gipa,reinterpret_cast<dobby_dummy_func_t>(&onGetInstanceProcAddr),reinterpret_cast<dobby_dummy_func_t*>(&instanceProcOriginal))!=0||!instanceProcOriginal){detail="DobbyHook vkGetInstanceProcAddr failed";vkcap::tracker().installed(false,detail);return false;}
- if(DobbyHook(gdpa,reinterpret_cast<dobby_dummy_func_t>(&onGetDeviceProcAddr),reinterpret_cast<dobby_dummy_func_t*>(&deviceProcOriginal))!=0||!deviceProcOriginal){detail="DobbyHook vkGetDeviceProcAddr failed (vkGetInstanceProcAddr stays hooked and wraps)";return true;}
- detail="vkGetInstanceProcAddr and vkGetDeviceProcAddr in libvulkan.so; wrappers call the loader's own exports";return true;}
+ // Both stubs are checked before either is written: one of another shape leaves libvulkan.so untouched.
+ auto shape=[](void* at){uint32_t w0,w1;std::memcpy(&w0,at,4);std::memcpy(&w1,static_cast<const char*>(at)+4,4);return isB(w0)||(isLanding(w0)&&isB(w1));};
+ if(!shape(gipa)||!shape(gdpa)){detail="libvulkan.so stubs are not [bti] + b (vkGetInstanceProcAddr "+words(reinterpret_cast<uintptr_t>(gipa))+", vkGetDeviceProcAddr "+words(reinterpret_cast<uintptr_t>(gdpa))+"); nothing written";vkcap::tracker().installed(false,detail);return false;}
+ uint32_t* island=islandNear(reinterpret_cast<uintptr_t>(gipa));if(!island){detail="no page of ours within branch range of libvulkan.so; nothing written";vkcap::tracker().installed(false,detail);return false;}
+ Redirect gi,gd;std::string why;
+ if(!prepare(reinterpret_cast<uintptr_t>(gipa),reinterpret_cast<void*>(&onGetInstanceProcAddr),island,gi,why)||!prepare(reinterpret_cast<uintptr_t>(gdpa),reinterpret_cast<void*>(&onGetDeviceProcAddr),island+8,gd,why)){
+  detail=why+"; nothing written";vkcap::tracker().installed(false,detail);return false;}
+ instanceProcOriginal=reinterpret_cast<GetProc>(gi.original);deviceProcOriginal=reinterpret_cast<GetProc>(gd.original);
+ vkcap::tracker().installed(true,"");   // before the stubs change: a lookup through them already wraps
+ if(!patch(island,{&gi,&gd},why)){detail=why;vkcap::tracker().installed(false,detail);return false;}
+ detail="vkGetInstanceProcAddr: "+gi.what+"; vkGetDeviceProcAddr: "+gd.what+"; wrappers call the loader's own exports";return true;}
 }
