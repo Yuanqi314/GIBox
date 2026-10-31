@@ -550,7 +550,8 @@ struct Runtime::Impl {
   std::string id()const{return "T"+std::to_string(request)+"-"+std::to_string(round+1);}} texTest;
  uint64_t texModAt=0;std::string texStatus;bool texApplied=false;
  // A confirmed full mesh, as features (saved per mod in texture-mapping.json for this build and these rules).
- struct TexRecord {std::string renderer,mesh,avatar,from;unsigned vertices=0,bones=0;std::vector<std::pair<uint32_t,uint32_t>> subs;std::vector<std::string> parts;std::vector<std::pair<int,std::string>> slots;bool saved=false;};
+ // hash: the GIMI index-buffer hash this mesh's uploaded index data reproduced (0.7.59), empty when confirmed by submesh starts.
+ struct TexRecord {std::string renderer,mesh,avatar,from,hash;unsigned vertices=0,bones=0;std::vector<std::pair<uint32_t,uint32_t>> subs;std::vector<std::string> parts;std::vector<std::pair<int,std::string>> slots;bool saved=false;};
  std::map<std::string,std::vector<TexRecord>> texRecords;std::set<std::pair<Ptr,Ptr>> texQuickNo;
  // When a renderer was first seen (hand-off or scan) and how far it got: the texture-timing lines.
  struct TexTime {uint64_t seen=0,matched=0;std::string via,match;bool logged=false;};
@@ -563,7 +564,7 @@ struct Runtime::Impl {
  std::string texMappingFile(const TexDiagFile& f){return f.dir+"/texture-mapping.json";}
  void texSaveMapping(const std::string& path){auto f=texDiagDocs.find(path);if(f==texDiagDocs.end()||!f->second.mod)return;auto& list=texRecords[path];
   std::string o="{\"format\":\"gibox-texture-mapping\",\"version\":1,\"buildId\":"+quote(abi::buildId)+",\"signature\":"+quote(texSignature(*f->second.mod))+",\"character\":"+std::to_string(f->second.mod->character)+",\"records\":[";
-  for(size_t i=0;i<list.size();i++){auto& r=list[i];o+=std::string(i?",":"")+"{\"renderer\":"+quote(r.renderer)+",\"mesh\":"+quote(r.mesh)+",\"avatar\":"+quote(r.avatar)+",\"from\":"+quote(r.from)+",\"vertices\":"+std::to_string(r.vertices)+",\"bones\":"+std::to_string(r.bones)+",\"submeshes\":[";
+  for(size_t i=0;i<list.size();i++){auto& r=list[i];o+=std::string(i?",":"")+"{\"renderer\":"+quote(r.renderer)+",\"mesh\":"+quote(r.mesh)+",\"avatar\":"+quote(r.avatar)+",\"from\":"+quote(r.from)+",\"hash\":"+quote(r.hash)+",\"vertices\":"+std::to_string(r.vertices)+",\"bones\":"+std::to_string(r.bones)+",\"submeshes\":[";
    for(size_t k=0;k<r.subs.size();k++){o+=std::string(k?",":"")+"["+std::to_string(r.subs[k].first)+","+std::to_string(r.subs[k].second)+"]";}o+="],\"materials\":[";
    for(size_t k=0;k<r.parts.size();k++){o+=std::string(k?",":"")+quote(r.parts[k]);}o+="],\"slots\":[";
    for(size_t k=0;k<r.slots.size();k++){o+=std::string(k?",":"")+"{\"slot\":"+std::to_string(r.slots[k].first)+",\"rule\":"+quote(r.slots[k].second)+"}";}o+="]}";r.saved=true;}
@@ -575,7 +576,7 @@ struct Runtime::Impl {
    std::string why=texdiag::str(j,"buildId")!=abi::buildId?"made for another game build":texdiag::str(j,"signature")!=texSignature(*f.mod)?"made for other rules (the mod was converted again)":unsigned(texdiag::num(j,"character",0))!=f.mod->character?"made for another character":"";
    if(!why.empty()){log("texture-map",f.mod->name+": saved mapping not used: "+why+"; it is replaced at the next confirmation");return;}
    std::vector<TexRecord> list;const auto& rs=j.at("records");require(rs.type==Json::Array&&rs.array.size()<=64,"mapping records");
-   for(auto& x:rs.array){TexRecord r;r.renderer=texdiag::str(x,"renderer");r.mesh=texdiag::str(x,"mesh");r.avatar=texdiag::str(x,"avatar");r.from=texdiag::str(x,"from")+" (saved)";
+   for(auto& x:rs.array){TexRecord r;r.renderer=texdiag::str(x,"renderer");r.mesh=texdiag::str(x,"mesh");r.avatar=texdiag::str(x,"avatar");r.from=texdiag::str(x,"from")+" (saved)";r.hash=texdiag::str(x,"hash");
     r.vertices=unsigned(texdiag::num(x,"vertices",0));r.bones=unsigned(texdiag::num(x,"bones",0));r.saved=true;
     const auto& sm=x.at("submeshes");require(sm.type==Json::Array&&!sm.array.empty()&&sm.array.size()<=64,"mapping submeshes");for(auto& a:sm.array){require(a.type==Json::Array&&a.array.size()==2,"mapping submesh");r.subs.push_back({uint32_t(a.array[0].number),uint32_t(a.array[1].number)});}
     const auto& mt=x.at("materials");require(mt.type==Json::Array&&mt.array.size()<=64,"mapping materials");for(auto& a:mt.array){require(a.type==Json::String,"mapping material");r.parts.push_back(a.string);}
@@ -654,7 +655,7 @@ struct Runtime::Impl {
    if(!lod){bool same=fp.mesh==rec.mesh&&fp.vertices==rec.vertices&&fp.bones==rec.bones&&info.known()&&info.layout.subs.size()==rec.subs.size();
      for(size_t i=0;same&&i<rec.subs.size();i++)same=info.layout.subs[i].start==rec.subs[i].first&&info.layout.subs[i].count==rec.subs[i].second;
      if(!same){why="mesh "+fp.mesh+" differs from the mapping's (vertices / bones / submesh starts and counts)";continue;}if(!parts){why="slot materials differ from the mapping's";continue;}
-     build("完整 Mesh 特征与 "+rec.from+" 一致（Mesh 名、"+std::to_string(rec.vertices)+" 顶点、"+std::to_string(rec.bones)+" 骨骼、"+std::to_string(rec.subs.size())+" 个子网格的起点和数量、槽位材质名、avatar）");}
+     build((rec.hash.empty()?"":"IB hash "+rec.hash+" 与 PC 相同（这个 Mesh 上传的索引数据逐字节等于 PC 的），")+"完整 Mesh 特征与 "+rec.from+" 一致（Mesh 名、"+std::to_string(rec.vertices)+" 顶点、"+std::to_string(rec.bones)+" 骨骼、"+std::to_string(rec.subs.size())+" 个子网格的起点和数量、槽位材质名、avatar）");}
    else{if(ctl.tex.lod!="migrate"){why="lower LOD "+fp.mesh+": the setting writes only what the full mesh confirmed (allow LOD migration to write it)";continue;}
     if(info.layout.submeshes!=int(rec.subs.size())&&fp.submeshes!=rec.subs.size()){why="lower LOD "+fp.mesh+" has "+std::to_string(fp.submeshes)+" submeshes, the full mesh "+std::to_string(rec.subs.size());continue;}
     if(!parts){why="lower LOD "+fp.mesh+": slot materials differ from the full mesh's";continue;}
@@ -892,6 +893,8 @@ struct Runtime::Impl {
  // wrappers read is checked against every texture-only mod's rule hashes (as 3DMigoto would hash the same bytes on PC);
  // a mesh already confirmed by its submesh starts is shown next to the uploads of its index count with all their hashes,
  // equal or not, so the comparison can be read either way. Every upload also goes to ib-hashes.txt (20000 lines at most).
+ // An upload whose hash a rule names, until it is tied to one mesh of the mod's character (or said why not).
+ struct IbHit {uint64_t seq=0;uint32_t value=0,bytes=0,max16=0,max32=0;uint8_t variant=0;std::string via;bool done=false;};std::vector<IbHit> ibHits;
  std::vector<vkcap::Blob> ibBlobs;uint64_t ibAt=0,ibSince=0,ibReported=0,ibFileLines=0;std::string ibWantedKey;bool ibSaidNothing=false,ibFileStarted=false;std::set<std::string> ibSaid;
  static std::string hex8(uint32_t v){char b[12];std::snprintf(b,sizeof b,"%08x",v);return b;}
  static uint64_t meshIndices(const std::vector<std::pair<uint32_t,uint32_t>>& subs){uint64_t n=0;for(auto& s:subs)n=std::max<uint64_t>(n,uint64_t(s.first)+s.second);return n;}
@@ -902,6 +905,40 @@ struct Runtime::Impl {
   for(auto& kv:texDiagSeen){auto& i=kv.second.info;uint64_t n=0;for(auto& s:i.layout.subs)if(s.known)n=std::max<uint64_t>(n,uint64_t(s.start)+s.count);
    if(!n||(n*2!=b.bytes&&n*4!=b.bytes)){continue;}auto k=i.meshName+"|"+i.name;if(!seen.insert(k).second)continue;out+=(out.empty()?"":", ")+texdiag::label(i)+" mesh "+i.meshName+" ("+std::to_string(n)+" indices, "+(n*2==b.bytes?"16":"32")+"-bit)";}
   return out.empty()?"none of the diagnosed renderers has that index count":out;}
+ // A rule's index-buffer hash reproduced by an upload: the upload is tied to the one mesh of the diagnosed renderers whose
+ // index count and vertex count (largest index + 1) it has, then each rule with that hash to the submesh starting at its
+ // match_first_index, the material slot of that submesh. The record is saved like one confirmed by submesh starts and
+ // written by the same paths (strategy, LOD option, restore); two meshes with those counts leave it waiting, said why.
+ bool ibConfirm(const IbHit& h){bool tied=false;
+  for(auto& kv:texDiagDocs){if(!kv.second.mod)continue;auto& m=*kv.second.mod;std::vector<size_t> rules;
+   for(size_t i=0;i<m.doc.rules.size();i++){std::string x=m.doc.rules[i].hash;for(auto& c:x)c=char(std::tolower(uint8_t(c)));if(x==hex8(h.value)&&m.doc.rules[i].first>=0)rules.push_back(i);}
+   if(rules.empty())continue;
+   // The index width the hash was read with: widened data was 16-bit, narrowed data 32-bit, as uploaded either.
+   uint8_t format=h.variant>>2;std::vector<std::pair<uint64_t,uint64_t>> shapes;   // index count, vertex count
+   if(format!=2){shapes.push_back({h.bytes/2,uint64_t(h.max16)+1});}if(format!=1&&h.bytes%4==0)shapes.push_back({h.bytes/4,uint64_t(h.max32)+1});
+   std::vector<const texdiag::Renderer*> found;std::set<std::string> meshes;
+   if(!ch.entity||ch.config!=m.character)continue;   // the diagnosed renderers are the controlled character's
+   for(auto& d:texDiagSeen){auto& i=d.second.info;if(i.lod||!i.known()||i.layout.subs.empty())continue;uint64_t n=0;bool all=true;
+    for(auto& sb:i.layout.subs){all=all&&sb.known;n=std::max<uint64_t>(n,uint64_t(sb.start)+sb.count);}
+    if(!all){continue;}for(auto& sh:shapes)if(n==sh.first&&i.vertices==sh.second){found.push_back(&i);meshes.insert(i.meshName);break;}}
+   std::string what=m.name+": "+hex8(h.value)+" (upload #"+std::to_string(h.seq)+", "+vkcap::variantName(h.variant)+")";
+   if(meshes.empty()){texSay0("ibwait|"+m.name+"|"+hex8(h.value),"texture-hash-wait",what+": no diagnosed full mesh of character "+std::to_string(m.character)+" has its index and vertex counts yet (open the party page or the character details)");continue;}
+   if(meshes.size()>1){std::string list;for(auto& x:meshes)list+=(list.empty()?"":", ")+x;texSay0("ibamb|"+m.name+"|"+hex8(h.value),"texture-hash-wait",what+": meshes "+list+" all have its index and vertex counts; not tied");continue;}
+   const auto& R=*found[0];auto& list=texRecords[kv.first];TexRecord* rec=nullptr;
+   for(auto& x:list)if(x.renderer==normalize(R.name)&&x.mesh==R.meshName&&x.vertices==R.vertices&&x.avatar==R.avatar)rec=&x;
+   bool added=false;
+   if(!rec){TexRecord n;n.renderer=normalize(R.name);n.mesh=R.meshName;n.avatar=R.avatar;n.from=texdiag::label(R)+" ("+R.meshName+")";n.vertices=R.vertices;n.bones=R.bones;
+    for(auto& sb:R.layout.subs){n.subs.push_back({sb.start,sb.count});}for(auto& mt:R.materials)n.parts.push_back(texdiag::materialPart(mt.name));list.push_back(n);rec=&list.back();added=true;}
+   if(rec->hash!=hex8(h.value)){rec->hash=hex8(h.value);added=true;}
+   std::string slots;
+   for(size_t ri:rules){const auto& r=m.doc.rules[ri];int slot=-1;for(size_t k=0;k<R.layout.subs.size();k++)if(int64_t(R.layout.subs[k].start)==r.first)slot=int(k);
+    if(slot<0||R.materials.size()!=R.layout.subs.size()){slots+=(slots.empty()?"":"; ")+r.section+": match_first_index "+std::to_string(r.first)+(slot<0?" is not a submesh start":" but materials != submeshes")+", not written";continue;}
+    auto sl=std::make_pair(slot,r.section);if(std::find(rec->slots.begin(),rec->slots.end(),sl)==rec->slots.end()){rec->slots.push_back(sl);added=true;}
+    slots+=(slots.empty()?"":"; ")+r.section+" -> submesh "+std::to_string(slot)+" (starts at "+std::to_string(r.first)+") = material slot "+std::to_string(slot)+" "+(size_t(slot)<R.materials.size()?R.materials[size_t(slot)].name:std::string());}
+   texSay0("ibok|"+m.name+"|"+hex8(h.value)+"|"+R.meshName+"|"+std::to_string(added),"texture-hash-confirm",what+" = "+texdiag::label(R)+" mesh "+R.meshName+" ("+std::to_string(R.vertices)+" vertices, the only diagnosed mesh with these index and vertex counts): "+slots);
+   if(added){texQuickNo.clear();texWaitUntil.clear();texSaveMapping(kv.first);}tied=true;}
+  return tied;}
+ void texSay0(const std::string& key,const std::string& state,const std::string& line){if(ibSaid.insert(key).second)log(state,line);}
  void ibHashTick(uint64_t now){auto& T=vkcap::tracker();if(!T.enabled)return;if(!ibSince)ibSince=now;if(now<ibAt)return;ibAt=now+1000;
   auto fresh=T.take();std::string dump;
   for(auto& b:fresh){if(ibFileLines>=20000)break;ibFileLines++;dump+="#"+std::to_string(b.seq)+" "+std::to_string(b.bytes)+" bytes via "+b.via+" buffer "+hex(b.buffer)+"+"+std::to_string(b.offset)+" max16 "+std::to_string(b.max16)+" |";
@@ -917,7 +954,9 @@ struct Runtime::Impl {
   size_t from=all?0:ibBlobs.size()-std::min(ibBlobs.size(),fresh.size());
   for(size_t i=from;i<ibBlobs.size();i++){auto& b=ibBlobs[i];for(auto& h:b.hashes){auto w=wanted.find(h.value);if(w==wanted.end())continue;
     if(!ibSaid.insert("hit|"+std::to_string(b.seq)+"|"+std::to_string(h.variant)).second)continue;
-    log("ib-hash",hex8(h.value)+" ("+w->second+") equals "+ibDescribe(b)+" read "+vkcap::variantName(h.variant)+"; meshes with this index count: "+ibMeshes(b));}}
+    log("ib-hash",hex8(h.value)+" ("+w->second+") equals "+ibDescribe(b)+" read "+vkcap::variantName(h.variant)+"; meshes with this index count: "+ibMeshes(b));
+    if(ibHits.size()<4096)ibHits.push_back({b.seq,h.value,b.bytes,b.max16,b.max32,h.variant,b.via,false});}}
+  for(auto& h:ibHits)if(!h.done)h.done=ibConfirm(h);
   // A mesh confirmed by its submesh starts: the uploads of its index count, with every hash, against its rules' hashes.
   for(auto& kv:texRecords){auto f=texDiagDocs.find(kv.first);if(f==texDiagDocs.end()||!f->second.mod)continue;auto& m=*f->second.mod;
    for(auto& rec:kv.second){uint64_t n=meshIndices(rec.subs);if(!n)continue;std::string want;for(auto& sl:rec.slots)for(auto& r:m.doc.rules){std::string h=r.hash;for(auto& c:h)c=char(std::tolower(uint8_t(c)));if(r.section==sl.second&&want.find(h)==std::string::npos)want+=(want.empty()?"":" ")+h;}

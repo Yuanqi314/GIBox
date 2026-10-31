@@ -171,7 +171,7 @@ fun SettingsScreen(state: AppState) {
                     SettingsSwitch(
                         state = ibHash,
                         title = { Text("索引 hash 诊断（Vulkan）") },
-                        subtitle = { Text("只读，不改画面。下次启动游戏生效：读取游戏上传的索引数据，按 3DMigoto 的算法算 hash，和 MOD 里的 hash 比对。结果看日志 ib-hash / ib-candidate / ib-capture，完整列表在 ib-hashes.txt") },
+                        subtitle = { Text("下次启动游戏生效。读取游戏上传的索引数据，按 3DMigoto 的算法算 hash：和 MOD 规则一致、且只对应一个 Mesh 的部件（刘海、眼睛这类分段起点分辨不出的）会被确认并存进映射，按上面的策略写入；存下后关掉开关也照样用。日志 ib-hash / texture-hash-confirm，完整列表在 ib-hashes.txt") },
                         shapes = ListItemDefaults.segmentedShapes(3, 4),
                         onCheckedChange = { state.setTextureModsFlag("ibHash", it) },
                     )

@@ -1364,5 +1364,44 @@ int main(int argc,char** argv){Fake fake;f=&fake;char temp[]="/tmp/model-runtime
   if(std::getenv("TEXMOD_PRINT")){auto l=text(logH);size_t p=0;while((p=l.find("texture-",p))!=std::string::npos){auto e2=l.find('\n',p);auto x=l.substr(p,std::min<size_t>(e2-p,330));if(x.find("texture-diag")!=0)std::cerr<<"H| "<<x<<"\n";p=e2;}}
   f->world(0);f->scene={};}
  std::filesystem::remove_all(root);
+ // 45. The index-buffer hash as confirmation (0.7.59): Bang starts at index 0 like Body, so submesh starts cannot tell
+ //     its rule apart; its uploaded index data reproduces the rule's hash, which ties it to the one diagnosed mesh with
+ //     that index and vertex count. The record carries the hash, is written and saved, and is used after a restart with
+ //     no capture; an upload two meshes could be waits.
+ {std::string mediaI=root+"/mediaIbc",sharedI=mediaI+"/"+pkg+"/GIBox",modI=sharedI+"/models/TexMod",logI=sharedI+"/GIBox Log.txt";std::filesystem::create_directories(modI+"/textures");
+  Ptr entity=load<Ptr>(load<Ptr>(load<Ptr>(f->manager+0x10)+0x10)+0x20);store<uint32_t>(entity+0x3a4,10000107);
+  Ptr gameTex=f->object("texture","Avatar_Tex_Hair_Diffuse");Ptr body=f->renderer(f->mesh("Body",3)),bmat=load<Ptr>(f->obj[body].materials+0x20);
+  Ptr bangMesh=f->mesh("Bang",4);texRanges[bangMesh]={{0,6}};Ptr bang=f->renderer(bangMesh,"BoneA","Bang"),gmat=load<Ptr>(f->obj[bang].materials+0x20);
+  for(Ptr m:{bmat,gmat}){f->diffuse[m]=gameTex;store<uint32_t>(load<Ptr>(m+0x10)+8,uint32_t(-21));}
+  Ptr two[2]={body,bang};store<Ptr>(f->owner+0x68,f->array(8,2,two));f->scene={};
+  uint16_t idx[6]={0,1,2,2,1,3};char hb[12];std::snprintf(hb,sizeof hb,"%08x",ms::vkcap::ibHashes(reinterpret_cast<const uint8_t*>(idx),12)[2].value);   // DEFAULT, IB|SRV|UAV
+  Bytes px(16,0x7f);write(modI+"/textures/0.rgba",px.data(),px.size());
+  write(modI+"/texture.json",std::string(R"J({"format":"gibox-texture-mod","version":1,"name":"TexMod","generation":"b1","character":{"id":10000107},"variants":{"vars":[],"default":{}},
+   "textures":[{"resource":"rhair","file":"textures/0.rgba","width":2,"height":2}],
+   "diag":{"format":"gibox-texture-diag","version":1,"name":"TexMod","character":10000107,"rules":[
+    {"section":"TextureOverrideLinBody","part":"Body","hint":"body","hash":"d5ae71a3","first":0,"kind":"segment","textures":[{"slot":"ps-t0","resource":"rhair","role":"diffuse","condition":"","via":""}]},
+    {"section":"TextureOverrideLinBangs","part":"Bangs","hint":"bangs","hash":")J")+hb+R"J(","first":0,"kind":"segment","textures":[{"slot":"ps-t0","resource":"rhair","role":"diffuse","condition":"","via":""}]}],"resources":[]}})J");
+  write(sharedI+"/control.json","{\"enabled\":true,\"selected\":[\"TexMod\"],\"textureMods\":{\"strategy\":\"direct\"}}");
+  auto count=[&](const std::string& x){auto l=text(logI);size_t n=0;for(size_t p=l.find(x);p!=std::string::npos;p=l.find(x,p+1))n++;return n;};
+  auto& T=ms::vkcap::tracker();
+  {Runtime q(e,pkg,root+"/privateIbc",mediaI,false);uint64_t t=11000000;auto run=[&](uint64_t ms){for(uint64_t end=t+ms;t<end;t+=100)q.tick(t);};
+   run(3000);assert(f->diffuse[gmat]==gameTex&&f->diffuse[bmat]==gameTex&&count("INFO texture-apply")==0);   // both start at 0: nothing confirmed
+   T.installed(true,"");uint8_t host[12];std::memcpy(host,idx,12);T.created(0x500,12,0x40);T.bound(0x500,0x600,0);T.mapped(0x600,0,12,host);T.indexBound(0x500,0);
+   run(3000);
+   if(std::getenv("TEXMOD_PRINT")){auto l=text(logI);size_t p=0;while((p=l.find("texture-",p))!=std::string::npos){auto e2=l.find('\n',p);auto x=l.substr(p,std::min<size_t>(e2-p,400));if(x.find("texture-diag")!=0)std::cerr<<"I| "<<x<<"\n";p=e2;}}
+   assert(count(std::string("texture-hash-confirm TexMod: ")+hb+" (upload #")==1&&count("= Bang#")==1&&count("TextureOverrideLinBangs -> submesh 0 (starts at 0) = material slot 0 Material")==1);
+   assert(f->diffuse[gmat]!=gameTex&&f->diffuse[bmat]==gameTex&&count(std::string("evidence=IB hash ")+hb+" 与 PC 相同")==1);
+   assert(text(modI+"/texture-mapping.json").find(std::string("\"hash\":\"")+hb+"\"")!=std::string::npos);
+   T.installed(false,"");q.shutdown();assert(f->diffuse[gmat]==gameTex);}
+  // A restart, no capture: the saved record (with its hash) is used.
+  {Runtime q(e,pkg,root+"/privateIbc",mediaI,false);uint64_t t=12000000;for(uint64_t end=t+3000;t<end;t+=100)q.tick(t);
+   assert(count("saved mapping in use: 1 mesh(es)")==1&&f->diffuse[gmat]!=gameTex&&f->diffuse[bmat]==gameTex);q.shutdown();}
+  // Two meshes with the upload's index and vertex counts: not tied, said why.
+  std::filesystem::remove(modI+"/texture-mapping.json");Ptr twinMesh=f->mesh("Bang2",4);texRanges[twinMesh]={{0,6}};Ptr bang2=f->renderer(twinMesh,"BoneA","Hair");
+  Ptr three[3]={body,bang,bang2};store<Ptr>(f->owner+0x68,f->array(8,3,three));
+  {Runtime q(e,pkg,root+"/privateIbc2",mediaI,false);uint64_t t=13000000;auto run=[&](uint64_t ms){for(uint64_t end=t+ms;t<end;t+=100)q.tick(t);};
+   T.installed(true,"");uint8_t host[12];std::memcpy(host,idx,12);T.created(0x700,12,0x40);T.bound(0x700,0x800,0);T.mapped(0x800,0,12,host);T.indexBound(0x700,0);run(3000);
+   assert(count("meshes Bang, Bang2 all have its index and vertex counts; not tied")==1&&f->diffuse[gmat]==gameTex);T.installed(false,"");q.shutdown();}
+  f->world(0);}
  std::cout<<"Native runtime: PASS (texture-only diagnostics read-only and cached; logic core: outfits by what the logic selects, App value as input, off, not finite and missing variable refused; App key presses as core key events (cycle, toggle, back, taken once, not replayed at start, refused when not a cycle/toggle key or the core is off), persist saved atomically per model and restored over the App table, not for another INI; driven outfit models (the program picks by clock and keys, the App table not pushed); frames by what the draws select, as FrameLoop, a selection no frame has keeps the frame, no match at the start keeps FrameLoop, switch off; face texture swaps: written, copies tracked, fresh materials, restored, assets copied; direct textures: written, put back, game copies tracked, assets and shared materials copied; merged draws: hidden and non-contiguous ranges, variant switches, separateDraws rebuild; slot textures by property block and custom texture, glow trace windows and read-back, structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, glow experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }

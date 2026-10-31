@@ -62,7 +62,7 @@ inline std::vector<Hash> ibHashes(const uint8_t* p,size_t n){std::vector<Hash> o
  return out;}
 
 // One index upload: where it came from, its hashes and enough of its content to compare by hand.
-struct Blob {uint64_t seq=0,buffer=0,offset=0;uint32_t bytes=0;std::string via;std::vector<Hash> hashes;std::vector<uint16_t> head16;uint32_t max16=0;};
+struct Blob {uint64_t seq=0,buffer=0,offset=0;uint32_t bytes=0;std::string via;std::vector<Hash> hashes;std::vector<uint16_t> head16;uint32_t max16=0,max32=0;};
 struct Stats {uint64_t uploads=0,bytes=0,copies=0,mappedBinds=0,notMapped=0,outOfRange=0,tooLarge=0,dropped=0,resolved=0,wrapped=0;bool installed=false;std::string error;};
 struct Copy {uint64_t srcOffset=0,dstOffset=0,size=0;};   // VkBufferCopy
 
@@ -79,7 +79,9 @@ class Tracker {
  // Under the lock: an unmap waits until the bytes are read.
  void add(const uint8_t* p,uint64_t n,uint64_t buffer,uint64_t offset,const char* via){st.uploads++;st.bytes+=n;if(out.size()>=maxQueue){st.dropped++;return;}
   Blob b;b.seq=++seq;b.buffer=buffer;b.offset=offset;b.bytes=uint32_t(n);b.via=via;b.hashes=ibHashes(p,size_t(n));
-  for(size_t i=0;i<n/2;i++){uint16_t v;std::memcpy(&v,p+2*i,2);if(i<8)b.head16.push_back(v);if(v>b.max16)b.max16=v;}out.push_back(std::move(b));}
+  for(size_t i=0;i<n/2;i++){uint16_t v;std::memcpy(&v,p+2*i,2);if(i<8)b.head16.push_back(v);if(v>b.max16)b.max16=v;}
+  if(n%4==0)for(size_t i=0;i<n/4;i++){uint32_t v;std::memcpy(&v,p+4*i,4);if(v>b.max32)b.max32=v;}
+  out.push_back(std::move(b));}
 public:
  std::atomic<bool> enabled{false};
  void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;buffers[buffer]=b;}
