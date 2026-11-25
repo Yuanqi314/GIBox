@@ -604,7 +604,7 @@ class AppState private constructor(private val context: Context) {
             "当前还有${Characters.nameOf(boneRefreshCharacter)}的采集请求，确定后将改为采集本页角色。\n\n" else ""
         prompt = Prompt(
             title = "重新采集骨骼？",
-            text = other + "将重新获取${Characters.nameOf(id)}的骨骼。可直接打开图鉴中的该角色并停留，或在大世界切换到该角色；若提示只有低精度模型，再打开该角色详情或队伍预览并停留。完整模型校验通过后保存，等待期间保留原骨骼库。\n\n采集完成后，请重新转换需要使用新骨骼的 MOD。",
+            text = other + "将重新获取${Characters.nameOf(id)}的骨骼 请在图鉴中打开该角色或在大世界切换到该角色\n\n采集完成后请重新转换",
             confirm = "确定", dismiss = "取消",
             onConfirm = { save("重新采集骨骼") {
                 Control.requestBoneRefresh(pkg, id)
@@ -702,7 +702,7 @@ class AppState private constructor(private val context: Context) {
     fun setAnimationBoneFallback(mod: Importer.Mod, enabled: Boolean) = save("保存动画转换实验", needsStorage = false) {
         mod.source?.let { Importer.setAnimationBoneFallback(it, enabled) }
         AppLog.info(game, LOGGER, "animation-compat ${mod.name}：" + (if (enabled) "开" else "关") + "（下次转换生效）")
-        notifyUser(if (enabled) "已开启动画骨骼兼容，请重新转换此 MOD" else "已恢复严格检查，请重新转换此 MOD")
+        notifyUser(if (enabled) "已开启骨骼兼容 请重新转换" else "已恢复严格检查 请重新转换")
     }
     /** Another INI scheme for an imported mod: stored, and converted again if it already was. */
     fun chooseScheme(mod: Importer.Mod, rel: String) {
@@ -736,7 +736,7 @@ class AppState private constructor(private val context: Context) {
             val other = Importer.freeName(modsRoot, modelsRoot, name)
             prompt = Prompt(
                 title = "已有同名 MOD",
-                text = "「$name」已经导入过。\n覆盖：换成这次选的文件\n另存：作为「$other」导入",
+                text = "「$name」已经导入过\n覆盖：换成这次选的文件\n另存：作为「$other」导入",
                 confirm = "覆盖", onConfirm = { commit(pick, pending, name, avatar.id) },
                 neutral = "另存", onNeutral = { commit(pick, pending, other, avatar.id) },
                 dismiss = "取消",
@@ -777,7 +777,7 @@ class AppState private constructor(private val context: Context) {
             if (enabled.isEmpty()) {
                 try { enable(game, model, emptyList()) } catch (e: Throwable) { AppLog.warning(game, LOGGER, "enable-error 启用失败：$e") }
                 refresh()
-                prompt = Prompt("导入完成", "${label(model)}\n$summary\n\n已启用。游戏运行中也会自动载入。")
+                prompt = Prompt("导入完成", "${label(model)}\n$summary\n\n已启用")
             } else {
                 prompt = bothPrompt("导入完成", "${label(model)}\n$summary\n\n", model, r.id, enabled, "先不开启")
             }
@@ -789,7 +789,7 @@ class AppState private constructor(private val context: Context) {
         val list = mods.filter { it.source != null && it.converted && it.id != 0 }
         if (list.isEmpty()) { prompt = Prompt("一键重新转换", "没有可重新转换的 MOD。"); return }
         prompt = Prompt(
-            title = "一键重新转换", text = "按各自的角色重新转换 ${list.size} 个 MOD，可能要几分钟。", confirm = "开始", dismiss = "取消",
+            title = "一键重新转换", text = "按角色重新转换 ${list.size} 个 MOD，可能要几分钟。", confirm = "开始", dismiss = "取消",
             onConfirm = {
                 val use3dm = !experiment("skip3dmConversion")
                 AppLog.info(game, LOGGER, "reconvert-all ${list.size} 个 MOD")
@@ -815,11 +815,11 @@ class AppState private constructor(private val context: Context) {
     }
     /** Characters with a skeleton: in the table made from the game's files, or recorded by the game on this device. */
     fun boneImportHint(id: Int, outfit: String): String {
-        if (Characters.isLoading(id)) return "每次加载随机切换图片，无需骨骼"
+        if (Characters.isLoading(id)) return "每次加载将随机切换图片"
         if (id !in 10000000..10001999) return "按 hash 匹配场景中的部件"
         val table = OfflineSkeletons.load(boneRoot.absoluteFile.parentFile)
-        if (table?.prefabFor(id, outfit.takeIf { it.isNotEmpty() }) != null) return "优先使用内置骨骼，无需采集"
-        return "内置暂无此骨骼；打开图鉴后自动采集，可在角色页导出补充"
+        if (table?.prefabFor(id, outfit.takeIf { it.isNotEmpty() }) != null) return "已内置骨骼"
+        return "内置暂无此骨骼 打开图鉴后将自动采集"
     }
     fun recorded(): Set<Int> = ModLibrary.library(boneRoot).map { it.id }.toSet() + (OfflineSkeletons.load(boneRoot.absoluteFile.parentFile)?.characters() ?: emptySet())
     /** The outfits of a character (the original first); empty for a character without skins. */
@@ -843,9 +843,9 @@ class AppState private constructor(private val context: Context) {
         val dir = pick.pending ?: pick.source ?: File(modsRoot, pick.modName)
         val g = Importer.guessOutfit(dir, id, boneRoot)
         return when {
-            g.outfit != null -> "MOD 的 INI 哈希认出是「${g.outfit.name}」：选别的外观会被拒绝（骨骼不同会错位）"
-            g.conflict.isNotEmpty() -> "MOD 的 INI 哈希指向多套外观（${g.conflict.joinToString("、")}），请自己选"
-            else -> "没从 MOD 的哈希认出外观，请自己选"
+            g.outfit != null -> "MOD 的 INI 哈希认出是「${g.outfit.name}」：选择其他外观可能会不生效或错位"
+            g.conflict.isNotEmpty() -> "MOD 的 INI 哈希指向多套外观（${g.conflict.joinToString("、")}），请手动选择"
+            else -> "未自动匹配 请手动选择"
         }
     }
     /** "冷花幽露" for a skin's prefab, "原皮" for the original, "" for none. */

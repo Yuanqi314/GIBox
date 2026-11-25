@@ -49,10 +49,10 @@ internal fun CharacterScreen(state: AppState, id: Int, active: Boolean) {
             if (id in 10000000..10001999 && query.isBlank()) item {
                 Group {
                     val pending = state.refreshingBones(id)
-                    ActionRow(if (pending) "等待采集" else "重新采集骨骼", state.boneRefreshMessage(id), Glyph.Refresh,
+                    ActionRow(if (pending) "等待采集" else "重新采集骨骼", state.boneRefreshMessage(id),
                         enabled = !pending && state.busy == null) { state.confirmBoneRefresh(id) }
                     Divider()
-                    ActionRow("导出骨骼（可补充内置表）", glyph = Glyph.Share, enabled = state.busy == null) { state.exportCharacterBones(id) }
+                    ActionRow("导出骨骼（可补充内置表）", enabled = state.busy == null) { state.exportCharacterBones(id) }
                 }
             }
             if (mods.isEmpty()) item {

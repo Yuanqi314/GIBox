@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -155,6 +156,7 @@ internal fun Page(
     bottom: (@Composable () -> Unit)? = null,
     toolbar: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
+    floatingActionButton: (@Composable BoxScope.() -> Unit)? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
     val tabInsets = LocalHomeTabInsets.current
@@ -175,6 +177,7 @@ internal fun Page(
             if (bottom != null) Column(Modifier.navigationBarsPadding()) { bottom() }
             else if (tabInsets != null) Spacer(Modifier.height(tabInsets.calculateBottomPadding()))
         },
+        floatingActionButton = floatingActionButton,
         content = content,
     )
 }

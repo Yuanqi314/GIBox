@@ -1,8 +1,13 @@
 package com.gibox.tool
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -16,14 +21,23 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.dp
+import com.itos.coui.dialog.CouiDialogDefaults
 import com.itos.coui.effect.couiButtonFeedback
 import com.itos.coui.layout.Divider
 import com.itos.coui.layout.Footer
 import com.itos.coui.layout.Group
+import com.itos.coui.radiobutton.CouiRadioButtonDefaults
 import com.itos.coui.radiobutton.RadioButton
 import com.itos.coui.scroll.rememberCouiOverscrollEffect
+import com.itos.coui.shape.CouiCapsuleShape
+import com.itos.coui.text.CouiTextKind
+import com.itos.coui.text.Text
+import com.itos.coui.theme.CouiColor
 import com.itos.coui.theme.CouiTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -75,12 +89,17 @@ fun PickScreen(state: AppState, pick: Screen.Pick) {
     val boneHint by produceState(initialValue = "", chosen, outfit, state.game) {
         value = withContext(Dispatchers.IO) { state.boneImportHint(chosen, outfit) }
     }
+    val dark = CouiTheme.isDark
+    val ink = CouiTheme.colorScheme.onSurface
+    val center = CouiTheme.colorScheme.card
+    val radioColors = remember(dark, ink, center) {
+        CouiRadioButtonDefaults.colors(ink, dark).copy(center = center, animatedCenter = center)
+    }
 
     Page("选择分类或角色", state::back, topContent = {
-        SearchControl(query, { query = it }, "ID 或名称，如 10000107、茜特菈莉、citlali")
+        SearchControl(query, { query = it }, "搜索 ID 或名称")
     }, bottom = {
-        BottomAction(if (selected == null) "确定" else "确定 · ${selected.name}" +
-            (chosenOutfit?.let { " · ${it.name}" } ?: ""),
+        PickConfirmButton(
             enabled = state.libraryReady && selected != null && ini != null && !needScheme && (outfits.isEmpty() || chosenOutfit != null)) {
             selected?.let { state.confirm(pick, it, if (schemes.size > 1) scheme else null, chosenOutfit?.prefab) }
         }
@@ -94,11 +113,11 @@ fun PickScreen(state: AppState, pick: Screen.Pick) {
                         needScheme -> "先选择一套 INI 方案"
                         selected == null -> "点一个角色，再点确定"
                         else -> "${selected.id} · $boneHint"
-                    }, Glyph.Parcel)
+                    })
                     if (schemes.size > 1) {
                         Divider()
                         ChoiceRow("INI 方案", scheme, schemes,
-                            "有 ${schemes.size} 套方案，之后也可更换", Glyph.Wrench) { scheme = it }
+                            "有 ${schemes.size} 套方案，之后也可更换") { scheme = it }
                     }
                 }
             }
@@ -117,9 +136,9 @@ fun PickScreen(state: AppState, pick: Screen.Pick) {
                         Characters.isScene(avatar.id) -> "NPC、怪物、武器、风之翼" + if (avatar.id == pick.current) " · 当前" else ""
                         else -> "${avatar.id}" + (if (recorded.contains(avatar.id)) " · 已记录骨骼" else "") +
                             (if (avatar.id == pick.current) " · 当前" else "")
-                    }, modifier = Modifier.couiButtonFeedback(CouiTheme.isDark, interaction, true, list = true)
+                    }, modifier = Modifier.couiButtonFeedback(dark, interaction, true, list = true)
                         .selectable(checked, interaction, null, role = Role.RadioButton) { chosen = avatar.id },
-                        trailing = { RadioButton(selected = checked) })
+                        trailing = { RadioButton(selected = checked, colors = radioColors) })
                     if (avatar.id == chosen && outfits.isNotEmpty()) {
                         Divider()
                         ChoiceRow("衣装", outfit, outfits.map { row ->
@@ -129,5 +148,26 @@ fun PickScreen(state: AppState, pick: Screen.Pick) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun PickConfirmButton(enabled: Boolean, click: () -> Unit) {
+    val source = remember { MutableInteractionSource() }
+    val blue = if (CouiTheme.isDark) CouiColor.Night.BLUE else CouiColor.Day.BLUE
+    val colors = CouiDialogDefaults.primaryActionColors(blue)
+    Box(
+        Modifier.fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 12.dp)
+            .heightIn(min = 48.dp)
+            .clip(CouiCapsuleShape)
+            .background(if (enabled) colors.surface else colors.disabledSurface)
+            .couiButtonFeedback(interactionSource = source, enabled = enabled)
+            .clickable(source, indication = null, enabled = enabled, role = Role.Button, onClick = click)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text = "确定", kind = CouiTextKind.ItemTitle,
+            color = if (enabled) colors.content else colors.disabledContent)
     }
 }
