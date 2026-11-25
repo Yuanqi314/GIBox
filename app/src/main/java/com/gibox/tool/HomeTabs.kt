@@ -16,19 +16,23 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.tappableElement
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.runtime.Composable
@@ -49,6 +53,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -62,6 +67,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.itos.coui.effect.CouiFloatingRenderer
 import com.itos.coui.effect.couiNavigationFeedback
+import com.itos.coui.floatingactionbutton.CouiFabColor
+import com.itos.coui.floatingactionbutton.CouiFabDefaults
 import com.itos.coui.icons.CouiIcons
 import com.itos.coui.layout.Scaffold
 import com.itos.coui.navigation.CouiNavigationItem
@@ -79,6 +86,7 @@ private val destinations = listOf(Screen.Mods, Screen.Accessibility, Screen.Sett
 internal fun HomeTabs(state: AppState) {
     var selected by rememberSaveable { mutableIntStateOf(0) }
     var focusTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    val modSearch = rememberSaveable { mutableStateOf(false) }
     val keyboard = LocalSoftwareKeyboardController.current
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     val select: (Int) -> Unit = { index ->
@@ -101,9 +109,14 @@ internal fun HomeTabs(state: AppState) {
     val transition = updateTransition(selected, label = "底栏切换")
     val switching = transition.currentState != selected || transition.isRunning
     val stickerPageActive = LocalStickerPageActive.current && !switching
+    val showImport = selected == 0 && state.libraryReady && !modSearch.value
     BackHandler(selected != 0) { select(0) }
     val ime = if (LocalWindowInfo.current.isWindowFocused) Modifier.imePadding() else Modifier
-    Scaffold(modifier = ime, bottomBar = { HomeNavigationBar(items, selected, select) }) { insets ->
+    Scaffold(modifier = ime, bottomBar = {
+        HomeNavigationBar(items, selected, select, showImport) {
+            if (state.storage) importer.launch(zipTypes) else state.needStorage()
+        }
+    }) { insets ->
         CompositionLocalProvider(
             LocalHomeTabInsets provides insets,
             LocalStickerPageActive provides stickerPageActive,
@@ -119,13 +132,13 @@ internal fun HomeTabs(state: AppState) {
             ) { index ->
                 holder.SaveableStateProvider(index) {
                     when (destinations[index]) {
-                        Screen.Mods -> ModManagementScreen(state, openFeature = { feature ->
+                        Screen.Mods -> ModManagementScreen(state, searchState = modSearch, openFeature = { feature ->
                             val tab = destinations.indexOf(feature.page)
                             if (tab >= 0) {
                                 select(tab)
                                 focusTarget = feature.title
                             } else state.openFeature(feature)
-                        }) { importer.launch(zipTypes) }
+                        })
                         Screen.Accessibility -> key(state.game) { AccessibilityScreen(state, focusTarget) }
                         Screen.Settings -> key(state.game) { SettingsScreen(state, focusTarget) }
                         Screen.About -> AboutScreen(state)
@@ -138,48 +151,84 @@ internal fun HomeTabs(state: AppState) {
 }
 
 @Composable
-private fun HomeNavigationBar(items: List<CouiNavigationItem>, selected: Int, select: (Int) -> Unit) {
-    val ink = if (CouiTheme.isDark) Color.White else Color.Black
+private fun HomeNavigationBar(
+    items: List<CouiNavigationItem>,
+    selected: Int,
+    select: (Int) -> Unit,
+    showImport: Boolean,
+    importMod: () -> Unit,
+) {
+    val dark = CouiTheme.isDark
+    val ink = if (dark) Color.White else Color.Black
     BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
-        val sideMargins = 32.dp
-        val capsulePadding = 24.dp
-        val gap = 8.dp
-        val accessorySpace = 136.dp
-        // The demo fits three tabs between two accessories. Match its button spacing
-        // at this window width, reserving enough space for our four-character labels.
-        val demoTab = ((maxWidth - sideMargins - accessorySpace - capsulePadding - gap * 2) / 3)
-            .coerceIn(48.dp, 70.dp)
-        val tabCount = items.size
-        val chrome = capsulePadding + gap * (tabCount - 1)
-        val available = (maxWidth - sideMargins).coerceAtLeast(0.dp)
-        val longestLabel = items.maxOf { it.title.length }
+        val margin = 16.dp
+        val tabPadding = 12.dp
+        val tabGap = 8.dp
+        val accessorySize = 56.dp
+        val accessoryGap = 12.dp
+        val accessorySlot = accessorySize + accessoryGap
+        val capsuleChrome = tabPadding * 2 + tabGap * (items.size - 1)
+        val maxCapsuleWidth = capsuleChrome + 70.dp * items.size
+        val barWidth = minOf(maxWidth, margin * 2 + maxCapsuleWidth + accessorySlot)
+        val tabWidth = (barWidth - margin * 2 - accessorySlot - capsuleChrome) / items.size
         val density = LocalDensity.current
-        if (Build.VERSION.SDK_INT >= 34) {
-            val labelWidth = with(density) { 10.sp.toDp() } * longestLabel + 2.dp
-            val tabWidth = maxOf(demoTab, labelWidth)
-            val capsuleWidth = (chrome + tabWidth * tabCount).coerceAtMost(available)
-            if (tabWidth <= 70.dp && (capsuleWidth - chrome) / tabCount >= maxOf(48.dp, labelWidth)) {
-                val renderer = remember { runCatching { CouiFloatingRenderer() }.getOrNull() }
-                if (renderer != null) {
-                    // alpha11 subtracts the outer margins and both accessory slots internally.
-                    NavigationBar(modifier = Modifier.requiredWidth(capsuleWidth + sideMargins + accessorySpace),
-                        renderer = renderer, items = items, selectedIndex = selected,
-                        selectedColor = ink, unselectedColor = ink.copy(alpha = .68f), onSelection = select)
-                    return@BoxWithConstraints
+        val labelWidth = with(density) { 10.sp.toDp() } * items.maxOf { it.title.length } + 2.dp
+        if (Build.VERSION.SDK_INT >= 34 && tabWidth >= maxOf(48.dp, labelWidth)) {
+            val renderer = remember { runCatching { CouiFloatingRenderer() }.getOrNull() }
+            if (renderer != null) {
+                Layout(
+                    modifier = Modifier.width(barWidth),
+                    content = {
+                        NavigationBar(
+                            renderer = renderer,
+                            items = items,
+                            selectedIndex = selected,
+                            rightIcon = CouiIcons.Filled.Add,
+                            rightDescription = "导入 MOD",
+                            rightVisible = showImport,
+                            onRightClick = if (showImport) importMod else null,
+                            rightContainerColor = CouiFabDefaults.containerColor(CouiFabColor.InfraredRemote, dark),
+                            selectedColor = ink,
+                            unselectedColor = ink.copy(alpha = .68f),
+                            onSelection = select,
+                        )
+                    },
+                ) { measurables, constraints ->
+                    // alpha11 still measures a hidden left accessory. Move just that slot outside the row.
+                    val unusedSlot = accessorySlot.roundToPx()
+                    val width = constraints.maxWidth
+                    val measuredWidth = width + unusedSlot
+                    val bar = measurables.single().measure(constraints.copy(minWidth = measuredWidth, maxWidth = measuredWidth))
+                    layout(width, bar.height) { bar.placeRelative(-unusedSlot, 0) }
+                }
+                return@BoxWithConstraints
+            }
+        }
+        val bottomMargin = if (WindowInsets.tappableElement.getBottom(density) > 0) 16.dp else 24.dp
+        val sideMargin = if (tabWidth >= 48.dp) margin else 8.dp
+        val innerPadding = if (tabWidth >= 48.dp) tabPadding else 8.dp
+        Row(
+            modifier = Modifier.width(barWidth)
+                .windowInsetsPadding(WindowInsets.tappableElement.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
+                .padding(start = sideMargin, end = sideMargin, top = 16.dp, bottom = bottomMargin),
+            horizontalArrangement = Arrangement.spacedBy(accessoryGap),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PlainHomeNavigationBar(items, selected, select, ink, Modifier.weight(1f), tabGap, innerPadding)
+            Box(Modifier.size(accessorySize), contentAlignment = Alignment.Center) {
+                androidx.compose.animation.AnimatedVisibility(showImport, enter = fadeIn(), exit = fadeOut()) {
+                    ImportModButton { if (showImport) importMod() }
                 }
             }
         }
-        val plainLabelWidth = with(density) { 12.sp.toDp() } * longestLabel + 2.dp
-        val plainWidth = (chrome + maxOf(demoTab, plainLabelWidth) * tabCount).coerceAtMost(maxWidth)
-        PlainHomeNavigationBar(items, selected, select, ink, Modifier.width(plainWidth), gap)
     }
 }
 
 @Composable
 private fun PlainHomeNavigationBar(items: List<CouiNavigationItem>, selected: Int, select: (Int) -> Unit,
-    ink: Color, modifier: Modifier, gap: Dp) {
-    Row(modifier.navigationBarsPadding().clip(CouiCapsuleShape).background(CouiTheme.colorScheme.card)
-        .padding(horizontal = 12.dp).heightIn(min = 64.dp).selectableGroup(),
+    ink: Color, modifier: Modifier, gap: Dp, innerPadding: Dp) {
+    Row(modifier.clip(CouiCapsuleShape).background(CouiTheme.colorScheme.card)
+        .padding(horizontal = innerPadding).heightIn(min = 56.dp).selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(gap), verticalAlignment = Alignment.CenterVertically) {
         items.forEachIndexed { index, item ->
             val source = remember { MutableInteractionSource() }

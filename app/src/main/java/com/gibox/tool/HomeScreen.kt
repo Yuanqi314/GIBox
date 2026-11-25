@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -47,9 +48,14 @@ import com.itos.coui.theme.CouiTheme
 private val categories = listOf("角色 MOD", "场景 MOD", "加载图片")
 
 @Composable
-internal fun ModManagementScreen(state: AppState, openFeature: ((Feature) -> Unit)? = null, pickZip: () -> Unit) {
+internal fun ModManagementScreen(
+    state: AppState,
+    openFeature: ((Feature) -> Unit)? = null,
+    searchState: MutableState<Boolean> = rememberSaveable { mutableStateOf(false) },
+    pickZip: (() -> Unit)? = null,
+) {
     var category by rememberSaveable { mutableIntStateOf(0) }
-    var searching by rememberSaveable { mutableStateOf(false) }
+    var searching by searchState
     var query by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
     val searchList = rememberLazyListState()
@@ -73,14 +79,14 @@ internal fun ModManagementScreen(state: AppState, openFeature: ((Feature) -> Uni
     }
     val flatMods = remember(results) { results.flatMap { it.mods } }
     val home = openFeature != null
-    val showImport = state.libraryReady && !searching
+    val showFloatingImport = pickZip != null && state.libraryReady && !searching
     Page("模组管理", toolbar = {
         SearchToolbar("模组管理", if (home) "搜索功能、分类、角色名或 ID" else "搜索分类、角色名或 ID", query, { query = it }, searching, {
             searching = it
             if (!it) query = ""
         }, back = if (home) null else state::back,
             leadingAction = if (home) ({ ToolbarAction(Glyph.Log, "运行日志") { state.open(Screen.Log) } }) else null)
-    }, floatingActionButton = if (showImport) ({
+    }, floatingActionButton = if (showFloatingImport) ({
         ImportModButton(Modifier.align(Alignment.BottomEnd).padding(16.dp)) {
             if (state.storage) pickZip() else state.needStorage()
         }
@@ -89,7 +95,7 @@ internal fun ModManagementScreen(state: AppState, openFeature: ((Feature) -> Uni
         LazyColumn(Modifier.fillMaxSize().consumeWindowInsets(padding),
             contentPadding = PaddingValues(
                 top = padding.calculateTopPadding(),
-                bottom = padding.calculateBottomPadding() + if (showImport) 80.dp else 8.dp,
+                bottom = padding.calculateBottomPadding() + if (showFloatingImport) 80.dp else 8.dp,
             ),
             state = if (searching) searchList else listState,
             overscrollEffect = rememberCouiOverscrollEffect(),
@@ -145,7 +151,7 @@ internal fun ModManagementScreen(state: AppState, openFeature: ((Feature) -> Uni
 }
 
 @Composable
-private fun ImportModButton(modifier: Modifier, click: () -> Unit) {
+internal fun ImportModButton(modifier: Modifier = Modifier, click: () -> Unit) {
     val dark = CouiTheme.isDark
     val color = CouiFabDefaults.containerColor(CouiFabColor.InfraredRemote, dark)
     val shape = CouiFabDefaults.circleShape
