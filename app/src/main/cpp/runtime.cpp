@@ -545,7 +545,7 @@ struct Runtime::Impl {
  std::map<std::string,std::unique_ptr<TexStore>> texStores;std::vector<std::unique_ptr<TexStore>> texStoresKept;
  struct TexDone {texdiag::Write write;Ptr before=0,ours=0;};
  struct TexSlot {std::string rule,evidence,label,mesh,plan;std::vector<size_t> rules;Ptr renderer=0,native=0,material=0,materialNative=0,clone=0;int slot=-1;bool lod=false;std::vector<TexDone> writes;unsigned again=0;bool gaveUp=false;uint64_t writtenAt=0;
-  Ptr previewMesh=0;std::string previewAvatar;
+  Ptr previewMesh=0;std::string previewAvatar,npcAvatar;
   bool adopted=false;Ptr copy=0,source=0;};   // adopted: material is the game's instance made from ours (copy / source: our copy it came from, the material that copy replaced)
  struct TexLive:Owned {std::string path,mod,strategy,test;std::vector<TexSlot> slots;std::set<std::string> said;};
  std::map<std::string,std::unique_ptr<TexLive>> texLive;std::vector<std::unique_ptr<TexLive>> texStranded;
@@ -605,9 +605,6 @@ struct Runtime::Impl {
     require(!r.renderer.empty()&&!r.mesh.empty()&&r.vertices>0,"映射记录项");list.push_back(r);}
    texRecords[path]=list;log("texture-map",f.mod->name+"：使用已保存的映射，网格 "+std::to_string(list.size())+" 个，游戏版本 "+std::string(abi::buildId).substr(0,8)+"，规则 "+texSignature(*f.mod));}
   catch(const std::exception& ex){log("texture-map",f.mod->name+"：已保存的映射读取失败（"+std::string(ex.what())+"），不使用");}}
- // What a match confirmed on a full mesh becomes a record (saved when new).
- // Only renderers of `avatar`, the mod's character as established by the caller (0.7.109): a record is later taken as
- // proof that a model is the mod's character, so one of another character must never be saved.
  void texRemember(const texdiag::Doc& d,const std::vector<texdiag::Match>& matches,const std::vector<texdiag::Renderer>& live,const std::string& avatar){
   // The live matches of every caller together (1.0.2): a hand-off (party / detail page) used to replace the world's,
   // so the world model's slots went back as "no longer targeted". Confirmed matches on renderers still alive stay.
@@ -618,6 +615,9 @@ struct Runtime::Impl {
      bool fresh=false;for(auto& n:live)fresh=fresh||n.renderer==R.renderer;if(fresh)continue;
      auto mv=moved.find(x.renderer);if(mv==moved.end()){mv=moved.emplace(x.renderer,int(all.size())).first;all.push_back(R);}auto y=x;y.renderer=mv->second;merged.push_back(y);}}
    texMatches[d.path]=std::move(merged);texMatchLive[d.path]=std::move(all);}
+  texRecordMatches(d,matches,live,avatar);}
+ // Only save a full mesh confirmed to belong to the avatar established by the caller.
+ void texRecordMatches(const texdiag::Doc& d,const std::vector<texdiag::Match>& matches,const std::vector<texdiag::Renderer>& live,const std::string& avatar){
   bool added=false;auto& list=texRecords[d.path];
   for(auto& m:matches){if(m.verdict!=texdiag::Verdict::Confirmed||m.renderer<0||m.slot<0)continue;const auto& R=live[size_t(m.renderer)];if(R.lod||!R.known()||size_t(m.slot)>=R.materials.size()||avatar.empty()||R.avatar!=avatar)continue;
    TexRecord* rec=nullptr;for(auto& x:list)if(x.renderer==normalize(R.name)&&x.mesh==R.meshName&&x.vertices==R.vertices&&x.avatar==R.avatar)rec=&x;
@@ -684,8 +684,9 @@ struct Runtime::Impl {
  std::vector<int32_t> texIds(Ptr m){std::vector<int32_t> ids;Owned tmp;try{Ptr a=e.get(abi::getTextureIds,m);if(a){pin(tmp,a);auto n=length(a,64);for(uint64_t i=0;i<n;i++)ids.push_back(load<int32_t>(a+0x20+4*i));}}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);return ids;}
  // A light read for matching (hand-off): names, mesh features, the submesh layout through the engine getters, the
  // material names; no texture details.
- texdiag::Renderer texLightRead(Ptr r){texdiag::Renderer info;info.renderer=r;info.native=load<Ptr>(r+0x10);info.name=rendererName(r);
-  try{info.avatar=avatarIdentity(r);}catch(const std::exception&){}
+ texdiag::Renderer texLightRead(Ptr r,const std::string& npcAvatar={}){texdiag::Renderer info;info.renderer=r;info.native=load<Ptr>(r+0x10);info.name=rendererName(r);
+  if(!npcAvatar.empty())info.avatar=npcAvatar;
+  else try{info.avatar=avatarIdentity(r);}catch(const std::exception&){}
   Ptr mesh=meshGet(r);info.mesh=mesh;if(!alive(mesh)){info.error="网格已失效";return info;}
   auto fp=fingerprint(mesh);info.meshName=fp.mesh;info.vertices=fp.vertices;info.submeshes=fp.submeshes;info.bones=fp.bones;info.lod=lowerLod(fp.mesh);
   info.layout.status="未采集: 尚未读取";texDiagMesh(mesh,info.layout);
@@ -693,19 +694,19 @@ struct Runtime::Impl {
   return info;}
  // One slot to write: every rule on it (a segment and texture hashes; texdiag::writesFor merges them).
  struct TexTarget {Ptr renderer=0,native=0;int slot=-1;std::vector<size_t> rules;std::string evidence,label,mesh;bool lod=false;
-  Ptr previewMesh=0;std::string previewAvatar={};};
+  Ptr previewMesh=0;std::string previewAvatar={},npcAvatar={};};
  // A renderer against the records: the full mesh by all its features, a lower LOD (migrate only) by renderer, mesh base
  // name, avatar, submesh count and the slot materials' part names. why: what keeps it from being written, when nothing does.
  std::vector<TexTarget> texRecordTargets(const std::string& path,const texdiag::TextureMod& m,Ptr r,std::string& why){std::vector<TexTarget> out;
   auto ri=texRecords.find(path);if(ri==texRecords.end()||ri->second.empty()||!alive(r))return out;Ptr native=load<Ptr>(r+0x10);Ptr mesh=meshGet(r);if(!alive(mesh))return out;Ptr mn=load<Ptr>(mesh+0x10);
   if(texQuickNo.count({path,native,mn})){return out;}if(texWaitLod!=ctl.tex.lod){texWaitLod=ctl.tex.lod;texWaitUntil.clear();}
+  auto npc=npcSource(r);if(!npc.empty()&&(!ctl.npcModels||npc=="?"||previewId(npc)!=m.character))return out;
   // Not checked again yet: not a "no" (texDeferred keeps what was written there until the check is made).
   {auto w=texWaitUntil.find({path,native,mn});if(w!=texWaitUntil.end()&&texClock()<w->second){texDeferred.insert(r);return out;}}auto fp=fingerprint(mesh);bool lod=lowerLod(fp.mesh);bool near=false;auto rn=rendererName(r);
-  auto npc=npcSource(r);if(!npc.empty()&&(!ctl.npcModels||npc=="?"||previewId(npc)!=m.character)){texWaitUntil[{path,native,mn}]=texClock()+500;return out;}
   for(auto& rec:ri->second){if(normalize(rn)!=rec.renderer||meshName(fp.mesh)!=meshName(rec.mesh))continue;near=true;
-   auto info=texLightRead(r);if(info.avatar!=rec.avatar){why="avatar "+info.avatar+" 与映射记录的 "+rec.avatar+" 不同";continue;}
+   auto info=texLightRead(r,npc);if(info.avatar!=rec.avatar){why="avatar "+info.avatar+" 与映射记录的 "+rec.avatar+" 不同";continue;}
    std::string ruleWhy;auto build=[&](const std::string& evidence){for(auto& sl:rec.slots){int rule=-1;for(size_t i=0;i<m.doc.rules.size();i++)if(m.doc.rules[i].section==sl.second)rule=int(i);if(rule<0)continue;
-     TexTarget* t=nullptr;for(auto& x:out)if(x.renderer==r&&x.slot==sl.first)t=&x;if(!t){out.push_back({r,native,sl.first,{},evidence,texdiag::label(info),fp.mesh,lod});t=&out.back();}
+     TexTarget* t=nullptr;for(auto& x:out)if(x.renderer==r&&x.slot==sl.first)t=&x;if(!t){out.push_back({r,native,sl.first,{},evidence,texdiag::label(info),fp.mesh,lod,0,{},npc});t=&out.back();}
      if(std::find(t->rules.begin(),t->rules.end(),size_t(rule))==t->rules.end())t->rules.push_back(size_t(rule));}};
    bool parts=info.materials.size()==rec.parts.size();for(size_t i=0;parts&&i<rec.parts.size();i++)parts=texdiag::materialPart(info.materials[i].name)==rec.parts[i];
    if(!lod){bool same=fp.mesh==rec.mesh&&fp.vertices==rec.vertices&&fp.bones==rec.bones&&info.known()&&info.layout.subs.size()==rec.subs.size();
@@ -898,8 +899,10 @@ struct Runtime::Impl {
  bool texApply(TexLive& L,const texdiag::TextureMod& m,const std::map<std::string,Texture>& px,const TexTarget& t,TexSlot& s){
   std::vector<std::string> skipped;auto plan=texdiag::writesFor(m.doc,t.rules,texVars(m),skipped);
   s=TexSlot{};s.rule=texdiag::sections(m.doc,t.rules);s.rules=t.rules;s.evidence=t.evidence;s.label=t.label;s.mesh=t.mesh;s.renderer=t.renderer;s.native=t.native;s.slot=t.slot;s.lod=t.lod;for(auto& w:plan)s.plan+=w.property+"="+w.resource+";";
-  s.previewMesh=t.previewMesh;s.previewAvatar=t.previewAvatar;
-  std::string line=texTag(L)+"：规则 "+s.rule+" → "+(m.character==texdiag::kScene?std::string(gliderMod(m)?"风之翼":"NPC / 怪物"):"角色 "+std::to_string(ch.config))+"，"+t.label+"，网格 "+t.mesh+"，精度 "+(t.lod?"低精度":"完整")+"，槽 "+std::to_string(t.slot)+"，依据 "+t.evidence;
+  s.previewMesh=t.previewMesh;s.previewAvatar=t.previewAvatar;s.npcAvatar=t.npcAvatar;
+  std::string owner=m.character==texdiag::kScene?(gliderMod(m)?"风之翼":"NPC / 怪物"):"角色 "+std::to_string(ch.config);
+  if(!t.npcAvatar.empty())owner="NPC "+t.npcAvatar;
+  std::string line=texTag(L)+"：规则 "+s.rule+" → "+owner+"，"+t.label+"，网格 "+t.mesh+"，精度 "+(t.lod?"低精度":"完整")+"，槽 "+std::to_string(t.slot)+"，依据 "+t.evidence;
   Ptr arr=e.get(abi::getMaterials,t.renderer);require(arr!=0,"没有材质数组");auto current=pointers(arr,64);require(size_t(t.slot)<current.size(),"槽 "+std::to_string(t.slot)+" 超出材质数 "+std::to_string(current.size()));
   Ptr mat=current[size_t(t.slot)];require(alive(mat),"槽位材质已销毁");line+="，材质 "+texMaterial(mat);
   std::string shared;for(auto& kv:texDiagSeen){if(kv.first==t.renderer||!alive(kv.first))continue;for(auto& x:kv.second.info.materials)if(x.material==mat)shared+=(shared.empty()?"":", ")+texdiag::label(kv.second.info);}
@@ -983,6 +986,7 @@ struct Runtime::Impl {
     Ptr now=e.call<Ptr>(abi::getTexture,s.material,propertyId(w.write.property.c_str()),Ptr(0));if(now!=w.ours){event=w.write.property+" 被游戏改写，当前为 "+texDescribe(now);break;}}
    if(event.empty()){continue;}uint64_t noticed=texClock(),since=s.writtenAt?noticed-s.writtenAt:0;
    if(s.previewMesh&&(meshGet(r)!=s.previewMesh||avatarIdentity(r)!=s.previewAvatar))continue;
+   if(!s.npcAvatar.empty()&&(!ctl.npcModels||npcSource(r)!=s.npcAvatar))continue;
    if(++s.again>16){s.gaveUp=true;log("texture-event",head+event+"；已重新写入 16 次，停止");continue;}
    unsigned again=s.again;std::string when="；发现途径 "+via+"，距 GIBox 写入 "+std::to_string(since)+" ms";
    // A material the game made from ours (its per-renderer instance of our copy or of the material we wrote, as the
@@ -994,7 +998,7 @@ struct Runtime::Impl {
       if(!alive(w.ours)){std::string note;w.ours=texOurs(L,px,w.write,note);line+="；"+w.write.property+note;}
       putTexture(s.material,w.write.property.c_str(),w.ours);Ptr back=e.call<Ptr>(abi::getTexture,s.material,id,Ptr(0));line+="；"+w.write.property+"："+texDescribe(now)+" → "+texDescribe(w.ours)+"，回读"+(back==w.ours?"一致":"不一致，当前为 "+texDescribe(back));}
     s.writtenAt=texClock();log("texture-event",head+event+"；已在游戏由 GIBox 材质复制出的实例中重新写入（不复制）"+line+when+"，第 "+std::to_string(again)+" 次");continue;}
-   TexTarget t{s.renderer,s.native,s.slot,s.rules,s.evidence,s.label,s.mesh,s.lod,s.previewMesh,s.previewAvatar};
+   TexTarget t{s.renderer,s.native,s.slot,s.rules,s.evidence,s.label,s.mesh,s.lod,s.previewMesh,s.previewAvatar,s.npcAvatar};
    bool restored=texRestore(L,s,"游戏修改后重新写入");if(!restored){s.gaveUp=true;continue;}
    try{texApply(L,m,px,t,s);s.again=again;}catch(const std::exception& ex){log("texture-error",texTag(L)+"："+ex.what());s.gaveUp=true;continue;}
    log("texture-event",head+event+when+"，"+std::to_string(texClock()-noticed)+" ms 内重新写入，第 "+std::to_string(again)+" 次");}}
@@ -1091,14 +1095,15 @@ struct Runtime::Impl {
   for(auto& kv:texDiagDocs){auto& f=kv.second;if(!f.mod||!texModOn(f.mod->name)||f.mod->character==texdiag::kScene||!texRecords[kv.first].empty())continue;
    std::map<Ptr,std::vector<texdiag::Renderer>> groups;std::map<Ptr,std::string> sources;
    for(Ptr r:scene){if(!alive(r))continue;auto source=npcSource(r);if(source.empty()||source=="?"||previewId(source)!=f.mod->character)continue;
-    Ptr root=avatarRoot(r);if(!root)continue;auto info=texLightRead(r);if(info.lod||!info.known())continue;groups[root].push_back(info);sources[root]=source;}
+    Ptr root=avatarRoot(r);if(!root)continue;auto info=texLightRead(r,source);if(info.lod||!info.known())continue;groups[root].push_back(std::move(info));sources[root]=source;}
    for(auto& group:groups){auto matches=texdiag::match(f.mod->doc,group.second,deviceMap());bool any=false;for(auto& match:matches)any=any||match.verdict==texdiag::Verdict::Confirmed;
-    if(any){texRemember(f.mod->doc,matches,group.second,sources[group.first]);log("npc-texture-match",f.mod->name+"：已确认对应 NPC 的贴图槽位");}}
+    // NPCs can be pooled for another owner. Apply their records through the live owner check.
+    if(any){texRecordMatches(f.mod->doc,matches,group.second,sources[group.first]);log("npc-texture-match",f.mod->name+"：已确认对应 NPC 的贴图槽位");}}
   }}
  void texNpcRestore(){if(ctl.npcModels)return;
   for(auto& kv:texLive){auto doc=texDiagDocs.find(kv.first);if(doc==texDiagDocs.end()||!doc->second.mod||doc->second.mod->character==texdiag::kScene)continue;
    if(kv.second)for(auto it=kv.second->slots.begin();it!=kv.second->slots.end();){
-    if(!npcSource(it->renderer).empty()&&texRestore(*kv.second,*it,"NPC 同步已关闭"))it=kv.second->slots.erase(it);else ++it;}}}
+    if((!it->npcAvatar.empty()||!npcSource(it->renderer).empty())&&texRestore(*kv.second,*it,"NPC 同步已关闭"))it=kv.second->slots.erase(it);else ++it;}}}
  void textureModTick(uint64_t now){try{texNpcRestore();texNpcRemember(now);texQuick();}catch(const std::exception& ex){log("texture-error",std::string("快速检查：")+ex.what());}
   if(now<texModAt){return;}texModAt=now+500;texStatus.clear();texApplied=false;
   for(auto it=texPending.begin();it!=texPending.end();)if(!texPendLive(*it))it=texPending.erase(it);else ++it;
@@ -1144,7 +1149,7 @@ struct Runtime::Impl {
    }
    // Slots no longer targeted (renderer gone, mapping lost) go back; a changed variant is written again.
    std::set<Ptr> deferred=texDeferred;
-   bool failed=false;for(auto it=L->slots.begin();it!=L->slots.end();){if(!scene&&!onCharacter&&!it->previewMesh&&npcSource(it->renderer).empty()){++it;continue;}bool still=false;for(auto& t:targets)still=still||(t.renderer==it->renderer&&t.slot==it->slot);
+   bool failed=false;for(auto it=L->slots.begin();it!=L->slots.end();){if(!scene&&!onCharacter&&!it->previewMesh&&it->npcAvatar.empty()&&npcSource(it->renderer).empty()){++it;continue;}bool still=false;for(auto& t:targets)still=still||(t.renderer==it->renderer&&t.slot==it->slot);
     // A renderer whose check was only put off (texWaitUntil) keeps its slots while it lives: not a "no longer targeted".
     if(!still&&deferred.count(it->renderer)&&alive(it->renderer)&&load<Ptr>(it->renderer+0x10)==it->native){++it;continue;}
     std::string plan;if(still){for(auto& t:targets)if(t.renderer==it->renderer&&t.slot==it->slot){std::vector<std::string> sk;for(auto& w:texdiag::writesFor(m.doc,t.rules,texVars(m),sk))plan+=w.property+"="+w.resource+";";}}

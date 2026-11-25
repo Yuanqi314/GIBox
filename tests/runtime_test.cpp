@@ -1681,17 +1681,34 @@ int main(int argc,char** argv){Fake fake;f=&fake;abi::allocVerified=true;   // t
  {std::string mediaT=root+"/mediaNpcTex",sp=mediaT+"/"+pkg+"/GIBox",mod=sp+"/models/Tint";std::filesystem::create_directories(mod+"/textures");
   Ptr entity=load<Ptr>(load<Ptr>(load<Ptr>(f->manager+kList)+0x10)+0x20);store<uint32_t>(entity+kConfig,10000200);
   Ptr player=f->renderer(f->mesh("OtherBody",4),"BoneA","Body",f->kavehRoot);f->world(player);
-  Ptr rootNpc=f->object("transform","NPC_Avatar_Girl_Catalyst_Citlali(Clone)"),n=f->renderer(f->mesh(),"BoneA","Body",rootNpc);
-  Ptr mat=load<Ptr>(f->obj[n].materials+0x20),tex=f->object("texture","NpcDiffuse");f->diffuse[mat]=tex;store<uint32_t>(load<Ptr>(mat+0x10)+8,uint32_t(-31));f->scene={player,n};
-  write(sp+"/skeleton-policy.json",R"J({"models":{"citlali":10000107},"outfits":{},"builtin":[],"npcs":{"npc_avatar_girl_catalyst_citlali":"avatar_girl_catalyst_citlali"}})J");
+  Ptr mesh=f->mesh(),rootNpc=f->object("transform","NPC_Avatar_Girl_Catalyst_Citlali(Clone)");
+  Ptr otherNpc=f->object("transform","NPC_Avatar_Boy_Sword_Kaveh(Clone)");
+  Ptr n=f->renderer(mesh,"BoneA","Body",rootNpc),other=f->renderer(mesh,"BoneA","Body",otherNpc);
+  Ptr mat=load<Ptr>(f->obj[n].materials+0x20),otherMat=load<Ptr>(f->obj[other].materials+0x20),tex=f->object("texture","NpcDiffuse");
+  f->diffuse[mat]=f->diffuse[otherMat]=tex;
+  store<uint32_t>(load<Ptr>(mat+0x10)+8,uint32_t(-31));store<uint32_t>(load<Ptr>(otherMat+0x10)+8,uint32_t(-32));f->scene={player,n,other};
+  write(sp+"/skeleton-policy.json",R"J({"models":{"citlali":10000107,"kaveh":10000200},"outfits":{},"builtin":[],"npcs":{"npc_avatar_girl_catalyst_citlali":"avatar_girl_catalyst_citlali","npc_avatar_boy_sword_kaveh":"avatar_boy_sword_kaveh"}})J");
   Bytes pixels(16,0x7f);write(mod+"/textures/0.rgba",pixels.data(),pixels.size());
   write(mod+"/texture.json",R"J({"format":"gibox-texture-mod","version":1,"name":"Tint","generation":"1","character":{"id":10000107},"variants":{"vars":[],"default":{}},"textures":[{"resource":"t","file":"textures/0.rgba","width":2,"height":2}],"diag":{"format":"gibox-texture-diag","version":1,"name":"Tint","character":10000107,"rules":[{"section":"TextureOverrideBodyA","part":"BodyA","hint":"body","hash":"d5ae71a3","first":0,"kind":"segment","textures":[{"slot":"ps-t0","resource":"t","role":"diffuse","condition":"","via":""}]}],"resources":[]}})J");
   write(sp+"/control.json",R"J({"enabled":true,"selected":["Tint"],"npcModels":true,"textureMods":{"strategy":"direct"}})J");
-  size_t handles=f->handles.size();Runtime rt(e,pkg,root+"/privateNpcTex",mediaT,false);uint64_t t=9000000;
-  for(uint64_t end=t+4000;t<end;t+=100){rt.tick(t);}assert(f->diffuse[mat]!=tex);
-  write(sp+"/control.json",R"J({"enabled":true,"selected":["Tint"],"npcModels":false,"textureMods":{"strategy":"direct"}})J");
-  for(uint64_t end=t+1500;t<end;t+=100){rt.tick(t);}assert(f->diffuse[mat]==tex);
-  rt.shutdown();assert(f->handles.size()==handles);store<uint32_t>(entity+kConfig,10000107);f->world(0);f->scene={};}
+  size_t handles=f->handles.size();uint64_t t=9000000;
+  auto run=[&](Runtime& rt,uint64_t ms){for(uint64_t end=t+ms;t<end;t+=100)rt.tick(t);};
+  {Runtime rt(e,pkg,root+"/privateNpcTex",mediaT,false);run(rt,4000);
+   assert(f->diffuse[mat]!=tex&&f->diffuse[otherMat]==tex);
+   auto mapping=JsonParser(text(mod+"/texture-mapping.json")).parse();
+   const auto& records=mapping.at("records").array;
+   assert(records.size()==1&&records.front().at("avatar").string=="avatar_girl_catalyst_citlali");
+   rt.shutdown();assert(f->diffuse[mat]==tex&&f->handles.size()==handles);}
+  {Runtime rt(e,pkg,root+"/privateNpcTex",mediaT,false);run(rt,4000);
+   assert(f->diffuse[mat]!=tex&&f->diffuse[otherMat]==tex);
+   assert(text(sp+"/GIBox Log.txt").find("Tint：使用已保存的映射")!=std::string::npos);
+   Ptr bone=load<Ptr>(f->obj[n].bones+0x20);f->obj[bone].parent=otherNpc;run(rt,1500);
+   assert(f->diffuse[mat]==tex&&f->diffuse[otherMat]==tex);
+   f->obj[bone].parent=rootNpc;run(rt,1500);assert(f->diffuse[mat]!=tex);
+   write(sp+"/control.json",R"J({"enabled":true,"selected":["Tint"],"npcModels":false,"textureMods":{"strategy":"direct"}})J");
+   run(rt,1500);assert(f->diffuse[mat]==tex);
+   rt.shutdown();assert(f->handles.size()==handles);}
+  store<uint32_t>(entity+kConfig,10000107);f->world(0);f->scene={};}
 
  // tombstone_27: a cached renderer wrapper recycled as another managed type must never reach get_bones.
  {std::string mediaC=root+"/mediaCachedNpc",sp=mediaC+"/"+pkg+"/GIBox";std::filesystem::create_directories(sp);
