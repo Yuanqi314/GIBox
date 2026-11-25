@@ -158,6 +158,25 @@ public final class CompatibilityTest {
             Map<String,Object> jx=Json.obj(Json.read(new File(x,"model.json"),4L<<20),"m"),jy=Json.obj(Json.read(new File(y,"model.json"),4L<<20),"m");
             ok(String.valueOf(jx.get("parts")).equals(String.valueOf(jy.get("parts")))&&String.valueOf(jx.get("logic")).equals(String.valueOf(jy.get("logic")))&&jy.get("logic")!=null,k[0]+": parts and logic data the same");
             Process check=new ProcessBuilder(nativeChecker,y.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,k[0]+": the native driver follows it");}
+        // GIMI can change a mesh's normal map while continuing to use the game's diffuse.
+        String normalBinding="Resource\\GIMI\\NormalMap = ref ResourceEyesNormal\nrun = CommandList\\GIMI\\SetTextures\n";
+        String partialIni=GimiPatternsTest.ini("","","run = CommandListEyes\n","")
+            .replace("ps-t0 = ResourceCitlaliHeadDiffuse","ps-t0 = null")
+            .replace("ib = ResourceCitlaliBodyIB","ib = ResourceCitlaliHeadIB")
+            +"\n[CommandListEyes]\n"+normalBinding+"\n[ResourceEyesNormal]\nfilename = EyesNormal.dds\n";
+        File partial=GimiPatternsTest.mod(base,"normal-only-mesh",partialIni),partialOut=new File(base,"normal-only-out");
+        GimiPatternsTest.put(partial,"EyesNormal.dds",new byte[]{73});
+        ModelConverter.convert(partial,null,partialOut,10000107,new ModelConverter.Options().fallback("Body"),
+            image->ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(1).putInt(2).putInt(image[0]&255).putInt(211).array(),new StringBuilder());
+        Map<String,Object> normalMaterial=Fixtures.material(partialOut,"Material0");
+        ok(!normalMaterial.containsKey("main")&&!normalMaterial.containsKey("original")&&pixel(partialOut,normalMaterial,"normalmap")==73,
+            "normal map with inherited diffuse must be emitted: "+normalMaterial);
+        Map<String,Object> colorMaterial=Fixtures.material(partialOut,"Material1");
+        ok(colorMaterial.containsKey("main")&&pixel(partialOut,colorMaterial,"normalmap")==211,"mixed draw must flip the shared normal map only with its own diffuse");
+        ByteBuffer indices=Fixtures.data(partialOut,0,"indices"),uv=Fixtures.data(partialOut,0,"uv");
+        ok(uv.getFloat(8*indices.getInt(0)+4)==.25f&&uv.getFloat(8*indices.getInt(12)+4)==.75f,
+            "draws sharing index and vertex streams must use the UV orientation of their own material");
+        if(nativeChecker!=null){Process check=new ProcessBuilder(nativeChecker,partialOut.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"native loader accepts normal-only material");}
         // A texture-only mod (XXMI's GIMI SetTextures on the game's own draws, no IB or vertex buffer of its own): said
         // so, the main INI not listed as an auxiliary one, and the backend not asked to run draws there are none of.
         File tex=GimiPatternsTest.mod(base,"texture-only","[Constants]\nglobal $active\n[TextureOverrideBodyA]\nhash = d5ae71a3\nmatch_first_index = 0\nResource\\GIMI\\Diffuse = ref ResourceBodyDiffuse\nrun = CommandList\\GIMI\\SetTextures\n[TextureOverrideEyes]\nhash = 848c5980\nps-t1 = ResourceBodyDiffuse\n[ResourceBodyDiffuse]\nfilename = CitlaliHeadDiffuse.dds\n");
