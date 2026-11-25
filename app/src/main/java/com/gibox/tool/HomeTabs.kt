@@ -5,6 +5,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -62,6 +65,7 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -167,6 +171,12 @@ private fun HomeNavigationBar(
         val accessorySize = 56.dp
         val accessoryGap = 12.dp
         val accessorySlot = accessorySize + accessoryGap
+        // Match the kit's accessory spring while keeping the capsule and tab widths fixed.
+        val centerShift by animateDpAsState(
+            targetValue = if (showImport) 0.dp else accessorySlot / 2,
+            animationSpec = spring(dampingRatio = .65f, stiffness = 130.5f),
+            label = "底栏回中",
+        )
         val capsuleChrome = tabPadding * 2 + tabGap * (items.size - 1)
         val maxCapsuleWidth = capsuleChrome + 70.dp * items.size
         val barWidth = minOf(maxWidth, margin * 2 + maxCapsuleWidth + accessorySlot)
@@ -199,7 +209,7 @@ private fun HomeNavigationBar(
                     val width = constraints.maxWidth
                     val measuredWidth = width + unusedSlot
                     val bar = measurables.single().measure(constraints.copy(minWidth = measuredWidth, maxWidth = measuredWidth))
-                    layout(width, bar.height) { bar.placeRelative(-unusedSlot, 0) }
+                    layout(width, bar.height) { bar.placeRelative(centerShift.roundToPx() - unusedSlot, 0) }
                 }
                 return@BoxWithConstraints
             }
@@ -209,13 +219,18 @@ private fun HomeNavigationBar(
         val innerPadding = if (tabWidth >= 48.dp) tabPadding else 8.dp
         Row(
             modifier = Modifier.width(barWidth)
+                .offset { IntOffset(centerShift.roundToPx(), 0) }
                 .windowInsetsPadding(WindowInsets.tappableElement.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
                 .padding(start = sideMargin, end = sideMargin, top = 16.dp, bottom = bottomMargin),
             horizontalArrangement = Arrangement.spacedBy(accessoryGap),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             PlainHomeNavigationBar(items, selected, select, ink, Modifier.weight(1f), tabGap, innerPadding)
-            Box(Modifier.size(accessorySize), contentAlignment = Alignment.Center) {
+            Box(
+                // Counter the row's movement so the fading button moves toward the capsule.
+                Modifier.size(accessorySize).offset { IntOffset((-centerShift * 2).roundToPx(), 0) },
+                contentAlignment = Alignment.Center,
+            ) {
                 androidx.compose.animation.AnimatedVisibility(showImport, enter = fadeIn(), exit = fadeOut()) {
                     ImportModButton { if (showImport) importMod() }
                 }
