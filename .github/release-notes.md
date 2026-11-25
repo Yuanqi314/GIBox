@@ -1,1 +1,9 @@
-适配国服 b服 国际服7.2版本
+- 提升 `minsdk` 版本至 31
+- UI更换为 [COUI-Kit](https://github.com/ItosEO/COUI-Kit/) & [coui](https://github.com/compose-coui-ui/coui)
+- 补充内置哈希&骨骼
+- 修复 当自机角色使用无avatar标识的仅有`.dds`的mod时对应npc不生效的问题
+- 修复 部分角色未使用内置骨骼&错误对应
+- 修复 武器和风之翼替换
+- 修复 关于设置内重置弹窗的背景模糊异常
+- 新增 随身合成台等小功能
+- 优化模型匹配速度
