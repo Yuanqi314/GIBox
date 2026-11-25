@@ -91,10 +91,8 @@ public final class Outfits {
      */
     public Guess guess(int character, Collection<String> hashes, File sharedDir) {
         Guess g = new Guess(); if (of(character).isEmpty() || hashes.isEmpty()) return g;
-        // The hash tables as DeviceHashes holds them (read once per file change; this device's own map wins there too).
+        // Look up all known owners of a hash before deciding which outfit it names for this character.
         DeviceHashes tables = DeviceHashes.load(sharedDir);
-        Map<String, String> device = new HashMap<>();
-        for (String h : hashes) { DeviceHashes.Mesh m = tables.mesh(h); if (m != null) device.put(h, m.avatar); }
         Map<String, Set<String>> pc = new HashMap<>();
         try { Map<String, Object> j = Json.obj(Json.read(new File(sharedDir, "pc-hashes.json"), 64L << 20), "pc-hashes.json");
             for (Object c : Json.arr(j.get("characters"), "characters", 0, 1024)) { Map<String, Object> ch = Json.obj(c, "character");
@@ -104,9 +102,13 @@ public final class Outfits {
         Map<Outfit, List<String>> votes = new LinkedHashMap<>();
         for (String h : hashes) {
             Outfit o = null; String why = null;
-            Outfit d = byPrefab(device.get(h));
-            if (d != null && d.character == character) { o = d; why = h + "（手机哈希表：" + d.prefab + "）"; }
-            else if (pc.containsKey(h)) {
+            Set<Outfit> device = new LinkedHashSet<>();
+            for (DeviceHashes.Mesh m : tables.meshes(h)) {
+                Outfit d = byPrefab(m.avatar);
+                if (d != null && d.character == character) device.add(d);
+            }
+            if (device.size() == 1) { o = device.iterator().next(); why = h + "（手机哈希表：" + o.prefab + "）"; }
+            else if (device.isEmpty() && pc.containsKey(h)) {
                 Set<Outfit> named = new LinkedHashSet<>(); for (String n : pc.get(h)) { Outfit x = byPc(n); if (x != null && x.character == character) named.add(x); }
                 if (named.size() == 1) { o = named.iterator().next(); why = h + "（PC " + String.join("/", pc.get(h)) + "）"; }
             }

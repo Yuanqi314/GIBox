@@ -5,16 +5,15 @@ import java.util.*;
 
 /**
  * The index-buffer hashes this device's game uploads, tied to the mesh that showed them: the map shipped with the App
- * (GIBox/device-hashes.json) and this device's own captures (GIBox/hash-map.json, which wins). An IB hash here is
- * byte for byte the one 3DMigoto computes on PC for the same mesh, so a mod's TextureOverride hash names the game's
- * renderer and character directly, whatever the mod calls its parts ("Hood" for Alyosha's Hat_Off).
+ * (GIBox/device-hashes.json) and this device's own captures (GIBox/hash-map.json). A capture overrides the renderer
+ * for the same avatar. Different avatars can share an IB hash, and each can use it after that avatar is selected.
  */
 public final class DeviceHashes {
     public static final class Mesh {
         public final String ib, avatar, renderer;
         Mesh(String ib, String avatar, String renderer) { this.ib = ib; this.avatar = avatar; this.renderer = renderer; }
     }
-    private final Map<String, Mesh> byIb = new HashMap<>();
+    private final Map<String, List<Mesh>> byIb = new HashMap<>();
     private final Map<String, Set<Integer>> pcOwners = new HashMap<>();
     /** Hashes of meshes no character owns that a texture mod can still find in the scene (1.0.3): an NPC's or a
      *  monster's (an owner in the table) or the glider's (Flycloak_). */
@@ -31,7 +30,7 @@ public final class DeviceHashes {
     }
     private static DeviceHashes read(File sharedDir) {
         DeviceHashes d = new DeviceHashes();
-        for (String f : new String[]{"device-hashes.json", "hash-map.json"}) {   // this device's own map wins
+        for (String f : new String[]{"device-hashes.json", "hash-map.json"}) {   // a capture wins within the same avatar
             try { Map<String, Object> j = Json.obj(Json.read(new File(sharedDir, f), 64L << 20), f);
                 for (Object m : Json.arr(j.get("meshes"), "meshes", 0, 262144)) { Map<String, Object> e = Json.obj(m, "mesh");
                     if (e.get("ib") instanceof String && !(e.get("avatar") instanceof String && !((String) e.get("avatar")).isEmpty())
@@ -43,7 +42,10 @@ public final class DeviceHashes {
                     // The renderer as the game names it: the mesh's spelling when it is the same name (Hat_Off), else as captured.
                     String name = mesh.toLowerCase(Locale.ROOT).equals(renderer.toLowerCase(Locale.ROOT)) ? mesh : renderer;
                     String ib = ((String) e.get("ib")).toLowerCase(Locale.ROOT);
-                    d.byIb.put(ib, new Mesh(ib, ((String) e.get("avatar")).toLowerCase(Locale.ROOT), name)); } }
+                    d.add(ib, (String) e.get("avatar"), name);
+                    if (e.get("avatarAliases") instanceof List) for (Object alias : (List<?>) e.get("avatarAliases"))
+                        if (alias instanceof String && !((String) alias).isEmpty()) d.add(ib, (String) alias, name);
+                } }
             catch (Exception ignored) {}
         }
         try { Map<String, Object> j = Json.obj(Json.read(new File(sharedDir, "pc-hashes.json"), 64L << 20), "pc-hashes.json");
@@ -76,7 +78,23 @@ public final class DeviceHashes {
         return out;
     }
 
-    public Mesh mesh(String ib) { return ib == null ? null : byIb.get(ib.toLowerCase(Locale.ROOT)); }
+    private void add(String ib, String avatar, String renderer) {
+        String key = avatar.toLowerCase(Locale.ROOT);
+        Mesh mesh = new Mesh(ib, key, renderer);
+        List<Mesh> previous = byIb.get(ib);
+        if (previous == null || (previous.size() == 1 && previous.get(0).avatar.equals(key))) {
+            byIb.put(ib, Collections.singletonList(mesh));
+            return;
+        }
+        List<Mesh> owners = new ArrayList<>(previous.size() + 1);
+        for (Mesh old : previous) if (!old.avatar.equals(key)) owners.add(old);
+        owners.add(mesh);
+        byIb.put(ib, owners);
+    }
+
+    List<Mesh> meshes(String ib) {
+        return byIb.getOrDefault(ib.toLowerCase(Locale.ROOT), Collections.emptyList());
+    }
 
     /** The character a captured avatar prefab is: an outfit the table knows, else the character whose model name is
      *  one of the prefab's words (avatar_boy_pole_alyosha). 0 when none or more than one. */
@@ -96,7 +114,8 @@ public final class DeviceHashes {
     /** IB hash -> the renderer it is on, for this character (and outfit, when named). */
     public Map<String, String> renderers(int id, String outfit) {
         Map<String, String> out = new TreeMap<>();
-        for (Mesh m : byIb.values()) if (belongs(m.avatar, id, outfit)) out.put(m.ib, m.renderer);
+        for (List<Mesh> meshes : byIb.values())
+            for (Mesh m : meshes) if (belongs(m.avatar, id, outfit)) out.put(m.ib, m.renderer);
         return out;
     }
 
@@ -106,7 +125,7 @@ public final class DeviceHashes {
         Map<Integer, List<String>> out = new TreeMap<>();
         for (String h : new TreeSet<>(hashes)) {
             Set<Integer> who = new TreeSet<>();
-            Mesh m = mesh(h); if (m != null) { int c = character(m.avatar); if (c != 0) who.add(c); }
+            for (Mesh m : meshes(h)) { int c = character(m.avatar); if (c != 0) who.add(c); }
             Set<Integer> pc = pcOwners.get(h.toLowerCase(Locale.ROOT)); if (pc != null) who.addAll(pc);
             if (who.isEmpty() && scene.contains(h.toLowerCase(Locale.ROOT))) who.add(Characters.SCENE);
             if (who.size() == 1) out.computeIfAbsent(who.iterator().next(), k -> new ArrayList<>()).add(h);
