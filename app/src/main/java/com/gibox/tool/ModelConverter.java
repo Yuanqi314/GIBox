@@ -562,7 +562,7 @@ public final class ModelConverter {
     static final class ComboRows {final List<int[]> subs=new ArrayList<>();final List<String[]> rows=new ArrayList<>();String key(){StringBuilder s=new StringBuilder();for(int i=0;i<subs.size();i++)s.append(subs.get(i)[0]).append(',').append(subs.get(i)[1]).append(':').append(rows.get(i)[0]).append('#').append(rows.get(i)[1]).append(';');return s.toString();}}
     /** One renderer: union of every combination's vertices and index ranges, plus per-combination submeshes. */
     static final class Group {Bones bones;String name;PackedVertices vertices=new PackedVertices();IntList indices=new IntList();Map<String,int[]> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();List<Object> draws;final ExtraBoneFallback extraBones=new ExtraBoneFallback();Group(Bones b,String n){bones=b;name=n;} }
-    static final class MaterialDef {String name;Resource diffuse,light,normal;}
+    static final class MaterialDef {String name;Resource diffuse,light,normal;boolean flipRows=true;}
     static final class Build {boolean animationBoneFallback=false;final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final BufferCache cache=new BufferCache();}
     /** Explicit, lossy import experiment for baked geometry animation, never the default or a PC-equivalence claim.
      * Keep each vertex's own supported associations; refuse a vertex with no supported association instead of
@@ -600,12 +600,15 @@ public final class ModelConverter {
         float norm=0;for(int k=0;k<3;k++){float x=half(in.getShort(at+k*2));check(Float.isFinite(x),"非法几何数值");buf(v.pos).putFloat(k*4,x);float n=Math.max(-1f,data[at+8+k]/127f);buf(v.norm).putFloat(k*4,n);norm+=n*n;}
         check(norm>=0.85f&&norm<=1.15f,"不支持的 Packed28 法线格式");
         for(int k=0;k<4;k++)buf(v.tangent).putFloat(k*4,Math.max(-1f,data[at+24+k]/127f));
-        for(int channel=0;channel<2;channel++){float u=half(in.getShort(at+16+channel*4)),w=half(in.getShort(at+18+channel*4));check(Float.isFinite(u)&&Float.isFinite(w),"非法 UV");byte[] uv=buf(new byte[8]).putFloat(u).putFloat(1-w).array();if(channel==0)v.uv=uv;else v.extra.add(uv);}
+        for(int channel=0;channel<2;channel++){float u=half(in.getShort(at+16+channel*4)),w=half(in.getShort(at+18+channel*4));byte[] uv=uv(u,w,true);if(channel==0)v.uv=uv;else v.extra.add(uv);}
         return v;
     }
-    private static Vertex vertex(Resource position,Resource blend,Resource tex,byte[] p,byte[] b,byte[] t,int i,int boneCount,ExtraBoneFallback fallback){
+    private static Vertex vertex(Resource position,Resource blend,Resource tex,byte[] p,byte[] b,byte[] t,int i,int boneCount,ExtraBoneFallback fallback,boolean flipV){
         if(position.stride==28)return packed28(p,i);
-        check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);v.uv=uv(t,to+4);for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(t,to+k));v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);}
+        check(position.stride>=40&&blend.stride==32&&tex.stride>=12&&tex.stride<=36&&(tex.stride-4)%8==0,"顶点流 stride 不兼容");check(i>=0&&(long)(i+1)*position.stride<=p.length&&(long)(i+1)*32<=b.length&&(long)(i+1)*tex.stride<=t.length,"顶点索引越界");int po=i*position.stride,bo=i*32,to=i*tex.stride;Vertex v=new Vertex();v.pos=Arrays.copyOfRange(p,po,po+12);v.norm=Arrays.copyOfRange(p,po+12,po+24);v.tangent=Arrays.copyOfRange(p,po+24,po+40);v.color=Arrays.copyOfRange(t,to,to+4);
+        ByteBuffer uvData=buf(t);v.uv=uv(uvData.getFloat(to+4),uvData.getFloat(to+8),flipV);
+        for(int k=12;k+8<=tex.stride;k+=8)v.extra.add(uv(uvData.getFloat(to+k),uvData.getFloat(to+k+4),flipV));
+        v.weights=new byte[32];ByteBuffer bi=buf(b),wo=buf(v.weights);float[] w=new float[4];int[] ids=new int[4];for(int k=0;k<4;k++){w[k]=bi.getFloat(bo+4*k);ids[k]=bi.getInt(bo+16+4*k);}
         if(fallback!=null)fallback.apply(w,ids,boneCount,blend.file.getName(),i);
         try{v.trimmedWeights=cleanWeights(w,ids,boneCount);}catch(IllegalArgumentException ex){float[] originalWeights=new float[4];int[] originalIndices=new int[4];for(int k=0;k<4;k++){originalWeights[k]=bi.getFloat(bo+4*k);originalIndices[k]=bi.getInt(bo+16+4*k);}
             String whole=ex.getMessage()!=null&&ex.getMessage().startsWith("骨骼索引越界")?"；"+outOfRange(b,boneCount):"";
@@ -630,14 +633,14 @@ public final class ModelConverter {
         Integer[] order=new Integer[n];for(int k=0;k<n;k++)order[k]=k;final float[] fw=tw;final int[] fi=ti;Arrays.sort(order,(x,y)->fw[x]!=fw[y]?Float.compare(fw[y],fw[x]):Integer.compare(fi[x],fi[y]));
         float sum=0;for(int k=0;k<n;k++)sum+=tw[k];
         for(int k=0;k<4;k++){out.putFloat(4*k,k<n?tw[order[k]]/sum:0f);out.putInt(16+4*k,k<n?ti[order[k]]:0);}}
-    private static byte[] uv(byte[] t,int p){ByteBuffer b=buf(t);float u=b.getFloat(p),v=b.getFloat(p+4);check(Float.isFinite(u)&&Float.isFinite(v),"非法 UV");return buf(new byte[8]).putFloat(u).putFloat(1-v).array();}
-    /** A DDS/PNG texture as RGBA8, at most 1024 on a side, rows bottom to top: {width, height, data view}. */
-    private static Map<String,Object> texture(File f,TextureDecoder decoder,BlobWriter blob,Map<File,Map<String,Object>> done)throws Exception {
+    private static byte[] uv(float u,float v,boolean flipV){check(Float.isFinite(u)&&Float.isFinite(v),"非法 UV");return buf(new byte[8]).putFloat(u).putFloat(flipV?1-v:v).array();}
+    /** A DDS/PNG texture as RGBA8, at most 1024 on a side, with rows ordered to match the mesh UVs. */
+    private static Map<String,Object> texture(File f,boolean flipRows,TextureDecoder decoder,BlobWriter blob,Map<File,Map<String,Object>> done)throws Exception {
         Map<String,Object> known=done.get(f);if(known!=null)return known;
         String ext=lower(f.getName());check(ext.endsWith(".dds")||ext.endsWith(".png"),"当前转换器支持 DDS / PNG 纹理："+f);byte[] raw=decoder.decode(read(f));check(raw.length>=8,"纹理解码返回值无效");ByteBuffer h=buf(raw);int w=h.getInt(0),y=h.getInt(4);check(w>0&&y>0&&w<=8192&&y<=8192&&raw.length==8+4L*w*y,"纹理解码尺寸无效");byte[] pixels=Arrays.copyOfRange(raw,8,raw.length);
         while(w>1024||y>1024){int nw=Math.max(1,w/2),nh=Math.max(1,y/2);byte[] n=new byte[nw*nh*4];for(int j=0;j<nh;j++)for(int i=0;i<nw;i++)for(int c=0;c<4;c++){int sum=0,count=0;for(int dy=0;dy<2&&j*2+dy<y;dy++)for(int dx=0;dx<2&&i*2+dx<w;dx++){sum+=pixels[((j*2+dy)*w+i*2+dx)*4+c]&255;count++;}n[(j*nw+i)*4+c]=(byte)(sum/count);}pixels=n;w=nw;y=nh;}
-        byte[] rows=new byte[pixels.length];for(int j=0;j<y;j++)System.arraycopy(pixels,(y-1-j)*w*4,rows,j*w*4,w*4);
-        Map<String,Object> t=Json.of("width",w,"height",y,"data",blob.put(rows));done.put(f,t);return t;
+        if(flipRows){byte[] rows=new byte[pixels.length];for(int j=0;j<y;j++)System.arraycopy(pixels,(y-1-j)*w*4,rows,j*w*4,w*4);pixels=rows;}
+        Map<String,Object> t=Json.of("width",w,"height",y,"data",blob.put(pixels));done.put(f,t);return t;
     }
     /** Draws of one variable assignment, each resolved to its target renderer. */
     private static LinkedHashMap<Draw,Bones> resolve(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,Map<String,Resource> rs,StringBuilder log){return resolve(ini,src,boneRecords,mapping,vars,rs,log,null);}
@@ -741,13 +744,32 @@ public final class ModelConverter {
             if(combo==0)log.append(d.part).append(": Position=").append(pos.file.getName()).append(", Blend=").append(blend.file.getName()).append(", Texcoord=").append(tex.file.getName()).append('\n');
             byte[] p=b.cache.get(pos.file),bl=rigid?null:b.cache.get(blend.file),t=b.cache.get(tex.file),ix=b.cache.get(indices.file);if(p==null){p=read(pos.file);b.cache.put(pos.file,p);}if(rigid){check(pos.stride>=40||pos.stride==28,"静态武器 Position 顶点布局尚不支持：stride="+pos.stride);bl=new byte[p.length/pos.stride*32];ByteBuffer weights=buf(bl);for(int v=0;v<bl.length;v+=32)weights.putFloat(v,1f);}else if(bl==null){bl=read(blend.file);b.cache.put(blend.file,bl);}if(t==null){t=read(tex.file);b.cache.put(tex.file,t);}if(ix==null){ix=read(indices.file);b.cache.put(indices.file,ix);}
             int stride=lower(indices.format).contains("r16_uint")?2:lower(indices.format).contains("r32_uint")?4:indices.stride;check(stride==2||stride==4,"索引格式必须为 R16_UINT 或 R32_UINT");check(ix.length%stride==0,"索引流长度");int count=d.count==-1?ix.length/stride-d.start:d.count;check(count>0&&count%3==0&&(long)d.start+count<=ix.length/stride,"drawindexed 范围");
-            // The same draw in several combinations shares one index range.
-            String rangeKey=pos.file.getPath()+"|"+blend.file+"|"+tex.file+"|"+indices.file+"|"+stride+"|"+d.start+"|"+count;int[] range=g.ranges.get(rangeKey);
-            if(range==null){String streamId=identity(pos)+"|"+identity(blend)+"|"+identity(tex);int[] remap=g.compact.get(streamId);if(remap==null){remap=new int[Math.min(p.length/pos.stride,Math.min(bl.length/32,t.length/tex.stride))];g.compact.put(streamId,remap);}int start=g.indices.size();ByteBuffer ib=buf(ix);for(int j=0;j<count;j++){int old=stride==2?(ib.getShort((d.start+j)*2)&65535):ib.getInt((d.start+j)*4);check(old>=0&&old<p.length/pos.stride&&old<bl.length/32&&old<t.length/tex.stride,"顶点索引越界");int compact=remap[old]-1;if(compact<0){compact=g.vertices.size();check(compact<500000,"顶点数超限");remap[old]=compact+1;g.vertices.add(vertex(pos,blend,tex,p,bl,t,old,target.count,b.animationBoneFallback?g.extraBones:null));}g.indices.add(compact);}range=new int[]{start,count};g.ranges.put(rangeKey,range);}
-            ComboRows rows=g.combos.computeIfAbsent(combo,k->new ComboRows());Resource[] tx=textures(d,rs);String materialKey=path(tx[0])+"|"+path(tx[1])+"|"+path(tx[2]);
+            Resource[] tx=textures(d,rs);
+            // Skinned draws that retain the game's diffuse use its UV convention, even with shared input streams.
+            boolean flipV=rigid||tx[0]!=null;
+            String streamId=identity(pos)+"|"+(rigid?"rigid":identity(blend))+"|"+identity(tex)+"|"+flipV;
+            String rangeKey=streamId+"|"+identity(indices)+"|"+stride+"|"+d.start+"|"+count;
+            int[] range=g.ranges.get(rangeKey);
+            if(range==null){
+                int[] remap=g.compact.get(streamId);
+                if(remap==null){remap=new int[Math.min(p.length/pos.stride,Math.min(bl.length/32,t.length/tex.stride))];g.compact.put(streamId,remap);}
+                int start=g.indices.size();ByteBuffer ib=buf(ix);
+                for(int j=0;j<count;j++){
+                    int old=stride==2?(ib.getShort((d.start+j)*2)&65535):ib.getInt((d.start+j)*4);
+                    check(old>=0&&old<remap.length,"顶点索引越界");
+                    int compact=remap[old]-1;
+                    if(compact<0){
+                        compact=g.vertices.size();check(compact<500000,"顶点数超限");remap[old]=compact+1;
+                        g.vertices.add(vertex(pos,blend,tex,p,bl,t,old,target.count,b.animationBoneFallback?g.extraBones:null,flipV));
+                    }
+                    g.indices.add(compact);
+                }
+                range=new int[]{start,count};g.ranges.put(rangeKey,range);
+            }
+            ComboRows rows=g.combos.computeIfAbsent(combo,k->new ComboRows());String materialKey=path(tx[0])+"|"+path(tx[1])+"|"+path(tx[2])+"|"+flipV;
             if("8b268d05".equals(d.hash)&&!"nnfix".equals(d.bindings.get("texture-role:layout"))&&tx[0]!=null&&tx[1]!=null&&tx[2]!=null)
                 ini.compatibility.add("已按纳西妲 IB 8b268d05 识别贴图：ps-t0 为法线，ps-t1 为颜色，ps-t2 为光照遮罩（优先于文件名）");
-            MaterialDef m=b.materials.get(materialKey);if(m==null){m=new MaterialDef();m.name="Material"+b.materials.size();m.diffuse=tx[0];m.light=tx[1];m.normal=tx[2];b.materials.put(materialKey,m);}
+            MaterialDef m=b.materials.get(materialKey);if(m==null){m=new MaterialDef();m.name="Material"+b.materials.size();m.diffuse=tx[0];m.light=tx[1];m.normal=tx[2];m.flipRows=flipV;b.materials.put(materialKey,m);}
             rows.rows.add(new String[]{m.name,Integer.toString(slot(ini,d))});rows.subs.add(range);
         }
     }
@@ -796,11 +818,16 @@ public final class ModelConverter {
         return parts;
     }
     private static List<Object> emitMaterials(Build b,TextureDecoder decode,BlobWriter blob)throws Exception {
-        List<Object> materials=new ArrayList<>();Map<File,Map<String,Object>> textures=new HashMap<>();
-            for(MaterialDef m:b.materials.values()){Map<String,Object> e=Json.of("name",m.name);
-                if(m.diffuse==null)e.put("original",true);
-                else{e.put("main",texture(m.diffuse.file,decode,blob,textures));if(m.light!=null)e.put("lightmap",texture(m.light.file,decode,blob,textures));if(m.normal!=null)e.put("normalmap",texture(m.normal.file,decode,blob,textures));}
-                materials.add(e);}
+        List<Object> materials=new ArrayList<>();Map<File,Map<String,Object>> flipped=new HashMap<>(),unflipped=new HashMap<>();
+        for(MaterialDef m:b.materials.values()){
+            Map<String,Object> e=Json.of("name",m.name);boolean flipRows=m.flipRows;
+            Map<File,Map<String,Object>> textures=flipRows?flipped:unflipped;
+            if(m.diffuse==null&&m.light==null&&m.normal==null)e.put("original",true);
+            if(m.diffuse!=null)e.put("main",texture(m.diffuse.file,flipRows,decode,blob,textures));
+            if(m.light!=null)e.put("lightmap",texture(m.light.file,flipRows,decode,blob,textures));
+            if(m.normal!=null)e.put("normalmap",texture(m.normal.file,flipRows,decode,blob,textures));
+            materials.add(e);
+        }
         return materials;
     }
     /** Parts and textures share one blob. Source buffers/remaps are not needed during texture decoding. */
@@ -886,7 +913,7 @@ public final class ModelConverter {
         for(Map<String,Integer> vars:assignments){Map<String,Resource> rs=resources(ini,src,vars);for(Map.Entry<Draw,Bones> entry:resolve(ini,src,bones,map,vars,rs,null,fallback).entrySet()){Draw d=entry.getKey();boolean rigid=rigid(entry.getValue());
             Resource p=stream(rs,d.bindings,0),b=rigid?null:stream(rs,d.bindings,1),t=stream(rs,d.bindings,2),ix=resource(rs,d.bindings.get("ib"));check(ix!=null&&(p.stride>=40||(rigid&&p.stride==28))&&(rigid||b.stride==32)&&t.stride>=12,"顶点流或索引流无效");
             int stride=lower(ix.format).contains("r16_uint")?2:lower(ix.format).contains("r32_uint")?4:ix.stride;check(stride==2||stride==4,"索引格式必须为 R16_UINT 或 R32_UINT");
-            long count=d.count<0?ix.file.length()/stride-d.start:d.count;check(count>0&&count<=15000000,"drawindexed 范围");String id=identity(p)+"|"+(rigid?"rigid":identity(b))+"|"+identity(t);
+            long count=d.count<0?ix.file.length()/stride-d.start:d.count;check(count>0&&count<=15000000,"drawindexed 范围");String id=identity(p)+"|"+(rigid?"rigid":identity(b))+"|"+identity(t)+"|"+(rigid||textures(d,rs)[0]!=null);
             long vertices=Math.min(p.file.length()/p.stride,Math.min(rigid?p.file.length()/p.stride:b.file.length()/32,t.file.length()/t.stride));streams.put(id,vertices);
             if(ranges.add(id+"|"+identity(ix)+"|"+d.start+"|"+count))indices+=count;
             input=Math.max(input,p.file.length()+(rigid?0:b.file.length())+t.file.length()+ix.file.length());}}

@@ -84,7 +84,8 @@ void texInit(Ptr o,int w,int h,int fmt,int mip,int linear,Ptr){assert(w>0&&h>0&&
 void texPixels(Ptr o,Ptr data,int n,Ptr){assert(load<Ptr>(o+0x10)&&data&&n>0&&unsigned(n)==f->textureBytes.at(o));}
 // Managed strings live above 4 GiB in the game; a 32-bit truncation must not survive the round trip.
 Ptr newString(Ptr self,const char* s){assert(self==0&&s);Ptr p=(f->stringBase+=0x40);f->strings[p]=s;return p;}
-uint32_t hasProp(Ptr mat,Ptr name,Ptr){assert(mat&&f->strings.count(name));return f->strings[name]=="_LightMapTex"?0xffffff01u:0xffffff00u;}
+uint32_t hasProp(Ptr mat,Ptr name,Ptr){assert(mat&&f->strings.count(name));const auto& prop=f->strings[name];
+ return prop=="_LightMapTex"||(prop=="_BumpMap"&&f->obj.at(mat).name=="PartialNormal")?0xffffff01u:0xffffff00u;}
 Ptr nativeAlloc(Ptr allocator,Ptr old,uint64_t size,int align,int label,int options,const char* name,int line){assert(allocator==load<Ptr>(f->base+abi::nativeAllocator)&&old==0&&size==32ull*f->expectedVertices&&align==16&&label==15&&options==0&&name&&line==1);f->weightAllocs++;return f->lastWeights=f->alloc(size);}
 int32_t propertyToId(Ptr name,Ptr);
 // A texture by property name; null puts a property back to empty (direct textures restore what a material held).
@@ -823,6 +824,22 @@ int main(int argc,char** argv){Fake fake;f=&fake;abi::allocVerified=true;   // t
   write(sharedLazy+"/control.json","{\"enabled\":true,\"logLevel\":\"debug\",\"selected\":[\"Lazy\"],\"variables\":{\"Lazy\":{\"$look\":0}}}");lazy.tick(2703600);
   assert(text(sharedLazy+"/GIBox Log.txt").find("variant Lazy：$look=0")!=std::string::npos&&textures()==before+3);   // already made: switches at once
   lazy.shutdown();assert(meshOf(w)==full&&textures()==before&&f->handles.empty());}
+ // A replacement mesh with only a normal map keeps the game's diffuse on the cloned material.
+ {std::string media=root+"/mediaPartialNormal",shared=media+"/"+pkg+"/GIBox";Spec s;s.textures=true;s.withTarget(fixture::target("Body"));
+  s.edit=[](std::string& text){auto model=JsonParser(text).parse();auto& material=model.object.at("materials").array[0].object;
+   material["normalmap"]=material.at("main");material.erase("main");material.erase("lightmap");text=fixture::jsonText(model);};
+  fixture::writeModel(shared+"/models/NormalOnly",s);
+  Ptr original=f->mesh(),r=f->renderer(original),material=load<Ptr>(f->obj[r].materials+0x20);
+  f->obj[material].name="PartialNormal";store<uint32_t>(load<Ptr>(material+0x10)+8,uint32_t(-29));
+  auto normalId=propertyToId(newString(0,"_BumpMap"),0);
+  Ptr diffuse=f->object("texture","EyeDiffuse"),normal=f->object("texture","EyeNormal");
+  f->diffuse[material]=diffuse;f->named[material][normalId]=normal;f->world(r);f->scene={r};
+  write(shared+"/control.json",R"J({"enabled":true,"selected":["NormalOnly"]})J");
+  Runtime rt(e,pkg,root+"/privatePartialNormal",media,false);rt.tick(3090000);rt.tick(3090600);
+  Ptr cloned=load<Ptr>(f->obj[r].materials+0x20);
+  assert(meshOf(r)!=original&&cloned!=material&&f->diffuse[cloned]==diffuse);
+  assert(alive(f->named[cloned][normalId])&&f->named[cloned][normalId]!=normal&&f->named[material][normalId]==normal);
+  rt.shutdown();assert(meshOf(r)==original&&load<Ptr>(f->obj[r].materials+0x20)==material&&f->handles.empty());}
  // 43. A party member that is loaded but not switched in (not the controlled character's renderer): its identity comes
  //     from the bone library's avatar before any set of the model exists, so it is built and taken over while hidden.
  //     Without a library record it still waits, as before.

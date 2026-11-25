@@ -129,34 +129,33 @@ public final class Characters {
         a(10000111, "瓦雷莎", "varesa", ""),
         a(10000112, "爱可菲", "escoffier", ""),
         a(10000113, "伊法", "ifa", ""),
-        a(10000114, "丝柯克", "skirk", ""),
+        a(10000114, "丝柯克", "skirknew", "skirk"),
         a(10000115, "塔利雅", "dahlia", ""),
         a(10000116, "伊涅芙", "ineffa", ""),
-        a(10000117, "奇偶·男性", "", ""),
-        a(10000118, "奇偶·女性", "", ""),
-        a(10000119, "菈乌玛", "", "lauma"),
-        a(10000120, "菲林斯", "", "flins"),
-        a(10000121, "爱诺", "", "aino"),
-        a(10000122, "奈芙尔", "", "nefer"),
-        a(10000123, "杜林", "", "durin"),
-        a(10000124, "雅珂达", "", "jahoda"),
-        a(10000125, "哥伦比娅", "", "columbina"),
-        a(10000126, "兹白", "", "zibai"),
+        a(10000117, "奇偶·男性", "littleidolboy", ""),
+        a(10000118, "奇偶·女性", "littleidolgirl", ""),
+        a(10000119, "菈乌玛", "lauma", ""),
+        a(10000120, "菲林斯", "flins", ""),
+        a(10000121, "爱诺", "aino", ""),
+        a(10000122, "奈芙尔", "nefer", ""),
+        a(10000123, "杜林", "durin", ""),
+        a(10000124, "雅珂达", "jahoda", ""),
+        a(10000125, "哥伦比娅", "columbina", ""),
+        a(10000126, "兹白", "zibai", ""),
         // 10000127 on: internal names from the game data (AvatarExcelConfigData iconName UI_AvatarIcon_<name>, as in the
         // GuraFoundation/YuanShenResources extraction); on the device the same names in the skeleton roots (lohen, nicole,
         // marionettenew, vodyanitsa, vesna, linnea, mitya, valeriy). 10000136, 10000137, 10000147, 10000149: names as the
         // user gave them, internal names from the same data.
         a(10000127, "叶洛亚", "illuga", ""),
-        a(10000128, "法尔伽", "", "varka"),
+        a(10000128, "法尔伽", "varka", ""),
         a(10000129, "洛恩", "lohen", ""),
         a(10000130, "莉奈娅", "linnea", ""),
         a(10000131, "尼可", "nicole", ""),
         a(10000132, "布伦妮", "prune", ""),
         a(10000133, "桑多涅", "marionettenew", "sandrone"),
-        // 10000134 / 10000135: the travelers of the TPS mode (the data: PlayerBoy / PlayerGirl with a crossbow). No model
-        // name or alias, so a traveler mod is still guessed as 10000005 / 10000007.
-        a(10000134, "空（TPS 模式）", "", ""),
-        a(10000135, "荧（TPS 模式）", "", ""),
+        // TPS has separate prefabs. The ordinary travelers still use PlayerBoy and PlayerGirl.
+        a(10000134, "空（TPS 模式）", "aethershadow", ""),
+        a(10000135, "荧（TPS 模式）", "lumineshadow", ""),
         a(10000136, "米提亚", "mitya", ""),
         a(10000137, "瓦列里", "valeriy", ""),
         a(10000140, "沃雅妮莎", "vodyanitsa", ""),
@@ -243,18 +242,29 @@ public final class Characters {
         if (best > 0) for (Avatar a : ALL) if (g.scores.getOrDefault(a.id, 0) == best) g.recommended.add(a);
         g.evidence = why.toString(); return g;
     }
-    /** Adds what the mod's hashes say (DeviceHashes.characters: character -> its hashes), ten per hash: a hash this
-     *  device or the PC database ties to one character outweighs any name. The recommendation is made again. */
+    /** Prefer characters identified by their IB hashes. Names break ties between equal numbers of hash hits. */
     public static void hashEvidence(Guess g, Map<Integer, List<String>> hits) {
         if (hits.isEmpty()) return;
         StringBuilder why = new StringBuilder(g.evidence);
-        for (Map.Entry<Integer, List<String>> e : hits.entrySet()) {
-            int add = 10 * e.getValue().size(); g.scores.merge(e.getKey(), add, Integer::sum);
-            if (why.length() < 300) why.append(why.length() == 0 ? "" : ", ").append("hash ").append(e.getValue().get(0)).append(e.getValue().size() > 1 ? " 等 " + e.getValue().size() + " 个" : "").append('=').append(add);
+        int bestHashes = 0, bestNames = 0;
+        List<Avatar> recommended = new ArrayList<>();
+        for (Map.Entry<Integer, List<String>> e : new TreeMap<>(hits).entrySet()) {
+            Avatar avatar = byId(e.getKey());
+            int hashes = e.getValue().size();
+            if (avatar == null || hashes == 0) continue;
+            if (why.length() < 300) why.append(why.length() == 0 ? "" : ", ").append("hash ").append(e.getValue().get(0)).append(hashes > 1 ? " 等 " + hashes + " 个" : "");
+            int names = g.scores.getOrDefault(avatar.id, 0);
+            if (hashes > bestHashes || (hashes == bestHashes && names > bestNames)) {
+                recommended.clear();
+                bestHashes = hashes;
+                bestNames = names;
+            }
+            if (hashes == bestHashes && names == bestNames) recommended.add(avatar);
         }
-        int best = 0; for (int v : g.scores.values()) best = Math.max(best, v);
-        g.recommended.clear(); if (best > 0) for (Avatar a : ALL) if (g.scores.getOrDefault(a.id, 0) == best) g.recommended.add(a);
-        if (best > 0 && g.scores.getOrDefault(SCENE, 0) == best) g.recommended.add(SCENE_AVATAR);   // hashes of an NPC's, a monster's or the glider's mesh
+        if (!recommended.isEmpty()) {
+            g.recommended.clear();
+            g.recommended.addAll(recommended);
+        }
         g.evidence = why.toString();
     }
     /** Picker order: the recommended characters first, then everyone else in ID order. */

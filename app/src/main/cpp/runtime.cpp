@@ -1435,7 +1435,10 @@ struct Runtime::Impl {
   for(auto& n:names){unsigned slot=n.first;Ptr m=slot<originals.size()?originals[slot]:0;
    if(!alive(m)){why[slot]="没有自己的游戏材质";continue;}
    if(n.second.size()>1){why[slot]="各绘制段的贴图不同";continue;}
-   if(s.textures.at(*n.second.begin()).original){why[slot]="模型保留原材质";continue;}
+   const auto& textures=s.textures.at(*n.second.begin());
+   if(textures.original){why[slot]="模型保留原材质";continue;}
+   // The direct-write ledger identifies copies by their replaced main texture.
+   if(!textures.main){why[slot]="仅替换光照或法线贴图";continue;}
    int32_t id=instanceId(m);if(id>=0){why[slot]="资源材质（instance id "+std::to_string(id)+"）";continue;}
    if(gibTexture(textureOf(m,"_MainTex"))){why[slot]="已带 GIBox 的贴图";continue;}
    bool other=false;for(auto& kv:attachments){auto& o=*kv.second;if(&o==&a||o.source==a.renderer)continue;if(o.originalMaterials)for(Ptr x:pointers(o.originalMaterials,64))other=other||x==m;for(auto& c:o.materialSources)other=other||c.second==m;}
@@ -1997,7 +2000,7 @@ struct Runtime::Impl {
   for(auto& n:names){if(s.textures.count(n))continue;auto it=s.mats.find(n);if(it==s.mats.end())continue;auto& mf=it->second;MatTex t;t.original=mf.original;
    // A swap's texture goes on the game's own mesh, whose UVs the converter did not flip: its rows go back to PC order.
    bool swap=false;for(auto& w:s.swaps)swap|=w.material==n;
-   if(!t.original){require(mf.main!=nullptr,"缺少贴图数据："+n);if(swap)flipRows(*mf.main);t.main=makeTexture(s,*mf.main,false);if(mf.light)t.light=makeTexture(s,*mf.light,true);if(mf.normal)t.normal=makeTexture(s,*mf.normal,true);
+   if(!t.original){require(mf.loaded(),"缺少贴图数据："+n);if(mf.main){if(swap)flipRows(*mf.main);t.main=makeTexture(s,*mf.main,false);}if(mf.light)t.light=makeTexture(s,*mf.light,true);if(mf.normal)t.normal=makeTexture(s,*mf.normal,true);
     for(auto* x:{mf.main.get(),mf.light.get(),mf.normal.get()}){if(x)s.bytes+=uint64_t(x->w)*x->h*4;}mf.main.reset();mf.light.reset();mf.normal.reset();}
    s.textures[n]=t;}
   return true;}
@@ -2386,7 +2389,7 @@ struct Runtime::Impl {
       }
      }
     require(alive(src),"缺少原材质（槽 "+std::to_string(row.slot)+"）");m=clone(a,src);a.materialSources[m]=src;pin(a,src);auto& t=s.textures.at(row.name);
-    if(!t.original){e.set(abi::mainTexture,m,t.main);if(t.light)extraTexture(m,t.light,{"_LightMap","_LightMapTex","_Lightmap","_LightmapTex"});if(t.normal)extraTexture(m,t.normal,{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"});}a.clones[key]=m;}
+    if(!t.original){if(t.main)e.set(abi::mainTexture,m,t.main);if(t.light)extraTexture(m,t.light,{"_LightMap","_LightMapTex","_Lightmap","_LightmapTex"});if(t.normal)extraTexture(m,t.normal,{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"});}a.clones[key]=m;}
    mats.push_back(m);}
   Owned tmp;try{e.set(abi::setMaterials,a.renderer,array(tmp,a.originalMaterials,mats.data(),mats.size(),8));}catch(...){freeOwned(tmp);throw;}freeOwned(tmp);}
  bool npcGeometry(const Fingerprint& a,const Fingerprint& b){return !lowerLod(b.mesh)&&a.vertices==b.vertices&&a.submeshes==b.submeshes&&meshName(a.mesh)==meshName(b.mesh);}

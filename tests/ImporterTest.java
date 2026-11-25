@@ -84,7 +84,8 @@ public class ImporterTest {
   Files.write(new File(hm,"learned.json").toPath(),learned.getBytes(StandardCharsets.UTF_8));
   Importer.convert(hz,10000046,models,bones,dec,new StringBuilder());ok(read(new File(hm,"learned.json")).equals(learned),"learned.json kept for the same character");
   r=Importer.convert(hz,10000119,models,bones,dec,new StringBuilder());hmm=ModelManifest.read(hm);
-  ok(!new File(hm,"learned.json").exists()&&hmm.names.isEmpty()&&hmm.id==10000119&&r.summary.contains("大世界出场一次"),"another character: learned.json dropped; no model name known");
+  ok(!new File(hm,"learned.json").exists()&&hmm.names.equals(Collections.singletonList("lauma"))&&hmm.id==10000119&&r.summary.contains("角色详情页"),
+      "another character: learned.json dropped; the new avatar name is used");
   try{Importer.convert(hz,123,models,bones,dec,new StringBuilder());ok(false,"bad id");}catch(IllegalArgumentException e){ok(true,"");}
   // 7. Re-importing the same name keeps the chosen character.
   ModLibrary.setOverride(hz,"map","Part9=Body");File again=Importer.stage(good,mods,"hutao_v1",log);ok(ModLibrary.overrides(again).get("id").equals("10000119")&&ModLibrary.overrides(again).get("map").equals("Part9=Body"),"modelswap.txt kept: "+ModLibrary.overrides(again));

@@ -172,7 +172,7 @@ struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;st
 // the materials an assignment draws (readTextures), so a model with many variants does not hold every texture at once.
 struct TexRef {unsigned w=0,h=0;uint64_t off=0,len=0;bool present()const{return len>0;}};
 struct MaterialFile {bool original=true;std::shared_ptr<Texture> main,light,normal;TexRef mainRef,lightRef,normalRef;
- bool loaded()const{return original||main!=nullptr;}};
+ bool loaded()const{return original||((!mainRef.present()||main)&&(!lightRef.present()||light)&&(!normalRef.present()||normal));}};
 // A texture swap (model.json "textures", optional): the main texture of the character's renderer of that name becomes the
 // material's, its mesh stays the game's (a mod's face texture, which on PC replaces the game's texture wherever it is drawn).
 struct TextureSwap {std::string renderer,material;};
@@ -290,16 +290,18 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allT
  detail::Blob blob(dir+"/model.bin",size,crc,verify);
  // Materials first: draws refer to them by name.
  for(auto& mt:jarr(m,"materials",1,model::maxMaterials)){auto name=jstr(mt,"name",64);require(safeName(name)&&!out->materials.count(name),"材质名称无效或重复："+name);MaterialFile f;f.original=jbool(mt,"original",false);
-  if(!f.original){f.mainRef=detail::textureRef(jfield(mt,"main"),size,name+".main");
+  if(!f.original){
+   if(mt.at("main").type!=Json::Null){f.mainRef=detail::textureRef(mt.at("main"),size,name+".main");}
    if(mt.at("lightmap").type!=Json::Null){f.lightRef=detail::textureRef(mt.at("lightmap"),size,name+".lightmap");}
    if(mt.at("normalmap").type!=Json::Null){f.normalRef=detail::textureRef(mt.at("normalmap"),size,name+".normalmap");}
-   if(out->diffuseOnly){f.lightRef={};f.normalRef={};}
-   if(allTextures){f.main=std::make_shared<Texture>(Texture{f.mainRef.w,f.mainRef.h,blob.read(f.mainRef.off,f.mainRef.len)});
+   require(f.mainRef.present()||f.lightRef.present()||f.normalRef.present(),name+"：没有贴图数据");
+   if(out->diffuseOnly){f.lightRef={};f.normalRef={};f.original=!f.mainRef.present();}
+   if(allTextures){if(f.mainRef.present())f.main=std::make_shared<Texture>(Texture{f.mainRef.w,f.mainRef.h,blob.read(f.mainRef.off,f.mainRef.len)});
     if(f.lightRef.present())f.light=std::make_shared<Texture>(Texture{f.lightRef.w,f.lightRef.h,blob.read(f.lightRef.off,f.lightRef.len)});
     if(f.normalRef.present())f.normal=std::make_shared<Texture>(Texture{f.normalRef.w,f.normalRef.h,blob.read(f.normalRef.off,f.normalRef.len)});}}
   out->materials[name]=f;}
  if(m.at("textures").type!=Json::Null)for(auto& t:jarr(m,"textures",1,8)){TextureSwap x{jstr(t,"renderer",64),jstr(t,"material",64)};auto it=out->materials.find(x.material);
-  require(safeName(x.renderer),"贴图替换的渲染器名称无效："+x.renderer);require(it!=out->materials.end()&&!it->second.original,"贴图替换的材质无效："+x.material);
+  require(safeName(x.renderer),"贴图替换的渲染器名称无效："+x.renderer);require(it!=out->materials.end()&&it->second.mainRef.present(),"贴图替换的材质无效："+x.material);
   for(auto& y:out->swaps){require(y.renderer!=x.renderer,"贴图替换的渲染器重复："+x.renderer);}
   out->swaps.push_back(x);}
  out->blobSize=size;out->blobCrc=crc;if(animationFrame<0){out->logic=logicOf(m,dir,animation,out->variants);out->animation=std::move(animation);}
@@ -356,7 +358,7 @@ inline void readTextures(const std::string& dir,const std::string& generation,ui
  std::ifstream f(dir+"/model.bin",std::ios::binary|std::ios::ate);require(bool(f),"无法读取："+dir+"/model.bin");auto end=f.tellg();require(end>=0&&uint64_t(end)==blobSize,"model.bin 已变化：请重新转换或重新加载");
  auto get=[&](const TexRef& r){Bytes b(size_t(r.len),0);f.seekg(std::streamoff(r.off));f.read(reinterpret_cast<char*>(b.data()),std::streamsize(r.len));require(bool(f),"读取不完整：model.bin");return std::make_shared<Texture>(Texture{r.w,r.h,std::move(b)});};
  for(auto& n:names){auto it=materials.find(n);if(it==materials.end()||it->second.loaded())continue;auto& mf=it->second;
-  mf.main=get(mf.mainRef);if(mf.lightRef.present())mf.light=get(mf.lightRef);if(mf.normalRef.present())mf.normal=get(mf.normalRef);}}
+  if(mf.mainRef.present()){mf.main=get(mf.mainRef);}if(mf.lightRef.present()){mf.light=get(mf.lightRef);}if(mf.normalRef.present()){mf.normal=get(mf.normalRef);}}}
 // The materials an assignment draws, over all parts.
 inline std::set<std::string> materialsDrawn(const std::vector<PartFile>& parts,const Assignment& a){std::set<std::string> out;std::vector<Submesh> subs;std::vector<Material> rows;
  for(auto& p:parts){activeDraws(p.draws,a,subs,rows);for(auto& r:rows)out.insert(r.name);}return out;}
