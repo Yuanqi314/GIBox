@@ -67,7 +67,7 @@ internal fun DetailScreen(state: AppState, name: String, active: Boolean) {
         }
         Group(title = "状态") {
             ToggleRow("启用", modEnabled,
-                if (mod.converted) who(mod) else "还没转换：先选择角色", Glyph.Check,
+                if (mod.converted) who(mod) else "还没转换：先选择角色",
                 enabled = mod.converted) { state.setSelected(mod, it) }
         }
         Group(title = "名称") {
@@ -77,22 +77,22 @@ internal fun DetailScreen(state: AppState, name: String, active: Boolean) {
             Group(title = "角色") {
                 ActionRow(if (mod.converted) "更换角色并重新转换" else "选择角色并转换",
                     who(mod) + if (!mod.outdated) "" else if (mod.reason.isNotEmpty()) "（${mod.reason}，需要重新转换）" else "（已更改，还没重新转换）",
-                    Glyph.Person, showNext = true) { state.chooseCharacter(mod) }
+                    showNext = true) { state.chooseCharacter(mod) }
                 if (mod.converted && mod.id != 0) {
                     Divider()
-                    ActionRow("重新转换", "改了 Mods 里的文件后用；角色不变", Glyph.Refresh) { state.convert(source, mod.id) }
+                    ActionRow("重新转换", "改了 Mods 里的文件后用；角色不变") { state.convert(source, mod.id) }
                 }
             }
             if (state.logLevel == "debug" && modelDetails != null) {
                 Group(title = "动画转换实验（调试）") {
                     ToggleRow("忽略越界骨骼关联", modelDetails.animationBoneFallback,
                         "只作用于此 MOD 的逐帧动画：保留有效权重并重新归一化，需完整骨骼库。保存后重新转换。",
-                        Glyph.Wrench, enabled = state.busy == null) { state.setAnimationBoneFallback(mod, it) }
+                        enabled = state.busy == null) { state.setAnimationBoneFallback(mod, it) }
                 }
             }
             if (modelDetails != null && modelDetails.schemes.size > 1) Group(title = "INI 方案") {
                 ChoiceRow("转换方案", modelDetails.scheme, modelDetails.schemes,
-                    if (mod.converted) "换一套会重新转换" else "选一套，再选择角色转换", Glyph.Wrench) { state.chooseScheme(mod, it) }
+                    if (mod.converted) "换一套会重新转换" else "选一套，再选择角色转换") { state.chooseScheme(mod, it) }
             }
         }
         val variants = modelDetails?.variants
@@ -125,7 +125,7 @@ internal fun DetailScreen(state: AppState, name: String, active: Boolean) {
         Group(title = "其他") {
             val record = modelDetails?.record
             if (record != null) {
-                ActionRow("转换记录", "部件、骨骼、款式变量", Glyph.Info, showNext = true) {
+                ActionRow("转换记录", "部件、骨骼、款式变量", showNext = true) {
                     state.showConversionRecord(record)
                 }
                 Divider()

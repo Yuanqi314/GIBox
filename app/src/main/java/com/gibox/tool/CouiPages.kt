@@ -510,6 +510,7 @@ internal fun AppDialogs(state: AppState) {
         val confirm = { if (state.prompt === prompt) { close(); prompt.onConfirm() } }
         val colors = CouiDialogDefaults.themeColors()
         val ink = CouiTheme.colorScheme.onSurface
+        val dark = CouiTheme.isDark
         Dialog(
             visible = currentPrompt != null, material = dialogMaterial(), title = prompt.title,
             onDismissRequest = close,
@@ -526,7 +527,8 @@ internal fun AppDialogs(state: AppState) {
                 CouiDialogAction(
                     text = it,
                     onClick = { if (state.prompt === prompt) { close(); prompt.onNeutral() } },
-                    colors = if (prompt.emphasizeNeutral) CouiDialogDefaults.primaryActionColors(Color(0xFF484A51)) else null,
+                    colors = if (prompt.emphasizeNeutral && dark)
+                        CouiDialogDefaults.primaryActionColors(Color(0xFF484A51)) else null,
                 )
             },
         ) {

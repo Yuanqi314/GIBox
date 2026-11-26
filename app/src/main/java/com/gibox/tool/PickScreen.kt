@@ -1,5 +1,6 @@
 package com.gibox.tool
 
+import android.graphics.BlendMode
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -44,6 +45,7 @@ import com.itos.coui.backdrop.CouiBackdrop
 import com.itos.coui.backdrop.couiBackdrop
 import com.itos.coui.backdrop.drawCouiBackdrop
 import com.itos.coui.backdrop.rememberCouiBackdrop
+import com.itos.coui.dialog.CouiDialogDefaults
 import com.itos.coui.effect.CouiFloatingRenderer
 import com.itos.coui.effect.couiButtonFeedback
 import com.itos.coui.layout.Divider
@@ -57,6 +59,7 @@ import com.itos.coui.text.CouiTextKind
 import com.itos.coui.text.Text
 import com.itos.coui.theme.CouiColor
 import com.itos.coui.theme.CouiTheme
+import com.itos.coui.topappbar.CouiTopAppBarButtonDefaults
 import com.itos.coui.topappbar.TopAppBarButton
 import com.itos.coui.topappbar.TopAppBarSurface
 import kotlinx.coroutines.Dispatchers
@@ -231,8 +234,10 @@ private fun PickConfirmButton(
     click: () -> Unit,
 ) {
     val frame = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 12.dp)
-    val colors = CouiTheme.colorScheme
-    val ink = if (enabled) colors.onSurface else colors.onSurface.copy(alpha = .38f)
+    val theme = CouiTheme.colorScheme
+    val primary = CouiDialogDefaults.primaryActionColors(theme.accent)
+    val surface = if (enabled) primary.surface else primary.disabledSurface
+    val ink = if (enabled) primary.content else theme.onSurfaceVariant
     if (Build.VERSION.SDK_INT >= 34 && renderer != null) {
         TopAppBarSurface(
             modifier = frame,
@@ -240,12 +245,20 @@ private fun PickConfirmButton(
             backgroundAlpha = 0f,
             gradientColor = Color.Transparent,
         ) {
+            val style = CouiTopAppBarButtonDefaults.style()
             TopAppBarButton(
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 onClick = click,
                 enabled = enabled,
                 text = true,
                 renderer = renderer,
+                style = style.copy(material = { capsule ->
+                    style.material(capsule).copy(
+                        firstColor = surface,
+                        firstBlendMode = BlendMode.SRC_OVER,
+                        secondColor = Color.Transparent,
+                    )
+                }),
             ) {
                 Text(modifier = Modifier.fillMaxWidth(), text = "确定", kind = CouiTextKind.ItemTitle,
                     color = ink, textAlign = TextAlign.Center)
@@ -259,7 +272,7 @@ private fun PickConfirmButton(
         frame.heightIn(min = 48.dp)
             .drawCouiBackdrop(
                 checkNotNull(fallbackBackdrop), shape = { CouiCapsuleShape }, effects = { blur(16.dp.toPx()) },
-                onDrawSurface = { drawRect(colors.surface.copy(alpha = .78f)) },
+                onDrawSurface = { drawRect(surface) },
             )
             .clip(CouiCapsuleShape)
             .couiButtonFeedback(interactionSource = source, enabled = enabled)
