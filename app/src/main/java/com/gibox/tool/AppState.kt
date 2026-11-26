@@ -815,7 +815,7 @@ class AppState private constructor(private val context: Context) {
     }
     /** Characters with a skeleton: in the table made from the game's files, or recorded by the game on this device. */
     fun boneImportHint(id: Int, outfit: String): String {
-        if (Characters.isLoading(id)) return "每次加载将随机切换图片"
+        if (Characters.isLoading(id)) return "加载图片、头像和名片、天空门、浪船"
         if (id !in 10000000..10001999) return "按 hash 匹配场景中的部件"
         val table = OfflineSkeletons.load(boneRoot.absoluteFile.parentFile)
         if (table?.prefabFor(id, outfit.takeIf { it.isNotEmpty() }) != null) return "已内置骨骼"

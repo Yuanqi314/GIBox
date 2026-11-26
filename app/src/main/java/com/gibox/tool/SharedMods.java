@@ -61,14 +61,14 @@ public final class SharedMods {
         }catch(Exception e){failed.add(pkg+"："+e.getMessage());}
         if(!failed.isEmpty())throw new IOException("同步 MOD 开关失败："+String.join("；",failed));
     }
-    private static boolean payload(File dir){return new File(dir,"model.json").isFile()||new File(dir,"texture.json").isFile()||new File(dir,"loading.json").isFile();}
+    private static boolean payload(File dir){return ModelManifest.exists(dir);}
     private static boolean runtime(String name){return name.equals("learned.json")||name.equals("texture-mapping.json")||name.startsWith("bonemap-")||name.equals(MARK)||name.endsWith(".tmp");}
     private static void copy(File from,File to,boolean payloadOnly)throws Exception{
         Json.check(!Files.isSymbolicLink(from.toPath()),"转换目录不能包含符号链接："+from);
         if(from.isDirectory()){Files.createDirectories(to.toPath());File[] list=from.listFiles();if(list==null)throw new IOException("无法读取 "+from);for(File child:list)if(!payloadOnly||!runtime(child.getName()))copy(child,new File(to,child.getName()),payloadOnly);}
         else Files.copy(from.toPath(),to.toPath(),StandardCopyOption.REPLACE_EXISTING);
     }
-    private static boolean same(File a,File b)throws Exception{for(String name:new String[]{"model.json","texture.json","loading.json"}){File x=new File(a,name),y=new File(b,name);if(x.isFile()!=y.isFile())return false;if(x.isFile()&&!Arrays.equals(Files.readAllBytes(x.toPath()),Files.readAllBytes(y.toPath())))return false;}return true;}
+    private static boolean same(File a,File b)throws Exception{for(String name:new String[]{"model.json","texture.json","loading.json",ProfileImages.FILE}){File x=new File(a,name),y=new File(b,name);if(x.isFile()!=y.isFile())return false;if(x.isFile()&&!Arrays.equals(Files.readAllBytes(x.toPath()),Files.readAllBytes(y.toPath())))return false;}return true;}
     private static String marker(File dir)throws Exception{File f=new File(dir,MARK);return f.isFile()?new String(Files.readAllBytes(f.toPath()),StandardCharsets.UTF_8):"";}
     private static void name(String n){Json.check(n!=null&&!n.isEmpty()&&!n.startsWith(".")&&!n.contains("/")&&!n.contains("\\"),"MOD 名称无效");}
     private static void replace(File from,File to,boolean retainBackup)throws Exception{

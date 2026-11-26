@@ -2,7 +2,7 @@ package com.gibox.tool
 
 internal data class Feature(val title:String,val words:String,val page:Screen,val icon:Glyph)
 internal val features = listOf(
-    Feature("模组管理","Mod Management MOD 导入 启用 款式 角色 场景 风之翼 加载图片 重新转换",Screen.Mods,Glyph.Parcel),
+    Feature("模组管理","Mod Management MOD 导入 启用 款式 角色 场景 风之翼 其他 加载图片 头像 名片 天空门 浪船 重新转换",Screen.Mods,Glyph.Parcel),
     Feature("辅助功能","Accessibility 隐藏用户UID 角色 MOD 同时替换对应 NPC 随身合成台 取消角色渐隐 加载图片比例",Screen.Accessibility,Glyph.Accessibility),
     Feature("设置","Settings 打开目录 文件夹 hash 模式 匹配 采集 完整诊断 替换方式 动画 3DMigoto 骨骼 手动转换",Screen.Settings,Glyph.Wrench),
     Feature("关于","About Version 版本 开源 许可证 查看源代码 View Source Code GitHub",Screen.About,Glyph.Info),

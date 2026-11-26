@@ -72,6 +72,11 @@ void onSynthesisFrame(void*,DobbyRegisterContext* ctx){
 using LoadingFrameFn=void(*)(uintptr_t);LoadingFrameFn loadingRenderOriginal=nullptr;
 void onLoadingRender(uintptr_t method){if(auto* p=published.load(std::memory_order_acquire))p->loadingFrame();loadingRenderOriginal(method);}
 UiLifeFn loadingStartOriginal=nullptr,loadingDestroyOriginal=nullptr,imageEnableOriginal=nullptr,imageDisableOriginal=nullptr;
+UiLifeFn profileOriginal[2]{};
+template<unsigned Page> void onProfileInit(uintptr_t self,uintptr_t method){
+ profileOriginal[Page](self,method);
+ if(self)if(auto* p=published.load(std::memory_order_acquire))p->profileClass(Page,ms::load<uintptr_t>(self));
+}
 void onLoadingStart(uintptr_t self,uintptr_t method){loadingStartOriginal(self,method);if(auto* p=published.load(std::memory_order_acquire))if(self)p->loadingCanvas(self,ms::load<uintptr_t>(self+0x28));}
 void onLoadingDestroy(uintptr_t self,uintptr_t method){if(auto* p=published.load(std::memory_order_acquire))p->loadingDestroyed(self);loadingDestroyOriginal(self,method);}
 void onImageEnable(uintptr_t self,uintptr_t method){imageEnableOriginal(self,method);if(auto* p=published.load(std::memory_order_acquire))p->loadingImage(self,true);}
@@ -171,6 +176,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv*
   }
   if(!codeMatches(image.base,ms::abi::loadingChecks[4])||DobbyHook(reinterpret_cast<void*>(image.base+ms::abi::at(ms::abi::loadingRender)),reinterpret_cast<dobby_dummy_func_t>(onLoadingRender),reinterpret_cast<dobby_dummy_func_t*>(&loadingRenderOriginal))!=0||!loadingRenderOriginal){installed=false;bootLog(pkg,"loading-image-hook-error","加载界面渲染事件挂钩失败");}
   if(installed)bootLog(pkg,"loading-image-hook","加载界面事件已安装");}
+ {const UiLifeFn hooks[]={onProfileInit<0>,onProfileInit<1>};
+  for(size_t i=0;i<std::size(ms::abi::profileChecks);i++){
+   const auto& check=ms::abi::profileChecks[i];
+   if(!codeMatches(image.base,check)||DobbyHook(reinterpret_cast<void*>(image.base+ms::abi::at(check.rva)),reinterpret_cast<dobby_dummy_func_t>(hooks[i]),reinterpret_cast<dobby_dummy_func_t*>(&profileOriginal[i]))!=0||!profileOriginal[i])
+    bootLog(pkg,"profile-image-hook-error","个人资料页入口 "+std::to_string(i+1)+" 挂钩失败");
+  }}
  // Replacement at the hand-off; without it the scan still replaces, just not before activation.
  {std::string bad;for(auto& c:ms::abi::handoffChecks)if(!codeMatches(image.base,c)){char b[24];std::snprintf(b,sizeof(b),"0x%llx ",static_cast<unsigned long long>(ms::abi::at(c.rva)));bad+=b;}
   if(!bad.empty())bootLog(pkg,"spawn-hook-disabled","代码不符："+bad);

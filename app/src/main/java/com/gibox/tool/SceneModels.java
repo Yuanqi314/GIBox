@@ -12,6 +12,22 @@ final class SceneModels {
     }
     private static boolean owner(String s) { return s.startsWith("npc_")||s.startsWith("monster_")||s.startsWith("monsterobj_")||s.startsWith("flycloak_"); }
     private static boolean weapon(String s) { return s.startsWith("Equip_")||s.startsWith("MonEquip_"); }
+    private static String otherMesh(String hash) {
+        switch(hash) {
+            case "708a8fef": return "LoginScene_Door01_Vo";
+            case "ddcd0f8b": return "Skiff_Normal_01_Model_Lod0";
+            case "bf4d6430": return "Skiff_Normal_01_Model_Lod1";
+            case "1ef85754": return "Skiff_Normal_01_Model_Lod2";
+            default: return "";
+        }
+    }
+    static boolean otherHashes(Collection<String> hashes) { return hashes.stream().anyMatch(h -> !otherMesh(h).isEmpty()); }
+    static boolean otherTargets(List<Object> targets) {
+        return targets.stream().allMatch(row -> {
+            Object mesh=Json.obj(Json.obj(row,"target row").get("target"),"target").get("mesh");
+            return "LoginScene_Door01_Vo".equals(mesh)||String.valueOf(mesh).matches("Skiff_Normal_01_Model_Lod[012]");
+        });
+    }
     private static String shape(Map<String,Object> m) { return m.get("mesh")+"|"+m.get("vertices"); }
     static Selection select(File shared, Collection<String> wanted) throws Exception {
         OfflineSkeletons table=OfflineSkeletons.load(shared);
@@ -47,7 +63,8 @@ final class SceneModels {
                 chosen=r;allowed.addAll(owners.get(candidate.getKey()));
             }
             if(chosen==null) {
-                if(!weapon(String.valueOf(hash.get("mesh"))))continue;
+                boolean other=otherMesh(entry.getKey()).equals(hash.get("mesh"))&&hash.get("bones") instanceof Number&&((Number)hash.get("bones")).intValue()==0;
+                if(!other&&!weapon(String.valueOf(hash.get("mesh"))))continue;
                 String alias="Scene"+out.renderers.size();
                 Map<String,Object> target=Json.of("renderer",hash.get("renderer"),"mesh",hash.get("mesh"),"vertices",hash.get("vertices"),"submeshes",subs.size(),"bones",0);
                 List<Object> identity=new ArrayList<>();for(int k=0;k<16;k++)identity.add(k%5==0?1:0);
@@ -76,17 +93,18 @@ final class SceneModels {
             .textureDiag(new File(shared,"texture-diag")).pcTextures(DeviceHashes.pcTextures(shared)).source(mod.getAbsolutePath(),ModLibrary.signature(mod));
         opt.core(request->{try{return NativeBridge.draws(request);}catch(UnsatisfiedLinkError e){throw new IllegalStateException(e.getMessage());}});
         opt.rehearsal(request->{try{return NativeBridge.rehearse(request);}catch(UnsatisfiedLinkError e){throw new IllegalStateException(e.getMessage());}});
-        File library=null;
+        File library=null;boolean other=false;
         if(!ModelConverter.textureOnly(new ModelConverter.Ini(src,ini))) {
-            Selection s=select(shared,ModelConverter.overrideHashes(src,ini));opt.sceneTargets=s.targets;opt.deviceRenderers(s.hashes);
+            Selection s=select(shared,ModelConverter.overrideHashes(src,ini));opt.sceneTargets=s.targets;opt.deviceRenderers(s.hashes);other=otherTargets(s.targets);
+            if(other)opt.core(null);
             File folder=new File(shared,"skeletons-scene");Json.check(folder.isDirectory()||folder.mkdirs(),"无法创建场景骨骼缓存");
             library=File.createTempFile("scene-",".json",folder);
             Files.write(library.toPath(),Json.write(Json.of("format","gibox-skeleton","version",1,"id",Characters.SCENE,"root","Scene","renderers",s.renderers)).getBytes(StandardCharsets.UTF_8));
-            log.append("场景网格：按 ").append(s.hashes.size()).append(" 个索引缓冲 hash 匹配目标 ").append(s.renderers.size()).append(" 个网格（静态武器不需要骨骼）\n");
+            log.append("场景网格：按 ").append(s.hashes.size()).append(" 个索引缓冲 hash 匹配目标 ").append(s.renderers.size()).append(" 个网格（静态网格无需骨骼）\n");
         }
-        try{Importer.Result result=new Importer.Result();result.id=Characters.SCENE;result.library=library!=null;
+        try{Importer.Result result=new Importer.Result();result.id=other?Characters.LOADING:Characters.SCENE;result.library=library!=null;
             result.model=ModelConverter.convert(src,library,dest,Characters.SCENE,opt,decoder,log);
-            result.summary=library==null?"场景纯贴图 MOD：目标出现时按 hash 匹配":"场景网格 MOD：按 hash 匹配网格，目标出现时自动替换";return result;
+            result.summary=other?"目标出现时自动替换网格":library==null?"场景纯贴图 MOD：目标出现时按 hash 匹配":"场景网格 MOD：按 hash 匹配网格，目标出现时自动替换";return result;
         }finally{if(library!=null)library.delete();}
     }
 }

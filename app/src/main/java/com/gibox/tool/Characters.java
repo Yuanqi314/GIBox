@@ -170,7 +170,7 @@ public final class Characters {
     /** Not a character (1.0.3): a texture-only mod for NPCs and monsters, whose meshes the game side finds anywhere in the
      *  scene by the index-buffer hashes its rules name (texture_diag.hpp kScene). Listed last in the picker. */
     public static final int LOADING = 2;
-    public static final Avatar LOADING_AVATAR = new Avatar(LOADING,"加载图片","","loading loadingscreen background 加载 背景 图片");
+    public static final Avatar LOADING_AVATAR = new Avatar(LOADING,"其他","","loading loadingscreen background profile door skiff 加载 背景 图片 头像 名片 天空门 浪船");
     public static boolean isLoading(int id){return id==LOADING;}
     public static final int SCENE = 1;
     public static final Avatar SCENE_AVATAR = new Avatar(SCENE, "场景 MOD", "", "npc monster monsters enemy enemies weapon sword bow glider flycloak 怪物 敌人 武器 风之翼 滑翔 场景");

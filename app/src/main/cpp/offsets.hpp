@@ -78,7 +78,8 @@ enum Offset:uintptr_t {
  graphicRect=0xcc5e23c,rectBounds=0x8ffed28,textureWrap=0xc809098,textureFilter=0xc809008,
  graphicColor=0xcc5df44,graphicSetColor=0xcc5df50,spriteCreate=0xa7ed504,
  imageActive=0x9dd52d0,goActive=0x9577a00,goActiveSelf=0x95779fc,goSetActive=0x95779f8,
- filterMesh=0xc537e84,filterSetMesh=0xc53803c,
+ filterMesh=0xc537e84,filterSetMesh=0xc53803c,gameObjectFind=0x9577bc8,
+ profileCtor=0xcbdb42c,profileV3Ctor=0xe987c1c,
  getMesh=0x8f4217c,setMesh=0x8f4235c,getBones=0x8f420b4,getMaterials=0x8f03940,setMaterials=0x8f0399c,
  clone=0x8ffeb20,destroy=0x8ffe3a0,getName=0x8ffe494,getParent=0x8fffc18,
  arrayNew=0x43beb7c,objectNew=0x43cdaf8,pin=0xed0741c,unpin=0xed07434,
@@ -166,6 +167,7 @@ inline constexpr uintptr_t synthesisTop=0x98,synthesisTemplate=0xf0,buttonClickE
 inline CodeCheck handoffChecks[]={{componentsInChildren,"e403022ae2031f2a23008052e5031f2a"},
  {gameObject,"614d1c16604d1c16c00000b4080840f9"},{receive,"fe4fbfa9288706f0e50304aae403032a"}};
 inline CodeCheck loadingChecks[]={{loadingStart,"fe0f1ff848f003f0e10300aa08755a39"},{loadingDestroy,"fe0f1ff848f003f0e10300aa08815a39"},{imageEnable,"fe4fbfa9f30300aa97eaff94e80313aa"},{imageDisable,"fe4fbfa9f30300aaeaeaff9468124439"},{loadingRender,"a898019008d142f9080140f9a80000b4"}};
+inline CodeCheck profileChecks[]={{profileCtor,"08c6f990e9c5f9b000b944fd28008052"},{profileV3Ctor,"a9d8f8900814a85220b944fd080c01b9"}};
 inline CodeCheck bindChecks[]={{lodBind,"ff8304d1e9230b6dfd7b0ca9fc6f0da9"},{meshBones,"ff8304d1e85b00fdfd7b0ca9fc6f0da9"}};
 
 // ---------------------------------------------------------------- the global client (com.miHoYo.GenshinImpact, 7.2)
@@ -211,6 +213,8 @@ inline const Profile& globalProfile(){static const Profile p{"32f920af1fd831959a
   {textureFilter,0xa8658dc},{graphicColor,0x10f41928},{graphicSetColor,0x10f41934},{spriteCreate,0x8435f80},
   {imageActive,0xa7eb780},{goActive,0x97a818c},{goActiveSelf,0x97a8188},{goSetActive,0x97a8184},
   {filterMesh,0xabc1a74},{filterSetMesh,0xabc1c2c},{cameraFadeSet,0xd36e1f4},{synthesisHudFrame,0x115e3014},
+  // Find is MethodIndex 16876 in the matching 7.2 dump. The constructors were identified by their profile field stores.
+  {gameObjectFind,0x97a8354},{profileCtor,0xb7b8ba4},{profileV3Ctor,0xef43a6c},
   {synthesisClick,0x903e454},{synthesisOpen,0x8947a00},{uiGoTransform,0x97a7f74},{uiComponentTransform,0x80e876c},
   {uiChildCount,0x91c458c},{uiChild,0x91c47ec},{uiSetParent,0x91c2e64},{uiSetSibling,0x91c45f4},
   {uiSetName,0x91bf0a8},{uiFindChild,0x91c4680},{uiNewClick,0x10fc3160},{uiSetClick,0x11d71c74},
@@ -225,7 +229,8 @@ inline const Profile& globalProfile(){static const Profile p{"32f920af1fd831959a
   {loadingDestroy,"fe0f1ff8289b03d0e10300aa08ad4e39"},
   {imageEnable,"fe4fbfa9f30300aada0afe97e80313aa"},
   {imageDisable,"fe4fbfa9f30300aa2d0bfe9768124439"},
-  {loadingRender,"883601b008d141f9087940f9a80000b4"}},0x238};return p;}
+  {loadingRender,"883601b008d141f9087940f9a80000b4"},
+  {profileCtor,"0867faf0e966faf0003d41fd28008052"},{profileV3Ctor,"c9aaf8900814a852203d41fd080c01b9"}},0x238};return p;}
 // The selected build's table, CN value -> this build's (empty for the CN build, whose values are the enum's).
 inline std::vector<std::pair<uintptr_t,uintptr_t>>& table(){static std::vector<std::pair<uintptr_t,uintptr_t>> t;return t;}
 inline uintptr_t at(Offset o){auto& t=table();if(t.empty())return uintptr_t(o);
@@ -238,6 +243,7 @@ inline bool select(const std::string& id){
   p.checks.push_back({cameraFadeCheck.rva,cameraFadeCheck.hex});
   for(const auto& c:synthesisChecks)p.checks.push_back({c.rva,c.hex});
   for(const auto& c:loadingChecks)p.checks.push_back({c.rva,c.hex});
+  for(const auto& c:profileChecks)p.checks.push_back({c.rva,c.hex});
   for(const auto& c:handoffChecks)p.checks.push_back({c.rva,c.hex});
   for(const auto& c:bindChecks)p.checks.push_back({c.rva,c.hex});
   return p;}();
@@ -252,6 +258,7 @@ inline bool select(const std::string& id){
  apply(cameraFadeCheck);
  for(auto& c:synthesisChecks)apply(c);
  for(auto& c:loadingChecks)apply(c);
+ for(auto& c:profileChecks)apply(c);
  for(auto& c:handoffChecks)apply(c);
  for(auto& c:bindChecks)apply(c);
  return true;}

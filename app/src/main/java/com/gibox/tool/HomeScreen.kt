@@ -45,7 +45,7 @@ import com.itos.coui.text.CouiTextKind
 import com.itos.coui.text.Text
 import com.itos.coui.theme.CouiTheme
 
-private val categories = listOf("角色 MOD", "场景 MOD", "加载图片")
+private val categories = listOf("角色 MOD", "场景 MOD", "其他")
 
 @Composable
 internal fun ModManagementScreen(
@@ -132,7 +132,7 @@ internal fun ModManagementScreen(
             if (state.libraryReady && results.isEmpty() && (!searching || query.isNotBlank())) item {
                 Footer(text = when {
                     searching && query.isNotBlank() -> "没有找到“${query.trim()}”"
-                    category == 2 -> "还没有加载图片。导入加载背景 MOD 时，选择「加载图片」。"
+                    category == 2 -> "还没有其他 MOD。导入加载图片、头像和名片、天空门或浪船 MOD 时，选择「其他」。"
                     category == 1 -> "还没有场景 MOD。导入 NPC、怪物、武器或风之翼 MOD 时，选择「场景 MOD」。"
                     else -> "还没有角色 MOD。点右下角的加号，选择 MOD 的 .zip 压缩包。"
                 })

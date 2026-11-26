@@ -107,8 +107,10 @@ public final class Importer {
     /** The character the mod most likely belongs to, from the name it was imported under and its INI. */
     public static Characters.Guess guess(File mod, String importedAs, File boneRoot) {
         if(GliderMod.ini(mod)!=null){Characters.Guess g=new Characters.Guess();g.recommended.add(Characters.SCENE_AVATAR);g.evidence="按角色切换的风之翼贴图";return g;}
-        if(LoadingImages.ini(mod)!=null){Characters.Guess g=new Characters.Guess();g.recommended.add(Characters.LOADING_AVATAR);g.evidence="加载图片列表";return g;}
+        String other=LoadingImages.ini(mod)!=null?"加载图片列表":ProfileImages.ini(mod)!=null?"头像和名片规则":"";
+        if(!other.isEmpty()){Characters.Guess g=new Characters.Guess();g.recommended.add(Characters.LOADING_AVATAR);g.evidence=other;return g;}
         try { File ini = ModLibrary.schemes(mod).size() > 1 && !ModLibrary.overrides(mod).containsKey("ini") ? ModConfig.geometryInis(mod).get(0) : ModLibrary.mainIni(mod);
+            if(SceneModels.otherHashes(ModelConverter.overrideHashes(ini.getParentFile(),ini))){Characters.Guess g=new Characters.Guess();g.recommended.add(Characters.LOADING_AVATAR);g.evidence="天空门或浪船的网格哈希";return g;}
             Characters.Guess g = Characters.guess(ini.getParentFile(), ini, importedAs, ModLibrary.library(boneRoot));
             // The INI's hashes, where this device's hash map or the PC database names their character, weigh more than names.
             try { Characters.hashEvidence(g, DeviceHashes.load(boneRoot.getAbsoluteFile().getParentFile()).characters(ModelConverter.overrideHashes(ini.getParentFile(), ini))); }
@@ -123,15 +125,15 @@ public final class Importer {
      * the choice in the mod's modelswap.txt, so a re-import or re-conversion keeps it.
      */
     /** The model INIs to choose from (relative paths); fewer than two: nothing to choose. */
-    public static List<String> schemes(File mod) { try { File glider=GliderMod.ini(mod);if(glider!=null)return Collections.singletonList(ModConfig.relative(mod,glider));File loading=LoadingImages.ini(mod);if(loading!=null)return Collections.singletonList(ModConfig.relative(mod,loading));return ModLibrary.schemes(mod); } catch (Exception e) { return new ArrayList<>(); } }
+    public static List<String> schemes(File mod) { try { File glider=GliderMod.ini(mod);if(glider!=null)return Collections.singletonList(ModConfig.relative(mod,glider));File other=ModLibrary.otherImageIni(mod);if(other!=null)return Collections.singletonList(ModConfig.relative(mod,other));return ModLibrary.schemes(mod); } catch (Exception e) { return new ArrayList<>(); } }
     /** The chosen scheme, or "" when the package has only one. */
     /** The scheme in effect: the one chosen, else the only model INI XXMI would load (the switched-off ones offered
      *  beside it are a choice, not a question); "" when there is no single one. */
-    public static String scheme(File mod) { File glider=GliderMod.ini(mod);if(glider!=null)return ModConfig.relative(mod,glider);File loading=LoadingImages.ini(mod);if(loading!=null)return ModConfig.relative(mod,loading);String s = ModLibrary.overrides(mod).get("ini"); if (s != null) return s;
+    public static String scheme(File mod) { File glider=GliderMod.ini(mod);if(glider!=null)return ModConfig.relative(mod,glider);File other=ModLibrary.otherImageIni(mod);if(other!=null)return ModConfig.relative(mod,other);String s = ModLibrary.overrides(mod).get("ini"); if (s != null) return s;
         try { List<File> on = ModConfig.geometryInis(mod); return on.size() == 1 ? ModConfig.relative(mod, on.get(0)) : ""; } catch (Exception e) { return ""; } }
     public static void setScheme(File mod, String rel) throws Exception {
         File glider=GliderMod.ini(mod);if(glider!=null&&ModConfig.relative(mod,glider).equals(rel)){ModLibrary.setOverride(mod,"ini",rel);return;}
-        File loading=LoadingImages.ini(mod);if(loading!=null&&ModConfig.relative(mod,loading).equals(rel)){ModLibrary.setOverride(mod,"ini",rel);return;}
+        File other=ModLibrary.otherImageIni(mod);if(other!=null&&ModConfig.relative(mod,other).equals(rel)){ModLibrary.setOverride(mod,"ini",rel);return;}
         if (ModConfig.scheme(mod, rel) == null) throw new IllegalArgumentException("不是此 MOD 中的模型 INI：" + rel);
         ModLibrary.setOverride(mod, "ini", rel);
     }
@@ -150,12 +152,21 @@ public final class Importer {
     }
     public static Result convert(File mod, int id, File modelsRoot, File boneRoot, ModelConverter.TextureDecoder decoder,
                                  StringBuilder log, boolean use3dm) throws Exception {
-        if(Characters.isLoading(id)){Map<String,String> o=ModLibrary.overrides(mod);String name=ModLibrary.modelName(o.containsKey("name")?o.get("name"):mod.getName());ModLibrary.setOverride(mod,"id",Integer.toString(id));return LoadingImages.install(mod,new File(modelsRoot,name),decoder,log);}
-        if (!Characters.isScene(id) && (id < 10000000 || id > 10001999)) throw new IllegalArgumentException("角色 ID 无效：" + id);
+        if (!Characters.isScene(id) && !Characters.isLoading(id) && (id < 10000000 || id > 10001999)) throw new IllegalArgumentException("角色 ID 无效：" + id);
         if(GliderMod.ini(mod)!=null){Json.check(Characters.isScene(id),"此风之翼包请导入到场景 MOD");Map<String,String> o=ModLibrary.overrides(mod);String name=ModLibrary.modelName(o.getOrDefault("name",mod.getName()));ModLibrary.setOverride(mod,"id",Integer.toString(id));return GliderMod.install(mod,new File(modelsRoot,name),decoder,log);}
-        File ini = ModLibrary.mainIni(mod), src = ModConfig.switchedOn(mod, ini); ModLibrary.setOverride(mod, "id", Integer.toString(id));
+        File ini = ModLibrary.mainIni(mod), src = ModConfig.switchedOn(mod, ini);
         Map<String, String> o = ModLibrary.overrides(mod); String name = ModLibrary.modelName(o.containsKey("name") ? o.get("name") : mod.getName());
-        if (Characters.isScene(id)) return SceneModels.convert(mod, src, ini, new File(modelsRoot,name), boneRoot.getAbsoluteFile().getParentFile(), decoder, log);
+        if (Characters.isLoading(id)||Characters.isScene(id)) {
+            File dest=new File(modelsRoot,name);Result result;
+            if(ini.equals(LoadingImages.ini(mod)))result=LoadingImages.install(mod,dest,decoder,log);
+            else if(ini.equals(ProfileImages.ini(mod)))result=ProfileImages.install(mod,ini,dest,decoder,log);
+            else {
+                Json.check(Characters.isScene(id)||SceneModels.otherHashes(ModelConverter.overrideHashes(src,ini)),"「其他」支持加载图片、头像和名片、天空门及浪船");
+                result=SceneModels.convert(mod,src,ini,dest,boneRoot.getAbsoluteFile().getParentFile(),decoder,log);
+            }
+            ModLibrary.setOverride(mod,"id",Integer.toString(result.id));return result;
+        }
+        ModLibrary.setOverride(mod,"id",Integer.toString(id));
         // The outfit (Outfits, 0.7.94): the one chosen with the character (modelswap.txt "outfit"), else the one the INI's
         // hashes name, else the original. A mod made for another outfit than the one chosen is refused: its bone indices
         // follow that outfit's bone list, and on another outfit the model is torn apart (Shenhe's Frostflower Dew mod on

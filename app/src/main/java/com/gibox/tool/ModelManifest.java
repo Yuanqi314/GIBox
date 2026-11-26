@@ -60,10 +60,11 @@ public final class ModelManifest {
         String d = o.substring(p + 4); return d.matches("[0-9]+") && !d.matches("0+");
     }
 
-    public static boolean exists(File dir) { return new File(dir, "model.json").isFile() || TextureMod.is(dir) || LoadingImages.is(dir); }
+    public static boolean exists(File dir) { return new File(dir, "model.json").isFile() || TextureMod.is(dir) || LoadingImages.is(dir) || ProfileImages.is(dir); }
 
     public static ModelManifest read(File dir) throws Exception {
         if (LoadingImages.is(dir)) return LoadingImages.summary(dir);
+        if (ProfileImages.is(dir)) return ProfileImages.summary(dir);
         if (TextureMod.is(dir)) return readTextureMod(dir);
         Map<String, Object> m = Json.obj(Json.read(new File(dir, "model.json"), 4L << 20), "model.json");
         Json.check("gibox-model".equals(m.get("format")), "不是 GIBox 模型：" + dir.getName());
@@ -72,7 +73,7 @@ public final class ModelManifest {
         r.name = Json.str(m.get("name"), "name", 512); r.generation = Json.str(m.get("generation"), "generation", 64);
         Map<String, Object> c = Json.obj(m.get("character"), "character");
         r.id = (int) Json.integer(c.get("id"), "character.id", 0, 10001999); Json.check(r.id == 0 || Characters.isScene(r.id) || r.id >= 10000000, "角色 ID 越界");
-        if (Characters.isScene(r.id)) Json.arr(c.get("targets"), "character.targets", 1, 64);
+        if (Characters.isScene(r.id) && SceneModels.otherTargets(Json.arr(c.get("targets"), "character.targets", 1, 64))) r.id=Characters.LOADING;
         if (c.get("names") != null) for (Object n : Json.arr(c.get("names"), "character.names", 0, 16)) { String s = Json.str(n, "character.names", 40); Json.check(s.matches("[a-z0-9]{3,40}"), "角色名格式：" + s); r.names.add(s); }
         Json.check(r.id != 0 || !r.names.isEmpty(), "模型没有角色 ID 也没有角色名");
         if (c.get("outfit") != null) { r.outfit = Json.str(c.get("outfit"), "character.outfit", 128); Json.check(r.outfit.matches("avatar_[a-z0-9_]{1,121}"), "外观格式：" + r.outfit); }
@@ -112,7 +113,7 @@ public final class ModelManifest {
         if (m.get("parts") instanceof List) for (Object p : (List<?>) m.get("parts")) {
             if (!(p instanceof Map) || !(((Map<?, ?>) p).get("target") instanceof Map)) continue;
             Object mesh = ((Map<?, ?>) ((Map<?, ?>) p).get("target")).get("mesh");
-            if (mesh instanceof String && lowerLod((String) mesh)) { r.lodMesh = (String) mesh; break; }
+            if (!Characters.isLoading(r.id) && mesh instanceof String && lowerLod((String) mesh)) { r.lodMesh = (String) mesh; break; }
         }
         Object s = m.get("source");
         if (s != null) { Map<String, Object> so = Json.obj(s, "source"); if (so.get("path") instanceof String) r.sourcePath = (String) so.get("path"); if (so.get("signature") instanceof String) r.sourceSignature = (String) so.get("signature"); }

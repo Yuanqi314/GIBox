@@ -180,7 +180,7 @@ fun PickScreen(state: AppState, pick: Screen.Pick) {
                 val interaction = remember { MutableInteractionSource() }
                 Group {
                     ActionRow(avatar.name + if (recommended) "（推荐）" else "", when {
-                        Characters.isLoading(avatar.id) -> "加载背景图片，无需骨骼"
+                        Characters.isLoading(avatar.id) -> "加载图片、头像和名片、天空门、浪船"
                         Characters.isScene(avatar.id) -> "NPC、怪物、武器、风之翼" + if (avatar.id == pick.current) " · 当前" else ""
                         else -> "${avatar.id}" + (if (recorded.contains(avatar.id)) " · 已记录骨骼" else "") +
                             (if (avatar.id == pick.current) " · 当前" else "")

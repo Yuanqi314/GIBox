@@ -36,6 +36,7 @@ class Runtime {
  void loadingImage(Ptr image,bool shown)noexcept;
  void loadingDestroyed(Ptr canvas)noexcept;
  void loadingFrame()noexcept;
+ void profileClass(unsigned page,Ptr klass)noexcept;
 };
 std::string loadedBuildId(Ptr base,const void* headers,size_t count,size_t stride);
 }

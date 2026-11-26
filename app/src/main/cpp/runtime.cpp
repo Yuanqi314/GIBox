@@ -5,6 +5,7 @@
 #include "camera_fade.hpp"
 #include "model.hpp"
 #include "loading_images.hpp"
+#include "profile_images.hpp"
 #include "logfmt.hpp"
 #include "texture_diag.hpp"
 #include "logic_game.hpp"
@@ -124,7 +125,7 @@ std::vector<ModelInfo> scanModels(const std::string& root,std::map<std::string,M
    auto summary=readSummary(path);ModelInfo m;m.name=name;m.path=path;m.stamp=stamp;m.generation="g:"+summary.generation;m.id=summary.id;m.sceneTargets=summary.sceneTargets;m.animated=summary.animated;m.names=summary.names;m.learned=readLearned(path);m.variants=summary.variants;m.replaceWhen=summary.replaceWhen;m.outfit=summary.outfit;
    if(!m.id&&m.learned.id)m.id=m.learned.id;
    // Targets the runtime learned (also after a game update moved a part) take precedence over the converter's.
-   for(auto& p:summary.parts){PartInfo pi;pi.name=p.name;pi.group=p.renderer;pi.minBones=p.indexedBones?p.bones:0;pi.hasTarget=p.hasTarget&&p.target.bones>=pi.minBones;pi.target=p.target;if(p.hasTarget&&lowerLod(p.target.mesh))pi.lodMesh=p.target.mesh;
+   for(auto& p:summary.parts){PartInfo pi;pi.name=p.name;pi.group=p.renderer;pi.minBones=p.indexedBones?p.bones:0;pi.hasTarget=p.hasTarget&&p.target.bones>=pi.minBones;pi.target=p.target;if(p.hasTarget&&p.target.bones&&lowerLod(p.target.mesh))pi.lodMesh=p.target.mesh;
     // A target learned from a lower level of detail (before 0.6.5) is dropped and learned again from the full mesh.
     auto l=m.learned.targets.find(p.name);if(l!=m.learned.targets.end()&&sameRenderer(l->second,p)&&!lowerLod(l->second.mesh)&&l->second.bones>=pi.minBones){pi.target=l->second;pi.hasTarget=true;}m.parts.push_back(pi);}
    next[path]=m;out.push_back(m);
@@ -194,6 +195,7 @@ template<class K,class V> struct Recent {size_t limit;std::map<K,V> now,before;e
 struct Runtime::Impl {
  Engine e;PortableSynthesis synthesis;std::string pkg,priv,shared,modelRoot,boneRoot;
  LoadingScreens loading{e};LoadingReader loadingReader;ControlState loadingWorkerControl;std::shared_ptr<LoadingPrepared> loadingPending;uint64_t loadingAt=0,loadingFrameAt=0,loadingDiscoverAt=0,loadingImageProbeAt=0;Ptr loadingClass=0,loadingType=0;uint32_t loadingTypeHandle=0;bool loadingDiscovering=false;std::string loadingError,loadingLogged;
+ ProfileScreens profile{e};ProfileReader profileReader;std::shared_ptr<ProfilePrepared> profilePending;std::string profileError;
  void pollLoading(){if(loading.updating()||loadingDiscovering){return;}std::shared_ptr<LoadingPrepared> ready;bool enabled=ctl.enabled;std::string fit=ctl.loadingFit;std::vector<std::string> selected=ctl.selected;
   {std::lock_guard<std::mutex> lock(sm);ready.swap(loadingPending);if(pendingControl){enabled=pendingControl->enabled;selected=pendingControl->selected;fit=pendingControl->loadingFit;}}
   if(ready){if(!ready->error.empty())log("loading-image-error",ready->name+"："+ready->error);loading.receive(std::move(ready));}
@@ -315,7 +317,8 @@ struct Runtime::Impl {
      // report only the same text failing twice.
      try{auto c=parseControl(raw);loadingWorkerControl=c;controlBad.clear();logLevel.store(c.logLevel);uid::on.store(c.hideUid);cameraFade::mode.store(c.cameraFadeMode);std::lock_guard<std::mutex> l(sm);pendingControl=c;controlError.clear();}
      catch(const std::exception& ex){if(raw!=controlBad){controlBad=raw;controlRaw.clear();}else{std::lock_guard<std::mutex> l(sm);controlError=ex.what();}}}}}catch(const std::exception&){}}
-  if(now>=loadingAt){loadingAt=now+250;try{auto p=loadingReader.update(modelRoot,loadingWorkerControl.selected,loadingWorkerControl.enabled,loadingWorkerControl.variables,loading.cycle.load());if(p){std::lock_guard<std::mutex> lock(sm);loadingPending=p;}}catch(const std::exception& ex){log("loading-image-error",ex.what());}}
+  if(now>=loadingAt){loadingAt=now+250;try{auto p=loadingReader.update(modelRoot,loadingWorkerControl.selected,loadingWorkerControl.enabled,loadingWorkerControl.variables,loading.cycle.load());if(p){std::lock_guard<std::mutex> lock(sm);loadingPending=p;}}catch(const std::exception& ex){log("loading-image-error",ex.what());}
+   try{auto p=profileReader.update(modelRoot,loadingWorkerControl.selected,loadingWorkerControl.enabled);if(p){std::lock_guard<std::mutex> lock(sm);profilePending=std::move(p);}}catch(const std::exception& ex){log("profile-image-error",ex.what());}}
   if(now>=scanAt){scanAt=now+1000;try{auto list=scanModels(modelRoot,scanCache);std::lock_guard<std::mutex> l(sm);scanned=std::move(list);scannedFresh=true;}catch(const std::exception&){}}
   if(now>=texDiagScanAt){texDiagScanAt=now+2000;textureDiagScan();
    try{auto file=shared+"/skeleton-policy.json";auto st=exists(file)?stampOf(file):std::string();if(st!=bonePolicyStamp){
@@ -1354,7 +1357,7 @@ struct Runtime::Impl {
     auto key=capKey(c.mesh,c.vertices,c.indices);if(capMeshes.emplace(key,c).second)capShape.insert({{c.indices,uint64_t(c.vertices)},key});}
    catch(const std::exception&){}}
   if(capRead.size()>20000)capRead.clear();
-  if(!rendererTypeObject){for(Ptr r:pool)if(alive(r)&&!attachments.count(r)){try{rendererType(r);}catch(const std::exception&){}break;}}
+  if(!rendererTypeObject){for(Ptr r:pool)if(alive(r)&&!rigidRenderer(r)&&!attachments.count(r)){try{rendererType(r);}catch(const std::exception&){}break;}}
   try{capScanLoaded(now,pool);}catch(const std::exception& ex){log("hash-capture",std::string("未能扫描已加载网格：")+ex.what());capAllLast=now+60000;}
   bool newMeshes=capMeshes.size()!=before;if(newMeshes)capDirty=true;
   // 2. Uploads: each new one; those not tied yet again when new meshes came (an upload usually comes first).
@@ -1655,6 +1658,12 @@ struct Runtime::Impl {
   require(alive(r)&&load<Ptr>(r+0x10)==v.native&&alive(v.filter)&&load<Ptr>(v.filter+0x10)==v.filterNative,"武器 MeshFilter 已失效");e.set(abi::filterSetMesh,v.filter,mesh);}
  Ptr rigidType(Ptr component){Ptr cls=load<Ptr>(component);require(byvalOffset&&e.call<Ptr>(abi::classFromType,cls+byvalOffset,1)==cls,"静态组件 Type 校验失败");
   Ptr type=e.call<Ptr>(abi::typeObject,cls+byvalOffset);require(type&&load<Ptr>(type+0x10),"静态组件 Type 尚未就绪");pin(rigidTypeRoots,type);return type;}
+ void rememberRigid(Ptr filter,Ptr go,Ptr rendererName){
+  Ptr renderer=e.call<Ptr>(abi::componentByName,go,rendererName,Ptr(0));if(!alive(renderer))return;
+  auto it=rigidRefs.find(renderer);if(it==rigidRefs.end()&&rigidRefs.size()>=256)return;
+  auto& ref=rigidRefs[renderer];if(ref.filter!=filter||ref.filterNative!=load<Ptr>(filter+0x10)){freeOwned(ref);pin(ref,renderer);pin(ref,filter);}
+  ref.native=load<Ptr>(renderer+0x10);ref.filter=filter;ref.filterNative=load<Ptr>(filter+0x10);
+ }
  void rigidDiscover(std::vector<Ptr>& out,uint64_t now){bool gliders=false;for(const auto& f:texDiagDocs){gliders=gliders||(f.second.mod&&texModOn(f.second.mod->name)&&gliderMod(*f.second.mod));}bool wanted=gliders;for(auto* m:wantedNow)for(const auto& t:m->sceneTargets)wanted=wanted||t.target.bones==0;
   if(!wanted){bool attached=false;for(const auto& a:attachments)attached=attached||rigidRenderer(a.first);if(!attached){for(auto& r:rigidRefs){freeOwned(r.second);}rigidRefs.clear();}return;}
   if(abi::at(abi::filterMesh)>=abi::notFound||abi::at(abi::filterSetMesh)>=abi::notFound){return;}
@@ -1662,6 +1671,15 @@ struct Runtime::Impl {
    if(!valid&&!attachments.count(it->first)){freeOwned(it->second);it=rigidRefs.erase(it);}else ++it;}
   if(now<rigidScanAt){for(const auto& r:rigidRefs)if(alive(r.first))out.push_back(r.first);return;}rigidScanAt=now+2000;
   Owned tmp;try{Ptr filterName=managedName("MeshFilter"),rendererName0=managedName("MeshRenderer");pin(tmp,filterName);pin(tmp,rendererName0);
+   // The login door appears before any avatar can supply a sample for the MeshFilter Type.
+   if(abi::at(abi::gameObjectFind)<abi::notFound){std::set<std::string> looked;
+    for(auto* m:wantedNow)for(const auto& target:m->sceneTargets){const auto& fp=target.target;if(fp.mesh!="LoginScene_Door01_Vo"||fp.bones)continue;
+     for(const auto& label:{fp.mesh,fp.renderer})if(looked.insert(label).second){
+      Ptr name=managedName(label.c_str());pin(tmp,name);Ptr go=e.call<Ptr>(abi::gameObjectFind,name,Ptr(0));if(!alive(go))continue;
+      Ptr filter=e.call<Ptr>(abi::componentByName,go,filterName,Ptr(0));if(!alive(filter))continue;
+      Ptr mesh=e.get(abi::filterMesh,filter);if(alive(mesh)&&matches(fp,fingerprint(mesh)))rememberRigid(filter,go,rendererName0);
+     }
+    }}
    // Bootstrap Type from a real component in a bounded slice of the avatar hierarchy, then enumerate MeshFilters.
    if(!rigidFilterType&&byvalOffset){Ptr root=0;for(Ptr r:out)if(alive(r)&&!rigidRenderer(r)){root=avatarRoot(r);if(root)break;}
     if(root){if(!rigidTransformType)rigidTransformType=rigidType(root);Ptr up=e.get(abi::getParent,root);if(alive(up))root=up;
@@ -1675,10 +1693,7 @@ struct Runtime::Impl {
      for(auto* m:wantedNow){for(const auto& t:m->sceneTargets){candidate=candidate||(t.target.bones==0&&matches(t.target,fp));}}
      if(!candidate){for(const auto& set:sets)for(size_t i=0;i<set->parts.size();i++)candidate=candidate||set->parts[i].mesh==mesh||animationMesh(*set,i,mesh);}
      if(!candidate)continue;
-     Ptr go=e.get(abi::gameObject,filter);if(!alive(go))continue;Ptr renderer=e.call<Ptr>(abi::componentByName,go,rendererName0,Ptr(0));if(!alive(renderer))continue;
-     auto it=rigidRefs.find(renderer);if(it==rigidRefs.end()&&rigidRefs.size()>=256)continue;
-     auto& ref=rigidRefs[renderer];if(ref.filter!=filter||ref.filterNative!=load<Ptr>(filter+0x10)){freeOwned(ref);pin(ref,renderer);pin(ref,filter);}
-     ref.native=load<Ptr>(renderer+0x10);ref.filter=filter;ref.filterNative=load<Ptr>(filter+0x10);
+     Ptr go=e.get(abi::gameObject,filter);if(alive(go))rememberRigid(filter,go,rendererName0);
    }}}
   }catch(const std::exception& ex){log("weapon-static-wait",ex.what());rigidScanAt=now+5000;}freeOwned(tmp);
   for(const auto& r:rigidRefs)if(alive(r.first))out.push_back(r.first);}
@@ -1728,7 +1743,7 @@ struct Runtime::Impl {
  // fallback (world character, renderers that did not come through the async hand-off), so it runs every 500 ms.
  std::vector<Ptr> allRenderers(uint64_t now){SceneRoots nextRoots;std::vector<Ptr> out;try{out=worldRenderers();if(ch.entity){Ptr visual=load<Ptr>(ch.entity+abi::entityVisual);if(visual)scenePin(nextRoots,load<Ptr>(visual+abi::visualRenderers));}}catch(const std::exception& ex){log("world-renderers",ex.what());}
   scanWorld=int(out.size());scanAll=-1;
-  if(!findOff&&now>=findAt){Ptr sample=0;for(Ptr r:out)if(alive(r)){sample=r;break;}if(!sample)for(auto& a:attachments)if(alive(a.first)){sample=a.first;break;}
+  if(!findOff&&now>=findAt){Ptr sample=0;for(Ptr r:out)if(alive(r)){sample=r;break;}if(!sample)for(auto& a:attachments)if(skinnedRenderer(a.first)){sample=a.first;break;}
    if(sample||rendererTypeObject){Owned tmp;try{Ptr found=e.call<Ptr>(abi::findObjectsOfType,rendererType(sample),Ptr(0));scanAll=0;if(found){scenePin(nextRoots,found);for(Ptr r:pointers(found,8192)){out.push_back(r);scanAll++;}}findFails=0;}
     catch(const std::exception& ex){log("find-error",ex.what());findAt=now+5000;if(++findFails>=3){findOff=true;log("find-disabled","改为只处理大世界中的当前角色");}}freeOwned(tmp);}}
   // World character first: it is the preferred template for builds.
@@ -1988,6 +2003,10 @@ struct Runtime::Impl {
    // Nor one of another outfit: its bindposes are not the model's (0.7.94).
    for(auto& s:seen)if(matches(t,s.fp)&&seenLive(s)&&alive(s.mesh)&&!attachments.count(s.renderer)&&!skipped.count({s.renderer,load<Ptr>(s.renderer+0x10)})&&meshGet(s.renderer)==s.mesh&&modelFits(model.id,outfit,s.renderer)&&npcTemplate(model,i,s)&&usableTemplate(s,min)){out.push_back(s);found=true;break;}
    if(!found)for(auto& a:attachments)if(alive(a.first)&&alive(a.second->original)&&modelFits(model.id,outfit,a.first)&&matches(t,fingerprint(a.second->original))){Seen s{a.first,a.second->original,fingerprint(a.second->original)};if(npcTemplate(model,i,s)&&usableTemplate(s,min)){out.push_back(s);found=true;break;}}
+   // A skiff only exposes its current LOD. Its other static parts need the same Mesh class, not an active copy of each LOD.
+   if(!found&&model.id==1&&!model.animated&&!t.bones&&t.mesh.rfind("Skiff_Normal_01_Model_Lod",0)==0)
+    for(auto& s:seen)if(seenLive(s)&&rigidRenderer(s.renderer)&&s.fp.mesh.rfind("Skiff_Normal_01_Model_Lod",0)==0&&
+      meshName(t.renderer)==meshName(name(s.renderer))&&npcTemplate(model,i,s)&&usableTemplate(s,min)){out.push_back(s);found=true;break;}
    if(!found)if(auto lod=lodTemplate(model,t,min)){out.push_back(*lod);found=true;}
    if(!found){for(auto& s:seen)if(matches(t,s.fp)&&seenLive(s)&&alive(s.mesh)&&!usableTemplate(s,min)){staleNote[model.path]=t.renderer+" 的骨骼或绑定矩阵尚未完整，持续等待并重新检测";break;}return std::nullopt;}}
   staleNote.erase(model.path);
@@ -2065,7 +2084,7 @@ struct Runtime::Impl {
    // A GC pin protects the managed wrapper, not the native Mesh against Unity Destroy. Keep an independent,
    // unmodified engine clone before replacing anything. It is owned separately from the mod set so a restored
    // renderer can continue using it after the mod is disabled/released.
-   if(!animationFrame){auto backup=std::make_unique<RestoreBackup>();try{backup->mesh=clone(*backup,ownerMesh);}catch(...){freeOwned(*backup);throw;}
+   if(!animationFrame&&(!rigid||matches(bp.target,tpl.fp))){auto backup=std::make_unique<RestoreBackup>();try{backup->mesh=clone(*backup,ownerMesh);}catch(...){freeOwned(*backup);throw;}
    bp.backup=backup.get();restoreBackups.push_back(std::move(backup));
    s.bytes+=uint64_t(fingerprint(ownerMesh).vertices)*(12+12+8+32+32);}
    const auto& geo=pf.geo;bp.mesh=rigid?emptyMesh(s,ownerMesh):clone(s,ownerMesh);
@@ -2432,6 +2451,10 @@ struct Runtime::Impl {
    if(missing>=0){auto reason=bp.name+" 的原材质槽 "+std::to_string(missing)+" 尚未就绪，等待后重试";materialWait[s.path]=reason;
     if(missingLogged[waitKey]!=reason){missingLogged[waitKey]=reason;log("material-wait",s.name+"："+reason);}freeOwned(*a);return false;}
    missingLogged.erase(waitKey);
+   if(rigidRenderer(r)&&!bp.backup&&alive(bp.mesh)){
+    auto backup=std::make_unique<RestoreBackup>();try{backup->mesh=clone(*backup,mesh);}catch(...){freeOwned(*backup);throw;}
+    bp.backup=backup.get();a->backup=bp.backup;restoreBackups.push_back(std::move(backup));
+   }
    // Destroyed by the game anyway (an unload GIBox did not see coming): the set is built again, not given up.
    if(!(a->backup&&alive(a->backup->mesh))||!alive(bp.mesh)){if(!s.lost){s.lost=true;log("model-lost",s.name+"/"+bp.name+"："+(alive(bp.mesh)?"还原快照":"构建的网格")+"被游戏销毁（场景切换），重新构建模型");}freeOwned(*a);return false;}
    snapshotMaterials(*a->backup,a->originalMaterials);
@@ -3144,7 +3167,7 @@ struct Runtime::Impl {
 
  // ---------------------------------------------------------------- tick
  bool boneRefreshPending()const{return ctl.refreshBones&&(boneRefreshDone!=ctl.refreshBones||boneRefreshDoneId!=ctl.refreshBonesCharacter);}
- void consume(){std::shared_ptr<LoadingPrepared> loadingReady;std::optional<ControlState> c;std::string cerr;std::deque<BoneResult> bones;std::deque<TextureResult> textures;std::deque<AnimationResult> frames;{std::lock_guard<std::mutex> l(sm);loadingReady.swap(loadingPending);c.swap(pendingControl);cerr.swap(controlError);bones.swap(boneResults);bonePolicy=bonePolicyScanned;textures.swap(textureResults);frames.swap(animationResults);if(scannedFresh){models=scanned;scannedFresh=false;}}
+ void consume(){std::shared_ptr<LoadingPrepared> loadingReady;std::shared_ptr<ProfilePrepared> profileReady;std::optional<ControlState> c;std::string cerr;std::deque<BoneResult> bones;std::deque<TextureResult> textures;std::deque<AnimationResult> frames;{std::lock_guard<std::mutex> l(sm);loadingReady.swap(loadingPending);profileReady.swap(profilePending);c.swap(pendingControl);cerr.swap(controlError);bones.swap(boneResults);bonePolicy=bonePolicyScanned;textures.swap(textureResults);frames.swap(animationResults);if(scannedFresh){models=scanned;scannedFresh=false;}}
   for(auto& frame:frames){Set* found=nullptr;for(auto& candidate:sets)if(candidate->path==frame.path&&candidate->generation==frame.generation&&candidate->animation.token==frame.token){found=candidate.get();break;}if(!found)continue;auto& a=found->animation;a.loading=false;
    if(!frame.error.empty()){a.stopped=true;a.error=frame.error;log("animation-error",found->name+"：读取帧失败："+frame.error);continue;}a.cpu.at(frame.index)=std::move(frame.data);log("animation-read",found->name+"：帧值 "+std::to_string(a.loop.spec.frames[frame.index].value)+"，用时 "+std::to_string(frame.us)+" us");}
   if(timelineOn()){timelineMeshes.clear();for(auto& m:models)for(auto& p:m.parts)if(p.hasTarget)timelineMeshes.insert(baseMesh(p.target.mesh));}
@@ -3175,6 +3198,7 @@ struct Runtime::Impl {
    boneCandidate.clear();boneBadList.clear();boneBadStreak=0;exportWait.clear();boneFullSearchAt=0;libraryWait.erase(id);log("bone-refresh-request",std::to_string(id)+"：请求 "+std::to_string(c->refreshBones));
   }
   if(loadingReady){if(!loadingReady->error.empty())log("loading-image-error",loadingReady->name+"："+loadingReady->error);loading.receive(std::move(loadingReady));}
+  if(profileReady){if(!profileReady->error.empty())log("profile-image-error",profileReady->error);profile.receive(std::move(profileReady));}
   if(c&&c->sharedChoices!=ctl.sharedChoices){for(auto& set:sets)if(set->logic.driver){stopLogic(*set,"logic-control","款式控制方式已改变");}}
   if(c&&c->npcModels!=ctl.npcModels){skipped.clear();bindingRejected.clear();texQuickNo.clear();texWaitUntil.clear();npcTextureAt=0;discoverAt=0;}
   if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel||c->keys!=ctl.keys);
@@ -3193,6 +3217,7 @@ struct Runtime::Impl {
    tickPhase="读取文件与当前角色";wantedNow.clear();bindingTargets.clear();bindingReady=false;if(!worker.background()){workerTick(now);}consume();synthesis.collect();ch=current();bindingStats();tickPhase="骨骼库与预览";
    if(ch.config!=shownCharacter){shownCharacter=ch.config;log("character",ch.entity?std::to_string(ch.config):std::string("无"));}
    try{loading.tick(ctl.enabled,ctl.selected,ctl.loadingFit);}catch(const std::exception& ex){if(loadingError!=ex.what()){loadingError=ex.what();log("loading-image-error",loadingError);}}
+   try{profile.tick(ctl.enabled,ctl.selected,byvalOffset,now);}catch(const std::exception& ex){if(profileError!=ex.what()){profileError=ex.what();log("profile-image-error",profileError);}}
    try{textureDiagTick(now);}catch(const std::exception& ex){log("texture-diag-unsupported",std::string("本轮诊断中止：")+ex.what());}
    try{textureModTick(now);}catch(const std::exception& ex){log("texture-error",std::string("本轮纯贴图 MOD 处理中止：")+ex.what());}
    try{ibHashTick(now);}catch(const std::exception& ex){log("ib-capture",std::string("本轮中止：")+ex.what());}
@@ -3261,6 +3286,7 @@ struct Runtime::Impl {
    for(auto& kv:attachments){auto& n=kv.second->set->name;if(std::find(active.begin(),active.end(),n)==active.end())active.push_back(n);}
    for(auto& kv:texLive)if(kv.second&&!kv.second->slots.empty()&&std::find(active.begin(),active.end(),kv.second->mod)==active.end())active.push_back(kv.second->mod);
    if(loading.active()&&std::find(active.begin(),active.end(),loading.name())==active.end())active.push_back(loading.name());
+   profile.appendActive(active);
    if(wanted.empty()&&active.empty()&&loading.ready()&&texStatus.empty()){if(abi::at(abi::loadingStart)>=abi::notFound)errors.push_back("当前客户端尚未适配加载图片");else if(!loading.error().empty())errors.push_back(loading.name()+"："+loading.error());else waiting="加载图片已就绪，等待加载界面";}
    // Texture-only mods (no mesh model): their own state ("等待映射", "只诊断", written slots) is the status line.
    if(wanted.empty()&&!texStatus.empty()&&waiting.empty()&&building.empty()&&errors.empty()&&!restoring){status(texApplied?"active":"waiting",texStatus,active,errors);inTick=false;animationTick(now);return;}
@@ -3269,6 +3295,7 @@ struct Runtime::Impl {
    else if(!active.empty())status("active",errors.empty()?"":errors[0],active,errors);
    else if(!building.empty())status("loading",building[0],active,errors);
    else if(!errors.empty())status("error",errors[0],active,errors);
+   else if(wanted.empty()&&profile.ready())status("waiting","等待打开个人资料页",active,errors);
    else status("waiting",wanted.empty()?(switchedOff()?"显示替换已关闭，保留游戏原模型（在 App 的款式里打开）":"没有勾选的模型"):(waiting.empty()?"等待角色出现":waiting)+(stale?"":findOff?"（全场景扫描不可用，目前只认当前操控的角色；GIBox Log.txt 里有 renderer-type-dump）":"（大世界、队伍界面、角色详情页任一处出现即可）"),active,errors);
   }catch(const std::exception& ex){std::string what=std::string(ex.what())+"（步骤："+tickPhase+"）";
    // The same failure every 100 ms is logged once per 10 s, with how often it came in between.
@@ -3283,7 +3310,7 @@ void Runtime::spawned(Ptr go)noexcept{try{p->spawned(go);}catch(...){}}
 void Runtime::spawnedAfter()noexcept{try{p->spawnedAfter();}catch(...){}}
 Ptr Runtime::bindMesh(Ptr renderer,Ptr mesh)noexcept{try{return p->bindMesh(renderer,mesh);}catch(...){return mesh;}}
 void Runtime::meshBound(Ptr renderer)noexcept{try{p->meshBound(renderer);}catch(...){}}
-void Runtime::shutdown(){p->synthesis.setEnabled(false);try{p->loading.shutdown();if(p->loadingTypeHandle){p->e.call<void>(abi::unpin,p->loadingTypeHandle);p->loadingTypeHandle=0;p->loadingType=0;}}catch(const std::exception&){}try{p->lodUnpinAll("运行时关闭");}catch(const std::exception&){}try{p->texRestoreEverything("运行时关闭");}catch(const std::exception&){}if(p->releaseAll()){p->pruneRestoreBackups(true);p->sceneClear(p->sceneCacheRoots);p->sceneClear(p->sceneListRoots);p->sceneClear(p->gliderRoots);p->gliderChildren.clear();p->sceneCache.clear();p->sceneList.clear();for(auto& r:p->rigidRefs)p->freeOwned(r.second);p->rigidRefs.clear();p->freeOwned(p->rigidTypeRoots);p->rigidFilterType=0;p->rigidTransformType=0;}}
+void Runtime::shutdown(){p->synthesis.setEnabled(false);try{p->loading.shutdown();if(p->loadingTypeHandle){p->e.call<void>(abi::unpin,p->loadingTypeHandle);p->loadingTypeHandle=0;p->loadingType=0;}}catch(const std::exception&){}try{p->profile.shutdown();}catch(const std::exception&){}try{p->lodUnpinAll("运行时关闭");}catch(const std::exception&){}try{p->texRestoreEverything("运行时关闭");}catch(const std::exception&){}if(p->releaseAll()){p->pruneRestoreBackups(true);p->sceneClear(p->sceneCacheRoots);p->sceneClear(p->sceneListRoots);p->sceneClear(p->gliderRoots);p->gliderChildren.clear();p->sceneCache.clear();p->sceneList.clear();for(auto& r:p->rigidRefs)p->freeOwned(r.second);p->rigidRefs.clear();p->freeOwned(p->rigidTypeRoots);p->rigidFilterType=0;p->rigidTransformType=0;}}
 }
 
 void ms::Runtime::synthesisFrame(Ptr controller,uint64_t now)noexcept{
@@ -3297,4 +3324,5 @@ void ms::Runtime::loadingCanvas(Ptr canvas,Ptr background)noexcept{try{if(!p->ti
 void ms::Runtime::loadingImage(Ptr image,bool shown)noexcept{try{if(!p->inTick&&p->onTickThread("loading-image")){if(p->loading.matches(image)){p->loading.event(image,shown);p->pollLoading();}else if(shown&&p->loading.ready()){auto now=p->texClock();if(now>=p->loadingImageProbeAt){p->loadingImageProbeAt=now+50;p->loadingDiscoverAt=0;p->pollLoading();}}}}catch(const std::exception& ex){p->log("loading-image-error",ex.what());}}
 void ms::Runtime::loadingDestroyed(Ptr canvas)noexcept{try{if(!p->inTick&&p->onTickThread("loading-destroy"))p->loading.destroyed(canvas);}catch(const std::exception& ex){p->log("loading-image-error",ex.what());}}
 
+void ms::Runtime::profileClass(unsigned page,Ptr klass)noexcept{p->profile.observe(page,klass);}
 void ms::Runtime::loadingFrame()noexcept{try{if(p->inTick||!p->onTickThread("loading-render"))return;auto now=clockMs();if(now<p->loadingFrameAt)return;p->loadingFrameAt=now+50;p->pollLoading();}catch(const std::exception& ex){if(p->loadingError!=ex.what()){p->loadingError=ex.what();p->log("loading-image-error",ex.what());}}}
