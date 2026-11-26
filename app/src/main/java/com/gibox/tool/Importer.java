@@ -107,7 +107,7 @@ public final class Importer {
     /** The character the mod most likely belongs to, from the name it was imported under and its INI. */
     public static Characters.Guess guess(File mod, String importedAs, File boneRoot) {
         if(GliderMod.ini(mod)!=null){Characters.Guess g=new Characters.Guess();g.recommended.add(Characters.SCENE_AVATAR);g.evidence="按角色切换的风之翼贴图";return g;}
-        String other=LoadingImages.ini(mod)!=null?"加载图片列表":ProfileImages.ini(mod)!=null?"头像和名片规则":"";
+        String other=LoadingImages.ini(mod)!=null?"加载图片列表":LoadingImages.Profile.ini(mod)!=null?"头像和名片规则":"";
         if(!other.isEmpty()){Characters.Guess g=new Characters.Guess();g.recommended.add(Characters.LOADING_AVATAR);g.evidence=other;return g;}
         try { File ini = ModLibrary.schemes(mod).size() > 1 && !ModLibrary.overrides(mod).containsKey("ini") ? ModConfig.geometryInis(mod).get(0) : ModLibrary.mainIni(mod);
             if(SceneModels.otherHashes(ModelConverter.overrideHashes(ini.getParentFile(),ini))){Characters.Guess g=new Characters.Guess();g.recommended.add(Characters.LOADING_AVATAR);g.evidence="天空门或浪船的网格哈希";return g;}
@@ -159,7 +159,7 @@ public final class Importer {
         if (Characters.isLoading(id)||Characters.isScene(id)) {
             File dest=new File(modelsRoot,name);Result result;
             if(ini.equals(LoadingImages.ini(mod)))result=LoadingImages.install(mod,dest,decoder,log);
-            else if(ini.equals(ProfileImages.ini(mod)))result=ProfileImages.install(mod,ini,dest,decoder,log);
+            else if(ini.equals(LoadingImages.Profile.ini(mod)))result=LoadingImages.Profile.install(mod,ini,dest,decoder,log);
             else {
                 Json.check(Characters.isScene(id)||SceneModels.otherHashes(ModelConverter.overrideHashes(src,ini)),"「其他」支持加载图片、头像和名片、天空门及浪船");
                 result=SceneModels.convert(mod,src,ini,dest,boneRoot.getAbsoluteFile().getParentFile(),decoder,log);

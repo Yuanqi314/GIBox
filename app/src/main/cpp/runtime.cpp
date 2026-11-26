@@ -5,7 +5,6 @@
 #include "camera_fade.hpp"
 #include "model.hpp"
 #include "loading_images.hpp"
-#include "profile_images.hpp"
 #include "logfmt.hpp"
 #include "texture_diag.hpp"
 #include "logic_game.hpp"

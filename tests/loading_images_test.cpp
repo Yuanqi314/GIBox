@@ -1,5 +1,4 @@
 #include "loading_images.hpp"
-#include "profile_images.hpp"
 #include <cassert>
 #include <cstdlib>
 #include <iostream>

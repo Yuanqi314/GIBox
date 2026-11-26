@@ -91,7 +91,7 @@ public final class ModLibrary {
     /** Find the geometry INI even when a PC package includes help/menu and face-texture sidecars. */
     static File modRoot(File dir) { return mainIni(dir).getParentFile(); }
     /** The INI that is converted: the scheme stored in modelswap.txt ("ini"), else the only model INI. */
-    static File otherImageIni(File mod) { File loading=LoadingImages.ini(mod);return loading!=null?loading:ProfileImages.ini(mod); }
+    static File otherImageIni(File mod) { File loading=LoadingImages.ini(mod);return loading!=null?loading:LoadingImages.Profile.ini(mod); }
     static File mainIni(File mod) { File image=otherImageIni(mod);return image!=null?image:ModConfig.find(mod, overrides(mod).get("ini")); }
     static File ini(File mod) { return ModConfig.mainIni(mod); }
     /** Alternative model INIs of a package, as paths relative to the mod folder; one entry or none: nothing to choose. */

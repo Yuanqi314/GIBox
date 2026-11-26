@@ -60,11 +60,11 @@ public final class ModelManifest {
         String d = o.substring(p + 4); return d.matches("[0-9]+") && !d.matches("0+");
     }
 
-    public static boolean exists(File dir) { return new File(dir, "model.json").isFile() || TextureMod.is(dir) || LoadingImages.is(dir) || ProfileImages.is(dir); }
+    public static boolean exists(File dir) { return new File(dir, "model.json").isFile() || TextureMod.is(dir) || LoadingImages.is(dir) || LoadingImages.Profile.is(dir); }
 
     public static ModelManifest read(File dir) throws Exception {
         if (LoadingImages.is(dir)) return LoadingImages.summary(dir);
-        if (ProfileImages.is(dir)) return ProfileImages.summary(dir);
+        if (LoadingImages.Profile.is(dir)) return LoadingImages.Profile.summary(dir);
         if (TextureMod.is(dir)) return readTextureMod(dir);
         Map<String, Object> m = Json.obj(Json.read(new File(dir, "model.json"), 4L << 20), "model.json");
         Json.check("gibox-model".equals(m.get("format")), "不是 GIBox 模型：" + dir.getName());
