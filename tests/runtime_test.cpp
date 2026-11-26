@@ -122,9 +122,10 @@ int32_t texSide(Ptr t,Ptr){assert(t&&load<Ptr>(t+0x10));return 4;}int32_t texFor
 // The game's LOD loaders (MiHoYoLodLoader): found by GameObject.GetComponent("MiHoYoLodLoader"); level byte 0xff while
 // the loader switches by itself, else the level it is held at (IsLodLoaderSelfPaused: != 0xff).
 std::map<Ptr,Ptr> lodOnGo;std::map<Ptr,unsigned> lodHeld,lodNow;unsigned lodLookups=0;
-std::map<std::string,Ptr> namedGameObjects;
-Ptr findGameObject(Ptr name,Ptr){auto it=namedGameObjects.find(f->strings.at(name));return it==namedGameObjects.end()?0:it->second;}
-Ptr byName(Ptr go,Ptr name,Ptr){assert(f->obj.at(go).kind=="gameobject");auto label=f->strings.at(name);if(label=="Transform")return f->transformByGo[go];if(label=="MeshFilter")return f->filterByGo[go];if(label=="MeshRenderer")return f->rendererByGo[go];assert(label=="MiHoYoLodLoader");lodLookups++;auto it=lodOnGo.find(go);return it==lodOnGo.end()?0:it->second;}
+std::map<Ptr,std::vector<Ptr>> transformChildren;
+int childCount(Ptr t,Ptr){return int(transformChildren[t].size());}
+Ptr childAt(Ptr t,int i,Ptr){return transformChildren.at(t).at(size_t(i));}
+Ptr byName(Ptr go,Ptr name,Ptr){assert(f->obj.at(go).kind=="gameobject");auto label=f->strings.at(name);if(label=="Transform")return f->transformByGo[go];if(label=="MeshFilter")return f->filterByGo[go];if(label=="MeshRenderer"||label=="SkinnedMeshRenderer")return f->rendererByGo[go];assert(label=="MiHoYoLodLoader");lodLookups++;auto it=lodOnGo.find(go);return it==lodOnGo.end()?0:it->second;}
 uint32_t gameObjectActive(Ptr go,Ptr){assert(f->obj.at(go).kind=="gameobject");return f->inactiveGos.count(go)?0:1;}
 uint32_t lodSelf(Ptr l,Ptr){assert(f->obj.at(l).kind=="lodloader");return lodHeld[l]!=0xff;}
 void lodPauseAt(Ptr l,int32_t level,Ptr){assert(f->obj.at(l).kind=="lodloader"&&level>=0&&level<=7);lodHeld[l]=unsigned(level);lodNow[l]=unsigned(level);}
@@ -134,7 +135,7 @@ Ptr resolve(abi::Offset o){switch(o){
  case abi::componentByName:return reinterpret_cast<Ptr>(&byName);case abi::lodSelfPaused:return reinterpret_cast<Ptr>(&lodSelf);case abi::lodPause:return reinterpret_cast<Ptr>(&lodPauseAt);
  case abi::lodResume:return reinterpret_cast<Ptr>(&lodResumeFn);case abi::lodCurrent:return reinterpret_cast<Ptr>(&lodLevelNow);
 #define FN(x,y) case abi::x:return reinterpret_cast<Ptr>(&y)
- FN(gameObjectFind,findGameObject);FN(meshInit,meshInit);FN(goActive,gameObjectActive);FN(filterMesh,filterMesh);FN(filterSetMesh,filterSet);FN(getMesh,getMesh);FN(getMaterials,getMaterials);FN(getBones,getBones);FN(getName,getName);FN(getParent,parent);FN(clone,clone);FN(destroy,destroy);FN(pin,pin);FN(unpin,unpin);FN(setMesh,setMesh);FN(setMaterials,setMaterials);FN(arrayNew,newArray);FN(getBindposes,getBinds);FN(getPositions,getPos);FN(getUV,getUV);FN(getTriangles,getIdx);FN(getColors,getColors);FN(getTangents,getTangents);FN(setColors,setChannel);FN(setTangents,setChannel);FN(setUV2,setChannel);FN(setPositions,setPos);FN(setNormals,setAny);FN(setUV,setAny);FN(setTriangles,setAny);FN(setReadable,op);FN(setIndexFormat,op);FN(setSubmeshCount,submeshCount);FN(meshUpload,op);FN(meshFinish,action);FN(meshDynamic,action);FN(setSubmeshTriangles,sub);FN(textureType,texType);FN(objectNew,objectNew);FN(textureInit,texInit);FN(texturePixels,texPixels);FN(textureApply,action);FN(setHideFlags,setHide);FN(getHideFlags,getHide);FN(mainTexture,setMainTexture);FN(newString,newString);FN(nativeAlloc,nativeAlloc);FN(hasProperty,hasProp);FN(setTexture,setTex);FN(classFromType,classFromType);FN(typeObject,typeObject);FN(findObjectsOfType,findObjects);FN(findObjectsNative,findNative);FN(componentsInChildren,children);FN(gameObject,goOf);FN(wrapperFor,wrapperFor);
+ FN(uiChildCount,childCount);FN(uiChild,childAt);FN(meshInit,meshInit);FN(goActive,gameObjectActive);FN(filterMesh,filterMesh);FN(filterSetMesh,filterSet);FN(getMesh,getMesh);FN(getMaterials,getMaterials);FN(getBones,getBones);FN(getName,getName);FN(getParent,parent);FN(clone,clone);FN(destroy,destroy);FN(pin,pin);FN(unpin,unpin);FN(setMesh,setMesh);FN(setMaterials,setMaterials);FN(arrayNew,newArray);FN(getBindposes,getBinds);FN(getPositions,getPos);FN(getUV,getUV);FN(getTriangles,getIdx);FN(getColors,getColors);FN(getTangents,getTangents);FN(setColors,setChannel);FN(setTangents,setChannel);FN(setUV2,setChannel);FN(setPositions,setPos);FN(setNormals,setAny);FN(setUV,setAny);FN(setTriangles,setAny);FN(setReadable,op);FN(setIndexFormat,op);FN(setSubmeshCount,submeshCount);FN(meshUpload,op);FN(meshFinish,action);FN(meshDynamic,action);FN(setSubmeshTriangles,sub);FN(textureType,texType);FN(objectNew,objectNew);FN(textureInit,texInit);FN(texturePixels,texPixels);FN(textureApply,action);FN(setHideFlags,setHide);FN(getHideFlags,getHide);FN(mainTexture,setMainTexture);FN(newString,newString);FN(nativeAlloc,nativeAlloc);FN(hasProperty,hasProp);FN(setTexture,setTex);FN(classFromType,classFromType);FN(typeObject,typeObject);FN(findObjectsOfType,findObjects);FN(findObjectsNative,findNative);FN(componentsInChildren,children);FN(gameObject,goOf);FN(wrapperFor,wrapperFor);
  FN(meshSubmeshes,meshSubs);FN(meshVertices,meshVerts);FN(meshReadable,meshReadable);FN(meshIndexStart,meshStart);FN(meshIndexCount,meshCount);
  FN(textureWidth,texSide);FN(textureHeight,texSide);FN(textureFormat,texFormat);FN(textureMips,texMips);
  FN(frameCount,engineFrame);FN(getShader,matShader);FN(getTexture,matTexture);FN(getTextureIds,matTextureIds);FN(propertyToId,propertyToId);
@@ -1042,18 +1043,32 @@ int main(int argc,char** argv){Fake fake;f=&fake;abi::allocVerified=true;   // t
    write(sp+"/control.json",R"J({"enabled":true,"selected":[]})J");run(1000);assert(f->obj[sword.first].mesh==original&&f->obj[copied.first].mesh==original);
    assert(f->meshDataReads[original]==0);rt.shutdown();assert(f->handles.empty());}
   f->unreadableMeshes.erase(original);f->rigidFilters.clear();f->rigidTransforms.clear();f->world(0);f->scene={};}
- // The login renderer is discoverable without a playable avatar or a skinned MeshFilter sample.
+ // The door is skinned and is found below MonoLoginScene.doorNode with no active avatar.
  {std::string mediaR=root+"/mediaLoginDoor",sp=mediaR+"/"+pkg+"/GIBox",name="LoginScene_Door01_Vo";
-  auto target=fixture::target(name,2);fixture::replaceIn(target,"\"bones\":1","\"bones\":0");
-  Spec spec;spec.id=1;spec.withTarget(target);spec.edit=[target](std::string& json){fixture::replaceIn(json,"\"id\":1,\"names\":[]","\"id\":1,\"names\":[],\"targets\":[{\"target\":"+target+",\"owners\":[\"@renderer:loginscene_door01_vo\"]}]");};
-  writeModel(sp+"/models/Door",spec);Ptr original=f->mesh(name,2);store<uint64_t>(f->obj[original].shared+0xe0,0);
-  Ptr filter=f->object("filter",name),renderer=f->object("rigidrenderer",name),go=f->object("gameobject",name);
-  f->filterByGo[go]=filter;f->rendererByGo[go]=renderer;namedGameObjects[name]=go;f->obj[filter].mesh=original;
-  f->obj[renderer].materials=f->obj[f->renderer(f->mesh())].materials;
-  write(sp+"/control.json",R"J({"enabled":true,"selected":["Door"]})J");Runtime rt(e,pkg,root+"/privateLoginDoor",mediaR,false);
-  for(uint64_t t=8910000;t<8914000;t+=100)rt.tick(t);
-  assert(f->obj[filter].mesh!=original&&f->boneReads[renderer]==0);
-  rt.shutdown();assert(f->obj[filter].mesh==original&&f->handles.empty());namedGameObjects.clear();}
+  const std::string target=R"J({"renderer":"loginscene_door01_vo","mesh":"LoginScene_Door01_Vo","vertices":3468,"submeshes":2,"bones":13})J";
+  Bytes binds;for(int i=0;i<13;i++){auto b=fixture::floats({1,0,0,0,0,1,0,0,0,0,1,0,float(i),0,0,1});binds.insert(binds.end(),b.begin(),b.end());}
+  unsigned crc=crc32(binds.data(),binds.size());
+  Spec spec;spec.character(1).noSkeleton().withTarget(target);
+  spec.edit=[target,crc](std::string& json){fixture::replaceIn(json,"\"id\":1,\"names\":[]","\"id\":1,\"names\":[],\"targets\":[{\"target\":"+target+",\"owners\":[\"@renderer:loginscene_door01_vo\"],\"bindposeCrc32\":"+std::to_string(crc)+"}]");};
+  writeModel(sp+"/models/Door",spec);
+  Ptr original=f->mesh(name,3468);auto& m=f->obj[original];store<uint32_t>(m.shared+0xc0,2);store<uint64_t>(m.shared+0xe0,13);f->readableMeshes.insert(original);
+  Ptr r=f->renderer(original,"A","VisibleDoor(Clone)"),other=f->renderer(original,"A","SameMeshElsewhere");
+  std::vector<Ptr> bones;for(int i=0;i<13;i++)bones.push_back(f->object("bone","DoorJoint"+std::to_string(i)));
+  f->obj[r].bones=f->array(8,bones.size(),bones.data());f->obj[other].bones=f->obj[r].bones;
+  Ptr node=f->object("transform","doorNode"),child=f->object("transform","VisibleDoor(Clone)"),go=f->object("gameobject","VisibleDoor(Clone)");
+  f->goOfRenderer[child]=go;f->goOfRenderer[r]=go;f->rendererByGo[go]=r;transformChildren[node]={child};
+  Ptr scene=f->alloc(0x80);store<Ptr>(scene+0x10,f->alloc(8));store<Ptr>(scene+abi::loginDoorNode,node);
+  auto saved=load<uint32_t>(f->manager+kCurrent);store<uint32_t>(f->manager+kCurrent,0);f->scene={other};
+  write(sp+"/control.json",R"J({"enabled":true,"selected":["Door"]})J");
+  Runtime rt(e,pkg,root+"/privateLoginDoor",mediaR,false);
+  auto bad=binds;bad[12]^=1;m.arrays[abi::getBindposes]=f->array(64,13,bad.data());
+  for(uint64_t t=8910000;t<8911000;t+=100)rt.loginFrame(scene,t);
+  assert(meshOf(r)==original&&text(sp+"/GIBox Log.txt").find("绑定矩阵校验不符")!=std::string::npos);
+  m.arrays[abi::getBindposes]=f->array(64,13,binds.data());
+  for(uint64_t t=8911000;t<8914000;t+=100)rt.loginFrame(scene,t);
+  assert(meshOf(r)!=original&&meshOf(other)==original&&f->boneReads[r]>0);
+  rt.tick(8916000);assert(meshOf(r)==original);
+  rt.shutdown();assert(f->handles.empty());transformChildren.clear();f->scene.clear();store<uint32_t>(f->manager+kCurrent,saved);}
  // 50. Merged draws: neighbours with the same material row share a submesh, their index ranges joined in draw order.
  //     A draw hidden by the variant between two of them is not drawn, ranges that continue each other become one, a
  //     neighbour with another material keeps its own submesh and slot, and switching back reads the model's indices

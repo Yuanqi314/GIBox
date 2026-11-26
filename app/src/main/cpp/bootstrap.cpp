@@ -73,6 +73,11 @@ using LoadingFrameFn=void(*)(uintptr_t);LoadingFrameFn loadingRenderOriginal=nul
 void onLoadingRender(uintptr_t method){if(auto* p=published.load(std::memory_order_acquire))p->loadingFrame();loadingRenderOriginal(method);}
 UiLifeFn loadingStartOriginal=nullptr,loadingDestroyOriginal=nullptr,imageEnableOriginal=nullptr,imageDisableOriginal=nullptr;
 UiLifeFn profileOriginal[2]{};
+UiLifeFn loginSceneOriginal=nullptr;
+void onLoginSceneUpdate(uintptr_t scene,uintptr_t method){
+ loginSceneOriginal(scene,method);
+ if(auto* p=published.load(std::memory_order_acquire))p->loginFrame(scene,now());
+}
 template<unsigned Page> void onProfileInit(uintptr_t self,uintptr_t method){
  profileOriginal[Page](self,method);
  if(self)if(auto* p=published.load(std::memory_order_acquire))p->profileClass(Page,ms::load<uintptr_t>(self));
@@ -182,6 +187,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv*
    if(!codeMatches(image.base,check)||DobbyHook(reinterpret_cast<void*>(image.base+ms::abi::at(check.rva)),reinterpret_cast<dobby_dummy_func_t>(hooks[i]),reinterpret_cast<dobby_dummy_func_t*>(&profileOriginal[i]))!=0||!profileOriginal[i])
     bootLog(pkg,"profile-image-hook-error","个人资料页入口 "+std::to_string(i+1)+" 挂钩失败");
   }}
+ if(!codeMatches(image.base,ms::abi::loginSceneCheck)||DobbyHook(reinterpret_cast<void*>(image.base+ms::abi::at(ms::abi::loginSceneUpdate)),reinterpret_cast<dobby_dummy_func_t>(onLoginSceneUpdate),reinterpret_cast<dobby_dummy_func_t*>(&loginSceneOriginal))!=0||!loginSceneOriginal)
+  bootLog(pkg,"login-door-hook-error","登录场景入口挂钩失败");
+ else bootLog(pkg,"login-door-hook","已安装登录场景更新入口");
  // Replacement at the hand-off; without it the scan still replaces, just not before activation.
  {std::string bad;for(auto& c:ms::abi::handoffChecks)if(!codeMatches(image.base,c)){char b[24];std::snprintf(b,sizeof(b),"0x%llx ",static_cast<unsigned long long>(ms::abi::at(c.rva)));bad+=b;}
   if(!bad.empty())bootLog(pkg,"spawn-hook-disabled","代码不符："+bad);

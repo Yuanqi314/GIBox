@@ -477,10 +477,14 @@ public final class ModelConverter {
         List<Bones> out=new ArrayList<>();Set<String> seen=new HashSet<>();
         for(Object r:Json.arr(j.get("renderers"),"renderers",1,64)){
             Map<String,Object> x=Json.obj(r,"renderer");String n=safe(Json.str(x.get("name"),"renderer.name",64));check(seen.add(lower(n)),"重复的渲染器："+n);
+            Map<String,Object> target=fingerprint(x.get("target"));
+            if(Boolean.TRUE.equals(x.get("indexOrder"))){
+                check(sid==Characters.SCENE&&SceneModels.loginDoor(target),"仅已核实的天空门可按原骨骼索引转换");
+                Bones b=new Bones(n);b.target=target;b.count=((Number)target.get("bones")).intValue();out.add(b);continue;
+            }
             List<String> names=new ArrayList<>();for(Object b:Json.arr(x.get("bones"),n+".bones",1,512)){String bn=Json.str(b,n+".bones",256);check(bn.indexOf('\t')<0&&bn.indexOf('\n')<0&&bn.indexOf('\r')<0,"骨骼名无效："+n);names.add(bn);}
             List<Integer> parents=new ArrayList<>();for(Object p:Json.arr(x.get("parents"),n+".parents",names.size(),names.size()))parents.add((int)Json.integer(p,n+".parents",-1,names.size()-1));
             ByteBuffer binds=buf(new byte[64*names.size()]);for(Object v:Json.arr(x.get("bindposes"),n+".bindposes",16*names.size(),16*names.size()))binds.putFloat(Json.finite(v,n+".bindposes"));
-            Map<String,Object> target=fingerprint(x.get("target"));
             check(target==null||((Number)target.get("bones")).intValue()==0||!ModelManifest.lowerLod((String)target.get("mesh")),"骨骼记录里 "+n+" 是低精度模型 "+(target==null?"":target.get("mesh"))+"（角色刚加载时记下的），骨骼比完整模型少。让角色在大世界出场一次（骨骼库会自动更新）或靠近角色重新导出后再转换");
             Bones b=new Bones(n,names,binds.array(),target);b.parents=parents;out.add(b);
         }
@@ -1359,7 +1363,7 @@ public final class ModelConverter {
                 Variation none=new Variation(ini,new ArrayList<>(),new ArrayList<>());int[] only={0};for(Group g:b.groups.values()){Map<Integer,ComboRows> c=new HashMap<>();if(g.combos.containsKey(sigOf[0]))c.put(0,g.combos.get(sigOf[0]));g.combos.clear();g.combos.putAll(c);}
                 for(Group g:b.groups.values())g.draws=g.combos.isEmpty()?null:drawTable(g,none,only,1,shown);}
             for(Group g:b.groups.values()){int trimmed=g.vertices.trimmed;if(trimmed>0)log.append(g.bones.name).append("：已清理 ").append(trimmed).append(" 个顶点中占比不超过 ").append(WEIGHT_EPSILON).append(" 的微小权重，并重新归一化\n");int fixed=fixUnweighted(g);if(fixed>0)log.append(g.bones.name).append("：").append(fixed).append(" 个顶点没有权重（MOD 本身的问题，PC 上这些点会被拉到原点），已沿用最近顶点的权重\n");}
-            for(Group g:b.groups.values())log.append(g.bones.name).append(": ").append(g.vertices.size()).append(" 顶点，").append(g.indices.size()).append(" 索引").append(g.bones.synthetic?"（骨骼取自游戏内角色）":g.bones.target==null?"（骨骼库没有网格特征，首次在场景中出现时识别）":"").append('\n');
+            for(Group g:b.groups.values())log.append(g.bones.name).append(": ").append(g.vertices.size()).append(" 顶点，").append(g.indices.size()).append(" 索引").append(g.bones.synthetic?(SceneModels.loginDoor(g.bones.target)?"（使用登录场景天空门的原骨骼索引）":"（骨骼取自游戏内角色）"):g.bones.target==null?"（骨骼库没有网格特征，首次在场景中出现时识别）":"").append('\n');
             for(String x:ini.external){if(nnFix(x))log.append("已按 NNFix 识别贴图：ps-t0 为颜色图，ps-t1 为材质遮罩，不使用法线图\n");else if(gimiSetTextures(x))log.append("已按 GIMI 命名空间识别贴图：Resource\\GIMI\\Diffuse / LightMap / NormalMap 按名称对应颜色、光照和法线贴图（").append(x).append(" 由 GIMI 提供）\n");else if(!texFxComponent(x))log.append("已忽略外部 CommandList：").append(x).append('\n');}ini.external.clear();
             for(String note:ini.compatibility)log.append(note).append('\n');
             // Every assignment, not only the kept ones: a value that only changes the face draws the same geometry.

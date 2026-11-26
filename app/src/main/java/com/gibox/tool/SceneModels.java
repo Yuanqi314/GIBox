@@ -22,6 +22,9 @@ final class SceneModels {
         }
     }
     static boolean otherHashes(Collection<String> hashes) { return hashes.stream().anyMatch(h -> !otherMesh(h).isEmpty()); }
+    static boolean loginDoor(Map<String,Object> target) {
+        return target!=null&&"LoginScene_Door01_Vo".equals(target.get("mesh"))&&target.get("bones") instanceof Number&&((Number)target.get("bones")).intValue()==13;
+    }
     static boolean otherTargets(List<Object> targets) {
         return targets.stream().allMatch(row -> {
             Object mesh=Json.obj(Json.obj(row,"target row").get("target"),"target").get("mesh");
@@ -39,7 +42,7 @@ final class SceneModels {
             Map<String,Object> map=Json.obj(Json.read(file,64L<<20),filename);
             for(Object raw:Json.arr(map.get("meshes"),"meshes",0,262144)) {
                 Map<String,Object> m=Json.obj(raw,"mesh");String h=String.valueOf(m.get("ib")).toLowerCase(Locale.ROOT);
-                if(hs.contains(h))found.put(h,m);
+                if(hs.contains(h)&&(!h.equals("708a8fef")||!loginDoor(found.get(h))))found.put(h,m);
             }
         }
         Json.check(!found.isEmpty(),"规则的索引缓冲 hash 不在内置表中，请先采集目标网格或补充对应游戏版本的数据");
@@ -56,6 +59,15 @@ final class SceneModels {
         for(Map.Entry<String,Map<String,Object>> entry:found.entrySet()) {
             Map<String,Object> hash=entry.getValue();Map<String,Object> chosen=null;Set<String> allowed=new TreeSet<>();
             List<Object> subs=Json.arr(hash.get("submeshes"),"submeshes",1,64);
+            if(entry.getKey().equals("708a8fef")&&loginDoor(hash)) {
+                long crc=Json.integer(hash.get("bindposeCrc32"),"天空门绑定矩阵 CRC32",1,0xffffffffL);
+                String alias="Scene"+out.renderers.size();
+                Map<String,Object> target=Json.of("renderer",hash.get("renderer"),"mesh",hash.get("mesh"),"vertices",hash.get("vertices"),"submeshes",subs.size(),"bones",13);
+                out.renderers.add(Json.of("name",alias,"target",target,"indexOrder",true));
+                out.targets.add(Json.of("target",target,"owners",Arrays.asList("@renderer:"+hash.get("renderer")),"bindposeCrc32",crc));
+                out.hashes.put(entry.getKey(),alias);
+                continue;
+            }
             for(Map.Entry<Integer,Map<String,Object>> candidate:rigs.entrySet()) {
                 Map<String,Object> r=candidate.getValue();if(!shape(r).equals(shape(hash))||!owners.containsKey(candidate.getKey()))continue;
                 if(r.get("submeshes") instanceof Number&&((Number)r.get("submeshes")).intValue()!=subs.size())continue;
@@ -63,7 +75,7 @@ final class SceneModels {
                 chosen=r;allowed.addAll(owners.get(candidate.getKey()));
             }
             if(chosen==null) {
-                boolean other=otherMesh(entry.getKey()).equals(hash.get("mesh"))&&hash.get("bones") instanceof Number&&((Number)hash.get("bones")).intValue()==0;
+                boolean other=!entry.getKey().equals("708a8fef")&&otherMesh(entry.getKey()).equals(hash.get("mesh"))&&hash.get("bones") instanceof Number&&((Number)hash.get("bones")).intValue()==0;
                 if(!other&&!weapon(String.valueOf(hash.get("mesh"))))continue;
                 String alias="Scene"+out.renderers.size();
                 Map<String,Object> target=Json.of("renderer",hash.get("renderer"),"mesh",hash.get("mesh"),"vertices",hash.get("vertices"),"submeshes",subs.size(),"bones",0);
@@ -100,7 +112,7 @@ final class SceneModels {
             File folder=new File(shared,"skeletons-scene");Json.check(folder.isDirectory()||folder.mkdirs(),"无法创建场景骨骼缓存");
             library=File.createTempFile("scene-",".json",folder);
             Files.write(library.toPath(),Json.write(Json.of("format","gibox-skeleton","version",1,"id",Characters.SCENE,"root","Scene","renderers",s.renderers)).getBytes(StandardCharsets.UTF_8));
-            log.append("场景网格：按 ").append(s.hashes.size()).append(" 个索引缓冲 hash 匹配目标 ").append(s.renderers.size()).append(" 个网格（静态网格无需骨骼）\n");
+            log.append("场景网格：按 ").append(s.hashes.size()).append(" 个索引缓冲 hash 匹配目标 ").append(s.renderers.size()).append(" 个网格\n");
         }
         try{Importer.Result result=new Importer.Result();result.id=other?Characters.LOADING:Characters.SCENE;result.library=library!=null;
             result.model=ModelConverter.convert(src,library,dest,Characters.SCENE,opt,decoder,log);

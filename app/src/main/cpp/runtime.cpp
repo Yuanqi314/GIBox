@@ -1650,6 +1650,57 @@ struct Runtime::Impl {
  void sceneClear(SceneRoots& roots){freeOwned(roots.roots);roots.arrays.clear();}
  struct RigidRef:Owned {Ptr native=0,filter=0,filterNative=0;};std::map<Ptr,RigidRef> rigidRefs;Owned rigidTypeRoots;
  Ptr rigidFilterType=0,rigidTransformType=0;uint64_t rigidScanAt=0;size_t rigidSeedOffset=0,rigidScanOffset=0;
+ Owned loginRootPin,loginRendererPins;
+ Ptr loginRoot=0,loginRootNative=0;uint64_t loginAt=0;
+ struct LoginRenderer {Ptr native;uint32_t bindposeCrc;};
+ std::map<Ptr,LoginRenderer> loginRenderers;std::string loginNote;
+ void clearLoginDoor(){freeOwned(loginRendererPins);loginRenderers.clear();freeOwned(loginRootPin);loginRoot=loginRootNative=0;}
+ void observeLoginDoor(Ptr root,uint64_t now){
+  loginAt=now;Ptr native=alive(root)?load<Ptr>(root+0x10):0;
+  if(!native)root=0;
+  if(root==loginRoot&&native==loginRootNative)return;
+  clearLoginDoor();if(native){pin(loginRootPin,root);loginRoot=root;loginRootNative=native;}discoverAt=0;
+ }
+ void reportLoginDoor(const std::string& note){if(note!=loginNote){loginNote=note;log("login-door",note);}}
+ void discoverLoginDoor(std::vector<Ptr>& out){
+  std::set<uint32_t> checks;
+  for(auto* m:wantedNow)for(const auto& t:m->sceneTargets)if(t.bindposeCrc)checks.insert(t.bindposeCrc);
+  if(checks.empty()||!alive(loginRoot)||load<Ptr>(loginRoot+0x10)!=loginRootNative){
+   freeOwned(loginRendererPins);loginRenderers.clear();
+   if(!checks.empty())reportLoginDoor("等待登录场景的门节点");
+   return;
+  }
+  Owned tmp,next;std::map<Ptr,LoginRenderer> found;std::string detail;
+  try{
+   Ptr component=managedName("SkinnedMeshRenderer");pin(tmp,component);
+   constexpr size_t limit=128;std::vector<Ptr> nodes{loginRoot};
+   for(size_t i=0;i<nodes.size();i++){
+    Ptr node=nodes[i];if(!alive(node))continue;
+    auto count=e.call<int>(abi::uiChildCount,node,Ptr(0));
+    for(int j=0;j<count&&j<int(limit)&&nodes.size()<limit;j++){Ptr child=e.call<Ptr>(abi::uiChild,node,j,Ptr(0));if(alive(child)){pin(tmp,child);nodes.push_back(child);}}
+    Ptr go=e.get(abi::gameObject,node);if(!alive(go)||!(e.call<uint32_t>(abi::goActive,go,Ptr(0))&1))continue;
+    Ptr r=e.call<Ptr>(abi::componentByName,go,component,Ptr(0));if(!alive(r))continue;
+    auto a=attachments.find(r);Ptr native=load<Ptr>(r+0x10);
+    Ptr mesh=a!=attachments.end()&&a->second->native==native?a->second->original:e.get(abi::getMesh,r);
+    if(!alive(mesh))continue;
+    auto fp=fingerprint(mesh);if(!loginDoorMesh(fp)){
+     if(detail.empty())detail="可见网格 "+describe(fp);
+     continue;
+    }
+    Ptr binds=e.get(abi::getBindposes,mesh);if(!binds){detail="门网格已找到，等待绑定矩阵";continue;}
+    pin(tmp,binds);auto bytes=arrayBytes(binds,64,13);
+    uint32_t crc=crc32(bytes.data(),bytes.size());
+    if(bytes.size()!=64*13||!checks.count(crc)){detail="门网格已找到，绑定矩阵校验不符（CRC32 "+hex(crc)+"）";continue;}
+    if(!skinnedRendererClass)skinnedRendererClass=load<Ptr>(r);
+    if(!skinnedRenderer(r)){detail="门网格已找到，蒙皮渲染器类型不符";continue;}
+    pin(next,r);found[r]={native,crc};
+    if(std::find(out.begin(),out.end(),r)==out.end())out.push_back(r);
+   }
+  }catch(...){freeOwned(next);freeOwned(tmp);throw;}
+  freeOwned(tmp);freeOwned(loginRendererPins);loginRendererPins=std::move(next);loginRenderers=std::move(found);
+  if(loginRenderers.empty())reportLoginDoor("门节点已就绪，等待匹配的蒙皮网格"+(detail.empty()?std::string():"："+detail));
+  else reportLoginDoor("已匹配 "+std::to_string(loginRenderers.size())+" 个天空门渲染器，13 根骨骼的绑定矩阵已核对");
+ }
  bool rigidRenderer(Ptr r)const{return rigidRefs.count(r)!=0;}
  Ptr meshGet(Ptr r){auto it=rigidRefs.find(r);if(it==rigidRefs.end())return skinnedRenderer(r)?e.get(abi::getMesh,r):0;const auto& v=it->second;
   if(!alive(r)||load<Ptr>(r+0x10)!=v.native||!alive(v.filter)||load<Ptr>(v.filter+0x10)!=v.filterNative){return 0;}return e.get(abi::filterMesh,v.filter);}
@@ -1670,15 +1721,6 @@ struct Runtime::Impl {
    if(!valid&&!attachments.count(it->first)){freeOwned(it->second);it=rigidRefs.erase(it);}else ++it;}
   if(now<rigidScanAt){for(const auto& r:rigidRefs)if(alive(r.first))out.push_back(r.first);return;}rigidScanAt=now+2000;
   Owned tmp;try{Ptr filterName=managedName("MeshFilter"),rendererName0=managedName("MeshRenderer");pin(tmp,filterName);pin(tmp,rendererName0);
-   // The login door appears before any avatar can supply a sample for the MeshFilter Type.
-   if(abi::at(abi::gameObjectFind)<abi::notFound){std::set<std::string> looked;
-    for(auto* m:wantedNow)for(const auto& target:m->sceneTargets){const auto& fp=target.target;if(fp.mesh!="LoginScene_Door01_Vo"||fp.bones)continue;
-     for(const auto& label:{fp.mesh,fp.renderer})if(looked.insert(label).second){
-      Ptr name=managedName(label.c_str());pin(tmp,name);Ptr go=e.call<Ptr>(abi::gameObjectFind,name,Ptr(0));if(!alive(go))continue;
-      Ptr filter=e.call<Ptr>(abi::componentByName,go,filterName,Ptr(0));if(!alive(filter))continue;
-      Ptr mesh=e.get(abi::filterMesh,filter);if(alive(mesh)&&matches(fp,fingerprint(mesh)))rememberRigid(filter,go,rendererName0);
-     }
-    }}
    // Bootstrap Type from a real component in a bounded slice of the avatar hierarchy, then enumerate MeshFilters.
    if(!rigidFilterType&&byvalOffset){Ptr root=0;for(Ptr r:out)if(alive(r)&&!rigidRenderer(r)){root=avatarRoot(r);if(root)break;}
     if(root){if(!rigidTransformType)rigidTransformType=rigidType(root);Ptr up=e.get(abi::getParent,root);if(alive(up))root=up;
@@ -1926,7 +1968,10 @@ struct Runtime::Impl {
   if(want.empty()){return true;}
   auto a=avatarOf(r);if(have)*have=a;return a.empty()||a==want;}
  bool sceneFits(const std::vector<SceneTarget>& targets,Ptr r,const Fingerprint& fp){if(targets.empty()){return false;}
-  std::set<std::string> allowed;for(const auto& t:targets)if(matches(t.target,fp))allowed.insert(t.owners.begin(),t.owners.end());
+  std::set<std::string> allowed;for(const auto& t:targets)if(matches(t.target,fp)){
+   if(t.bindposeCrc){auto at=loginRenderers.find(r);if(at!=loginRenderers.end()&&alive(r)&&load<Ptr>(r+0x10)==at->second.native&&at->second.bindposeCrc==t.bindposeCrc)return true;}
+   else allowed.insert(t.owners.begin(),t.owners.end());
+  }
   if(allowed.empty()){return false;}for(const auto& owner:allowed){if(owner.rfind("@renderer:",0)==0&&meshName(owner.substr(10))==meshName(name(r))){return true;}}if(rigidRenderer(r)){return false;}
   Owned tmp;bool found=false;try{Ptr array=bonesGet(r);if(array){pin(tmp,array);auto bones=pointers(array,512);Ptr t=bones.empty()?0:bones[0];
    for(unsigned i=0;i<32&&alive(t);i++){if(allowed.count(meshName(name(t)))){found=true;break;}t=e.get(abi::getParent,t);}}}
@@ -1986,6 +2031,7 @@ struct Runtime::Impl {
   return std::nullopt;}
  bool npcTemplate(const ModelInfo& m,size_t index,const Seen& sn){if(m.id==1&&!sceneFits(m.sceneTargets,sn.renderer,sn.fp)){return false;}
   if(rigidRenderer(sn.renderer)){return m.id==1&&sn.fp.bones==0;}
+  if(m.id==1&&loginRenderers.count(sn.renderer)&&std::any_of(m.sceneTargets.begin(),m.sceneTargets.end(),[&](const SceneTarget& t){return t.bindposeCrc&&matches(t.target,sn.fp);}))return true;
   if(m.id!=1&&npcSource(sn.renderer).empty())return true;
   std::shared_ptr<ModelFile> data;{std::lock_guard<std::mutex> lock(sm);auto it=loaded.find(m.path);if(it!=loaded.end()&&it->second.generation==m.generation)data=it->second.data;}
   if(!data){auto* set=findSet(m.path,m.generation);if(set)data=set->data;}
@@ -2574,6 +2620,9 @@ struct Runtime::Impl {
  bool reclaim(Attachment& a,Ptr mesh){auto& bp=partOf(a);if(!alive(mesh)||!alive(a.renderer)||load<Ptr>(a.renderer+0x10)!=a.native)return false;
   if(animationMesh(*a.set,a.part,mesh)){meshSet(a.renderer,bp.mesh);return true;}
   auto fp=fingerprint(mesh);if(meshName(fp.mesh)!=meshName(bp.target.mesh))return false;
+  if(a.set->id==1&&loginDoorMesh(bp.target)){
+   bool ordered=false;if(!sceneFits(a.set->sceneTargets,a.renderer,fp)||!npcPalette(a.renderer,mesh,bp,ordered)||!ordered)return false;
+  }
   Owned tmp;bool ok=false;
   try{bool rigid=rigidRenderer(a.renderer);Ptr ba=rigid?0:bonesGet(a.renderer);if(ba)pin(tmp,ba);auto bones=ba?pointers(ba,512):std::vector<Ptr>{};bool same=rigid?(matches(bp.target,fp)&&sceneFits(a.set->sceneTargets,a.renderer,fp)):bones.size()==bp.bones.size();for(size_t i=0;same&&i<bones.size();i++)same=alive(bones[i])&&name(bones[i])==bp.bones[i];
    if(same){
@@ -2680,7 +2729,7 @@ struct Runtime::Impl {
    log("adopted",s.name+"/"+bp.name+" → "+name(r));attachments[r]=std::move(a);beginMaterialTrace(*attachments.at(r),now);s.used=now;}
  void discover(const std::vector<Set*>& live,uint64_t now){materialWait.clear();
   std::map<Ptr,std::pair<Set*,size_t>> ours;for(auto& s:sets)for(size_t i=0;i<s->parts.size();i++){ours[s->parts[i].mesh]={s.get(),i};if(i<s->animation.owned.size())for(Ptr mesh:s->animation.owned[i])ours[mesh]={s.get(),i};}
-  auto list=allRenderers(now);rigidDiscover(list,now);
+  auto list=allRenderers(now);discoverLoginDoor(list);rigidDiscover(list,now);
   for(auto it=attachments.begin();it!=attachments.end();){auto& a=*it->second;bool keep=alive(a.renderer)&&load<Ptr>(a.renderer+0x10)==a.native;
    if(keep){Ptr m=meshGet(a.renderer);if(m&&m!=partOf(a).mesh&&!reclaim(a,m)){keep=false;log("attachment-dropped","游戏在 "+rendererName(a.renderer)+" 上放了另一个网格"+(alive(m)?"："+name(m):""));try{restoreMaterials(a);}catch(const std::exception& ex){restoreFailure(a,ex.what());keep=true;}}}
    bool npcDrop=keep&&((a.set->id==1&&!sceneFits(a.set->sceneTargets,a.renderer,fingerprint(a.original)))||(!npcSource(a.renderer).empty()&&!modelFits(a.set->id,a.set->outfit,a.renderer)));if(npcDrop)keep=false;
@@ -3128,7 +3177,11 @@ struct Runtime::Impl {
   std::string scan="当前角色 "+(ch.entity?std::to_string(ch.config):std::string("无"))+"，其渲染器 "+std::to_string(scanWorld)+" 个，全场景 "
    +(findOff?std::string("扫描不可用"):scanAll<0?std::string("未扫描"):std::to_string(scanAll)+" 个")+(scanSkipped?"，跳过挂载失败过的 "+std::to_string(scanSkipped)+" 个":"");
   std::string details;
-  if(!ch.entity&&!rendererTypeObject){w.reason="还没认出当前操控的角色：进入大世界后才开始扫描";w.plain=true;}
+  if(std::any_of(m.sceneTargets.begin(),m.sceneTargets.end(),[](const SceneTarget& t){return t.target.mesh=="LoginScene_Door01_Vo";})){
+   w.reason=std::any_of(m.sceneTargets.begin(),m.sceneTargets.end(),[](const SceneTarget& t){return t.bindposeCrc!=0;})?loginNote:"请在新版 GIBox 中重新转换天空门 MOD";
+   if(w.reason.empty())w.reason="等待登录场景的门节点";
+   w.plain=true;
+  }else if(!ch.entity&&!rendererTypeObject){w.reason="还没认出当前操控的角色：进入大世界后才开始扫描";w.plain=true;}
   else for(size_t i=0;i<targets.size()&&i<m.parts.size();i++){auto& t=targets[i];bool present=false;std::vector<std::string> sameMesh,sameRenderer;std::string diff;
    for(auto& s:seen){if(!seenLive(s))continue;if(matches(t,s.fp)){present=true;break;}auto rn=rendererName(s.renderer);
     if(!t.mesh.empty()&&meshName(s.fp.mesh)==meshName(t.mesh)){if(sameMesh.size()<4)sameMesh.push_back(rn+" / "+describe(s.fp));if(diff.empty())diff=differences(t,s.fp);}
@@ -3211,6 +3264,7 @@ struct Runtime::Impl {
  void tick(uint64_t now){if(inTick)return;bindingNow=now;if(now<next){guard(now);animationTick(now);return;}inTick=true;next=now+100;tickPhase="开始";
   try{
    if(!tickTid.load())tickTid.store(threadId());
+   if(loginRoot&&now>loginAt+1000)clearLoginDoor();
    // consume() may replace `models`: hand-off pointers into it are dropped first and set again below.
    seen.erase(std::remove_if(seen.begin(),seen.end(),[&](const Seen& sn){return !seenLive(sn);}),seen.end());
    tickPhase="读取文件与当前角色";wantedNow.clear();bindingTargets.clear();bindingReady=false;if(!worker.background()){workerTick(now);}consume();synthesis.collect();ch=current();bindingStats();tickPhase="骨骼库与预览";
@@ -3309,7 +3363,7 @@ void Runtime::spawned(Ptr go)noexcept{try{p->spawned(go);}catch(...){}}
 void Runtime::spawnedAfter()noexcept{try{p->spawnedAfter();}catch(...){}}
 Ptr Runtime::bindMesh(Ptr renderer,Ptr mesh)noexcept{try{return p->bindMesh(renderer,mesh);}catch(...){return mesh;}}
 void Runtime::meshBound(Ptr renderer)noexcept{try{p->meshBound(renderer);}catch(...){}}
-void Runtime::shutdown(){p->synthesis.setEnabled(false);try{p->loading.shutdown();if(p->loadingTypeHandle){p->e.call<void>(abi::unpin,p->loadingTypeHandle);p->loadingTypeHandle=0;p->loadingType=0;}}catch(const std::exception&){}try{p->profile.shutdown();}catch(const std::exception&){}try{p->lodUnpinAll("运行时关闭");}catch(const std::exception&){}try{p->texRestoreEverything("运行时关闭");}catch(const std::exception&){}if(p->releaseAll()){p->pruneRestoreBackups(true);p->sceneClear(p->sceneCacheRoots);p->sceneClear(p->sceneListRoots);p->sceneClear(p->gliderRoots);p->gliderChildren.clear();p->sceneCache.clear();p->sceneList.clear();for(auto& r:p->rigidRefs)p->freeOwned(r.second);p->rigidRefs.clear();p->freeOwned(p->rigidTypeRoots);p->rigidFilterType=0;p->rigidTransformType=0;}}
+void Runtime::shutdown(){p->synthesis.setEnabled(false);p->clearLoginDoor();try{p->loading.shutdown();if(p->loadingTypeHandle){p->e.call<void>(abi::unpin,p->loadingTypeHandle);p->loadingTypeHandle=0;p->loadingType=0;}}catch(const std::exception&){}try{p->profile.shutdown();}catch(const std::exception&){}try{p->lodUnpinAll("运行时关闭");}catch(const std::exception&){}try{p->texRestoreEverything("运行时关闭");}catch(const std::exception&){}if(p->releaseAll()){p->pruneRestoreBackups(true);p->sceneClear(p->sceneCacheRoots);p->sceneClear(p->sceneListRoots);p->sceneClear(p->gliderRoots);p->gliderChildren.clear();p->sceneCache.clear();p->sceneList.clear();for(auto& r:p->rigidRefs)p->freeOwned(r.second);p->rigidRefs.clear();p->freeOwned(p->rigidTypeRoots);p->rigidFilterType=0;p->rigidTransformType=0;}}
 }
 
 void ms::Runtime::synthesisFrame(Ptr controller,uint64_t now)noexcept{
@@ -3324,4 +3378,10 @@ void ms::Runtime::loadingImage(Ptr image,bool shown)noexcept{try{if(!p->inTick&&
 void ms::Runtime::loadingDestroyed(Ptr canvas)noexcept{try{if(!p->inTick&&p->onTickThread("loading-destroy"))p->loading.destroyed(canvas);}catch(const std::exception& ex){p->log("loading-image-error",ex.what());}}
 
 void ms::Runtime::profileClass(unsigned page,Ptr klass)noexcept{p->profile.observe(page,klass);}
+void ms::Runtime::loginFrame(Ptr scene,uint64_t now)noexcept{try{
+ if(!p->tickTid.load())p->tickTid.store(threadId());
+ if(p->inTick||!p->onTickThread("login-door")||!alive(scene))return;
+ p->observeLoginDoor(load<Ptr>(scene+abi::loginDoorNode),now);
+ if(now>=p->next)p->tick(now);
+ }catch(const std::exception& ex){p->reportLoginDoor(ex.what());}}
 void ms::Runtime::loadingFrame()noexcept{try{if(p->inTick||!p->onTickThread("loading-render"))return;auto now=clockMs();if(now<p->loadingFrameAt)return;p->loadingFrameAt=now+50;p->pollLoading();}catch(const std::exception& ex){if(p->loadingError!=ex.what()){p->loadingError=ex.what();p->log("loading-image-error",ex.what());}}}
