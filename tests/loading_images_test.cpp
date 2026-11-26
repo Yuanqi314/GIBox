@@ -20,8 +20,9 @@ uint32_t imageActive(Ptr p,Ptr){return objects.at(p).active&&objects.at(objects.
 uint32_t active(Ptr p,Ptr){return objects.at(p).active;}void setActive(Ptr p,int v,Ptr){objects.at(p).active=v!=0;}
 uint32_t pin(Ptr p,int kind,Ptr){assert(p&&kind==2);handles[++handle]=p;return handle;}void unpin(uint32_t h){assert(handles.erase(h)==1);}
 Ptr textureType(){if(!descriptor)descriptor=object();return descriptor;}Ptr newTexture(Ptr){Ptr p=object();store<Ptr>(p+0x10,0);return p;}
-void init(Ptr p,int w,int h,int format,int mip,int linear,Ptr){assert(w==2&&h==2&&format==4&&mip==0&&linear==0);store<Ptr>(p+0x10,p+0x180);created++;}
-void pixels(Ptr,Ptr bytes,int n,Ptr){assert(bytes&&n==16);}void action(Ptr,Ptr){}
+int expectedEdge=2,expectedLinear=0;
+void init(Ptr p,int w,int h,int format,int mip,int linear,Ptr){assert(w==expectedEdge&&h==expectedEdge&&format==4&&mip==0&&linear==expectedLinear);store<Ptr>(p+0x10,p+0x180);created++;}
+void pixels(Ptr,Ptr bytes,int n,Ptr){assert(bytes&&n==4*expectedEdge*expectedEdge);}void action(Ptr,Ptr){}
 Ptr rectTransform(Ptr p,Ptr){return p;}Rect bounds(Ptr,Ptr){return viewport;}
 void setWrap(Ptr,int value,Ptr){wrap=value;}void setFilter(Ptr,int value,Ptr){filter=value;}
 Ptr createSprite(Ptr texture,Rect r,Pivot p,Ptr){assert(texture&&r.w>0&&r.h>0&&p.x==.5f&&p.y==.5f);lastCrop=r;return object();}
@@ -82,10 +83,20 @@ int main(int argc,char** argv){
   for(auto role:profileRoles){std::string mod=root+"/"+role;std::filesystem::create_directories(mod+"/images");
    write(mod+"/profile.json",std::string(R"({"format":"gibox-profile-images","version":1,)")+"\""+role+R"(":{"file":"images/)"+role+R"(.rgba","width":2,"height":2}})");
    write(mod+"/images/"+role+".rgba",data.data(),data.size());}
-  auto onlyAvatar=profileReader.update(root,{"avatar"},true);assert(onlyAvatar&&onlyAvatar->error.empty());profile.receive(onlyAvatar);profile.tick(true,{"avatar"},0x98,1000);
-  assert(displayed(avatar)!=gameAvatar&&displayed(card)==gameCard);
+  write(root+"/avatar/profile.json",R"({"format":"gibox-profile-images","version":1,"avatar":{"file":"images/avatar.rgba","width":8,"height":6,"linear":true}})");
+  Bytes rectangular(8*6*4,127);
+  for(unsigned y=0;y<6;y++)for(unsigned x=0;x<8;x++)rectangular[4*(y*8+x)]=uint8_t(x);
+  write(root+"/avatar/images/avatar.rgba",rectangular.data(),rectangular.size());
+  auto onlyAvatar=profileReader.update(root,{"avatar"},true);assert(onlyAvatar&&onlyAvatar->error.empty());
+  const auto& circle=onlyAvatar->images[0];assert(circle.w==6&&circle.h==6&&circle.pixels[3]==0);
+  assert(circle.pixels[4*(2*6+2)]==3&&circle.pixels[4*(2*6+2)+3]==127);
+  assert(circle.pixels[4+3]>0&&circle.pixels[4+3]<127);
+  expectedEdge=6;expectedLinear=1;profile.receive(onlyAvatar);profile.tick(true,{"avatar"},0x98,1000);
+  assert(displayed(avatar)!=gameAvatar&&displayed(card)==gameCard&&objects[avatar].aspect);
+  expectedEdge=2;expectedLinear=0;
   auto onlyCard=profileReader.update(root,{"namecard"},true);assert(onlyCard&&onlyCard->error.empty());profile.receive(onlyCard);profile.tick(true,{"namecard"},0x98,1400);
-  assert(displayed(avatar)==gameAvatar&&displayed(card)!=gameCard);profile.tick(true,{},0x98,1800);assert(displayed(card)==gameCard);
+  assert(displayed(avatar)==gameAvatar&&displayed(card)!=gameCard&&!objects[avatar].aspect&&!objects[card].aspect);
+  profile.tick(true,{},0x98,1800);assert(displayed(card)==gameCard);
   profile.shutdown();assert(handles.empty());}
  std::filesystem::remove_all(pattern);for(auto p:allocations)std::free(p);std::cout<<"Loading images: PASS (pooled teleports, new canvas and background discovery, override recovery without reallocating, stale-cycle fallback, strict paths, aspect/color/UI restoration, bounded resources)\n";
 }

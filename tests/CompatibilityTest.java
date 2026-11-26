@@ -452,9 +452,25 @@ public final class CompatibilityTest {
                 Json.of("values",Json.of("$b","1"),"special",true),Json.of("values",Json.of("$a","2"),"special",false))),
             Json.of("file",0,"section","KeyExpr","type","activate","bind",Arrays.asList("2"),"presets",Arrays.asList(Json.of("values",empty,"special",true))))),"cycle presets by position, special ones: "+special);
     }
+    private static void avatarColorSpace(File base)throws Exception{
+        File mod=new File(base,"avatar-color"),out=new File(base,"avatar-color-out");ok(mod.mkdir(),"avatar fixture directory");
+        File ini=new File(mod,"Avatar.ini");
+        String config="[ShaderOverrideAvatar]\nhash = 683a3517523f9dee\nps-t0 = ResourceAvatar\n[ResourceAvatar]\nfilename = Avatar.png\n";
+        ByteBuffer png=ByteBuffer.allocate(8+13+12).putLong(0x89504e470d0a1a0aL);
+        for(int i=0;i<3;i++){
+            png.position(8);
+            if(i!=0)png.putInt(1).putInt(0x73524742).put((byte)0).putInt(0); // sRGB
+            png.putInt(0).putInt(0x49444154).putInt(0); // the test decoder supplies pixels
+            Files.write(new File(mod,"Avatar.png").toPath(),Arrays.copyOf(png.array(),png.position()));
+            GimiPatternsTest.put(mod,ini.getName(),config+(i==2?"override_color_space = Linear\n":""));
+            LoadingImages.Profile.install(mod,ini,out,DECODE,new StringBuilder());
+            Map<String,Object> doc=Json.obj(Json.read(new File(out,"profile.json"),1L<<20),"profile");
+            ok(Json.obj(doc.get("avatar"),"avatar").get("linear").equals(i!=1),"avatar color space follows metadata and explicit override");
+        }
+    }
     public static void main(String[] args)throws Exception{
         nativeChecker=args.length>0?args[0]:null;File base=Files.createTempDirectory("gibox-compatibility-").toFile();
-        try{logicKeys();legacy(base);hohe(base);animation(base);rehearsedAnimation(base);drivenOutfits(base);staticBackend(base);logicSignature(base);face(base);tolerance(base);thisTextures(base);System.out.println("Compatibility: PASS (texture replacements (this =) by PC hash and section name, unpaired if / endif, duplicate sections and auto draws on game geometry as 3DMigoto takes them, 3dm backend for static, outfit and animated models, logic core data for animations and outfits, rehearsed Present programs, driven outfits, switched-off schemes, App keys (every type, presets by position, special presets, back), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes)");}
+        try{logicKeys();legacy(base);hohe(base);animation(base);rehearsedAnimation(base);drivenOutfits(base);staticBackend(base);logicSignature(base);face(base);tolerance(base);thisTextures(base);avatarColorSpace(base);System.out.println("Compatibility: PASS (texture replacements (this =) by PC hash and section name, unpaired if / endif, duplicate sections and auto draws on game geometry as 3DMigoto takes them, 3dm backend for static, outfit and animated models, logic core data for animations and outfits, rehearsed Present programs, driven outfits, switched-off schemes, App keys (every type, presets by position, special presets, back), face texture swap, layout precedence, variants, R16, main INI, duplicates, PC filename casing, TexFx ranges, ambiguity, INI schemes, avatar color space)");}
         finally{ModelConverter.remove(base);}
     }
 }

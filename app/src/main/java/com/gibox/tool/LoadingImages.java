@@ -24,7 +24,7 @@ final class LoadingImages {
         try{new File(tmp,"images").mkdirs();List<Object> rows=new ArrayList<>();long total=0;
             for(File f:images.values()){
                 String file="images/"+rows.size()+".rgba";
-                Map<String,Object> row=writeImage(f,tmp,file,decoder,log);
+                Map<String,Object> row=writeImage(f,tmp,file,decoder,log,null);
                 total+=new File(tmp,file).length();Json.check(total<=256L<<20,"加载图片总计超过 256 MiB");rows.add(row);
             }
             Map<String,Object> doc=Json.of("format","gibox-loading-images","version",1,"name",dest.getName(),"generation","l"+System.currentTimeMillis(),"images",rows,"hideUi",hide,"source",Json.of("path",mod.getAbsolutePath(),"signature",ModLibrary.signature(mod)));
@@ -32,16 +32,33 @@ final class LoadingImages {
             ModelConverter.commit(tmp,dest,true);Importer.Result result=new Importer.Result();result.id=Characters.LOADING;result.model=dest;result.summary="加载图片："+rows.size()+" 张，每次加载随机切换；在 MOD 详情中可切换是否隐藏加载提示";return result;
         }finally{if(tmp.exists())ModelConverter.remove(tmp);}
     }
-    static Map<String,Object> writeImage(File image,File dir,String file,ModelConverter.TextureDecoder decoder,StringBuilder log)throws Exception {
+    private static Map<String,Object> writeImage(File image,File dir,String file,ModelConverter.TextureDecoder decoder,StringBuilder log,String avatarColorSpace)throws Exception {
         Json.check(image.isFile()&&image.length()<=64L<<20,"图片不存在或过大："+image.getName());
         String ext=image.getName().toLowerCase(Locale.ROOT);Json.check(ext.endsWith(".dds")||ext.endsWith(".png"),"图片仅支持 DDS / PNG");
-        byte[] raw=decoder.decode(Files.readAllBytes(image.toPath()));Json.check(raw.length>=8,"图片解码返回值无效");
+        byte[] source=Files.readAllBytes(image.toPath());
+        byte[] raw=decoder.decode(source);Json.check(raw.length>=8,"图片解码返回值无效");
         ByteBuffer b=ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN);int w=b.getInt(),h=b.getInt();
         Json.check(w>0&&h>0&&w<=2048&&h<=2048&&raw.length==8+4L*w*h,"图片尺寸无效或超过 2048");
         byte[] pixels=new byte[raw.length-8];for(int y=0;y<h;y++)System.arraycopy(raw,8+y*w*4,pixels,(h-1-y)*w*4,w*4);
         Files.write(new File(dir,file).toPath(),pixels);
         log.append("图片：").append(image.getName()).append(" → ").append(w).append('x').append(h).append('\n');
-        return Json.of("file",file,"width",w,"height",h);
+        Map<String,Object> row=Json.of("file",file,"width",w,"height",h);
+        if(avatarColorSpace!=null)row.put("linear",avatarLinear(source,avatarColorSpace));
+        return row;
+    }
+    private static boolean avatarLinear(byte[] source,String override){
+        if(override.equalsIgnoreCase("linear"))return true;
+        if(override.equalsIgnoreCase("srgb"))return false;
+        ByteBuffer png=ByteBuffer.wrap(source);
+        if(png.remaining()<8||png.getLong()!=0x89504e470d0a1a0aL)return false;
+        while(png.remaining()>=12){
+            int length=png.getInt(),type=png.getInt();
+            if(length<0||length>png.remaining()-4)return false;
+            if(type==0x49444154)break; // IDAT
+            if(type==0x73524742|| (type==0x67414d41&&length==4&&png.getInt(png.position())==45455))return false; // sRGB / gAMA
+            png.position(png.position()+length+4);
+        }
+        return true;
     }
     static ModelManifest summary(File dir)throws Exception{
         Map<String,Object> j=Json.obj(Json.read(new File(dir,FILE),1L<<20),FILE);Json.check("gibox-loading-images".equals(j.get("format"))&&Json.integer(j.get("version"),"version",1,1)==1,"加载图片格式无效");
@@ -65,6 +82,7 @@ final class LoadingImages {
         }
         static Importer.Result install(File mod,File ini,File dest,ModelConverter.TextureDecoder decoder,StringBuilder log)throws Exception {
             ModelConverter.Ini parsed=new ModelConverter.Ini(ini.getParentFile(),ini);Map<String,File> images=new LinkedHashMap<>();
+            String avatarColorSpace="";
             for(ModelConverter.Section s:parsed.sections.values()){
                 String section=s.name.toLowerCase(Locale.ROOT),hash=value(s,"hash").toLowerCase(Locale.ROOT),role;
                 if(section.startsWith("textureoverride")&&hash.equals("8556a802"))role="namecard";
@@ -73,7 +91,11 @@ final class LoadingImages {
                 String ref=value(s,"ps-t0").replaceFirst("(?i)^ref\\s+","").toLowerCase(Locale.ROOT);
                 ModelConverter.Section resource=parsed.sections.get(ref);
                 if(resource==null||!ref.startsWith("resource"))continue;
-                String path=value(resource,"filename");if(!path.isEmpty())images.put(role,TextureDiag.resolve(ini.getParentFile(),path.replace("\"","")));
+                String path=value(resource,"filename");
+                if(!path.isEmpty()){
+                    images.put(role,TextureDiag.resolve(ini.getParentFile(),path.replace("\"","")));
+                    if(role.equals("avatar"))avatarColorSpace=value(resource,"override_color_space");
+                }
             }
             File parent=dest.getAbsoluteFile().getParentFile();Json.check(parent.isDirectory()||parent.mkdirs(),"无法创建模型目录");
             File tmp=Files.createTempDirectory(parent.toPath(),".profile-import-").toFile();
@@ -84,7 +106,7 @@ final class LoadingImages {
                 for(Map.Entry<String,File> entry:images.entrySet()){
                     String kind=entry.getKey(),label=kind.equals("avatar")?"头像":"名片";File image=entry.getValue();
                     if(!image.isFile()){missing.add(image.getName());continue;}
-                    doc.put(kind,LoadingImages.writeImage(image,tmp,"images/"+kind+".rgba",decoder,log));installed.add(label);
+                    doc.put(kind,writeImage(image,tmp,"images/"+kind+".rgba",decoder,log,kind.equals("avatar")?avatarColorSpace:null));installed.add(label);
                 }
                 Json.check(!installed.isEmpty(),"没有可导入的头像或名片图片"+(missing.isEmpty()?"":"，缺少 "+String.join("、",missing)));
                 Files.write(new File(tmp,FILE).toPath(),Json.write(doc).getBytes(StandardCharsets.UTF_8));

@@ -83,12 +83,29 @@ class LoadingScreens {
 inline constexpr std::array<const char*,2> profileRoles{"avatar","namecard"};
 struct ProfilePrepared {
  std::array<Texture,2> images;
+ std::array<bool,2> linear{};
  std::array<std::string,2> names;
  std::string error;
 };
 
 struct ProfileReader {
  std::string key;
+ static Texture circleAvatar(unsigned w,unsigned h,Bytes pixels){
+  unsigned edge=std::min(w,h),left=(w-edge)/2,bottom=(h-edge)/2;
+  Texture result{edge,edge,Bytes(size_t(edge)*edge*4)};
+  float radius=float(edge)*.5f;
+  for(unsigned y=0;y<edge;y++){
+   auto* row=result.pixels.data()+size_t(y)*edge*4;
+   std::memcpy(row,pixels.data()+(size_t(bottom+y)*w+left)*4,size_t(edge)*4);
+   float dy=float(y)+.5f-radius;
+   for(unsigned x=0;x<edge;x++){
+    float dx=float(x)+.5f-radius;
+    float coverage=std::clamp(radius+.5f-std::sqrt(dx*dx+dy*dy),0.f,1.f);
+    auto& alpha=row[4*x+3];alpha=uint8_t(std::lround(alpha*coverage));
+   }
+  }
+  return result;
+ }
  std::shared_ptr<ProfilePrepared> update(const std::string& root,const std::vector<std::string>& selected,bool enabled){
   std::string next;std::vector<std::pair<std::string,std::string>> inputs;
   if(enabled)for(const auto& name:selected){
@@ -108,7 +125,8 @@ struct ProfileReader {
      require(jstr(row,"file",64)==path,"头像或名片路径无效");
      unsigned w=unsigned(juint(row,"width",1,2048)),h=unsigned(juint(row,"height",1,2048));
      auto pixels=read(root+"/"+input.first+"/"+path,16u<<20);require(pixels.size()==4ull*w*h,"头像或名片数据长度不符");
-     out->images[i]={w,h,std::move(pixels)};out->names[i]=input.first;
+     out->images[i]=i==0?circleAvatar(w,h,std::move(pixels)):Texture{w,h,std::move(pixels)};
+     out->linear[i]=jbool(row,"linear",false);out->names[i]=input.first;
     }
    }catch(const std::exception& ex){out->error=input.first+"："+ex.what();}
    if(!out->names[0].empty()&&!out->names[1].empty())break;
@@ -119,7 +137,7 @@ struct ProfileReader {
 
 class ProfileScreens {
  struct Rect {float x,y,w,h;};struct Pivot {float x,y;};
- struct Image {Ptr native=0,original=0,replacement=0;uint32_t root=0,saved=0;};
+ struct Image {Ptr native=0,original=0,replacement=0;uint32_t root=0,saved=0;bool changedAspect=false;};
  Engine& e;
  std::array<std::atomic<Ptr>,2> classes{};
  std::array<Ptr,2> types{},sprites{},textures{};
@@ -132,8 +150,10 @@ class ProfileScreens {
  void release(uint32_t& h){if(h)e.call<void>(abi::unpin,h);h=0;}
  void dispose(Ptr& p,uint32_t& h){if(alive(p))e.action(abi::destroy,p);p=0;release(h);}
  void restore(Ptr image,Image& row){
-  if(alive(image)&&load<Ptr>(image+0x10)==row.native&&load<Ptr>(image+0xe0)==row.replacement)
-   e.set(abi::imageSetOverride,image,alive(row.original)?row.original:0);
+  if(alive(image)&&load<Ptr>(image+0x10)==row.native){
+   if(load<Ptr>(image+0xe0)==row.replacement)e.set(abi::imageSetOverride,image,alive(row.original)?row.original:0);
+   if(row.changedAspect)e.op(abi::imageSetAspect,image,0);
+  }
   release(row.saved);release(row.root);
  }
  void clear(){for(auto& entry:images)restore(entry.first,entry.second);images.clear();
@@ -143,7 +163,7 @@ class ProfileScreens {
   dispose(sprites[i],spriteRoots[i]);dispose(textures[i],textureRoots[i]);
   const auto& t=prepared->images[i];Ptr descriptor=e.call<Ptr>(abi::textureType);require(descriptor,"缺少个人资料纹理类型");
   Ptr& tex=textures[i];tex=e.call<Ptr>(abi::objectNew,load<Ptr>(descriptor));require(tex,"个人资料纹理分配失败");textureRoots[i]=pin(tex);
-  e.call<void>(abi::textureInit,tex,int(t.w),int(t.h),4,0,0,Ptr(0));require(alive(tex),"个人资料纹理初始化失败");
+  e.call<void>(abi::textureInit,tex,int(t.w),int(t.h),4,0,int(prepared->linear[i]),Ptr(0));require(alive(tex),"个人资料纹理初始化失败");
   e.call<void>(abi::texturePixels,tex,reinterpret_cast<Ptr>(t.pixels.data()),int(t.pixels.size()),Ptr(0));e.op(abi::textureWrap,tex,1);e.op(abi::textureFilter,tex,1);e.action(abi::textureApply,tex);
   Ptr& s=sprites[i];s=e.call<Ptr>(abi::spriteCreate,tex,Rect{0,0,float(t.w),float(t.h)},Pivot{.5f,.5f},Ptr(0));require(alive(s),"个人资料 Sprite 创建失败");spriteRoots[i]=pin(s);return s;
  }
@@ -151,6 +171,9 @@ class ProfileScreens {
   auto& row=images[image];Ptr native=load<Ptr>(image+0x10);
   if(row.native!=native){restore(image,row);row={};row.root=pin(image);row.native=native;}
   Ptr current=load<Ptr>(image+0xe0),replacement=sprite(role);
+  if(role==0&&!(e.call<uint32_t>(abi::imageAspect,image,Ptr(0))&1)){
+   e.op(abi::imageSetAspect,image,1);row.changedAspect=true;
+  }
   if(current==replacement)return;
   if(current!=row.replacement||!row.replacement){auto saved=pin(current);release(row.saved);row.saved=saved;row.original=current;}
   row.replacement=replacement;e.set(abi::imageSetOverride,image,replacement);
