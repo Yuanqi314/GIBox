@@ -40,4 +40,27 @@ int main(){
  assert(modeFrom("full",false,false)==Mode::Full&&modeFrom("off",true,true)==Mode::Off&&modeFrom("",false,true)==Mode::Collect&&modeFrom("",true,false)==Mode::Match&&modeFrom("x",false,false)==Mode::Off);
  {Tracker one;one.allForms=false;uint8_t h2[12];std::memcpy(h2,idx,12);one.created(7,12,0x40);one.bound(7,12,0);one.mapped(12,0,12,h2);one.indexBound(7,0);auto b=one.take();
   assert(b.size()==1&&b[0].hashes.size()==4);for(size_t i=0;i<4;i++)assert(b[0].hashes[i].value==hs[i].value&&b[0].hashes[i].variant==hs[i].variant);}
- std::cout<<"Vulkan index-buffer hashes: PASS (CRC-32C append, 3DMigoto buffer desc variants, staging copy, mapped bind, modes: as uploaded only outside full)\n";}
+ assert(drawHash("5B4cDC9c")==0x5b4cdc9cu&&drawHash("00000000")==0u&&!drawHash("0xfedcba")&&!drawHash("-1234567"));
+ {Tracker probe;probe.allForms=false;probe.probeOnly=true;probe.probeHash=hs[1].value;
+  probe.created(1,64,0x40);probe.created(2,32,0x1);probe.bound(1,10,0);probe.bound(2,9,0);probe.mapped(9,0,32,staging);
+  Copy upload{8,16,12};probe.copied(2,1,&upload,1);
+  probe.indexBound(1,4,11,0); // 16-bit indices, bind twelve bytes before this upload
+  probe.drawIndexed(12,3,1,7,0,0); // a different command buffer
+  probe.drawIndexed(11,3,1,5,0,0); // begins before the upload
+  probe.drawIndexed(11,3,1,10,0,0); // ends after the upload
+  assert(probe.takeDraws().empty());
+  probe.drawIndexed(11,3,2,7,-4,1);probe.drawIndexed(11,3,2,7,-4,1);
+  auto draws=probe.takeDraws();assert(draws.size()==1&&draws[0].buffer==1&&draws[0].uploadOffset==16&&draws[0].bindOffset==4&&draws[0].first==7&&draws[0].relativeFirst==1&&
+    draws[0].indexBits==16&&draws[0].count==3&&draws[0].baseVertex==-4&&draws[0].instances==2&&draws[0].firstInstance==1);
+  assert(probe.take().empty()&&probe.takeDraws().empty()&&probe.stats().indexedDraws==5);
+  probe.beginCommands(11);probe.drawIndexed(11,2,1,7,0,0);assert(probe.takeDraws().empty());
+  probe.indexBound(1,16,11,0);probe.indexBound(0,0,11,0);probe.drawIndexed(11,2,1,0,0,0);assert(probe.takeDraws().empty());
+  probe.indexBound(1,16,11,0);
+  Copy overwrite{0,18,2};probe.copied(2,1,&overwrite,1);
+  probe.drawIndexed(11,2,1,0,0,0);assert(probe.takeDraws().empty());
+  probe.destroyed(1);probe.created(1,64,0x40);probe.bound(1,10,0);probe.copied(2,1,&upload,1);
+  probe.drawIndexed(11,2,1,0,0,0);assert(probe.takeDraws().empty());
+  probe.indexBound(1,16,11,1);probe.drawIndexed(11,2,1,1,0,0);
+  draws=probe.takeDraws();assert(draws.size()==1&&draws[0].indexBits==32&&draws[0].relativeFirst==1);
+ }
+ std::cout<<"Vulkan index-buffer hashes and draw probe: PASS (hash variants, staging and mapped buffers, targeted draws and offsets, overwrite and command buffer reuse)\n";}

@@ -44,6 +44,8 @@ using UnmapMemory=void(*)(void*,uint64_t);
 using FreeMemory=void(*)(void*,uint64_t,const void*);
 using CmdCopyBuffer=void(*)(void*,uint64_t,uint64_t,uint32_t,const ms::vkcap::Copy*);
 using CmdBindIndexBuffer=void(*)(void*,uint64_t,uint64_t,int32_t);
+using BeginCommandBuffer=VkResult(*)(void*,const void*);
+using CmdDrawIndexed=void(*)(void*,uint32_t,uint32_t,uint32_t,int32_t,uint32_t);
 
 GetProc instanceProcOriginal=nullptr,deviceProcOriginal=nullptr;
 PFN onGetDeviceProcAddr(void* device,const char* name);
@@ -51,6 +53,8 @@ std::atomic<CreateBuffer> createBuffer{nullptr};std::atomic<DestroyBuffer> destr
 std::atomic<BindBufferMemory> bindBufferMemory{nullptr};std::atomic<BindBufferMemory2> bindBufferMemory2{nullptr},bindBufferMemory2KHR{nullptr};
 std::atomic<MapMemory> mapMemory{nullptr};std::atomic<UnmapMemory> unmapMemory{nullptr};std::atomic<FreeMemory> freeMemory{nullptr};
 std::atomic<CmdCopyBuffer> cmdCopyBuffer{nullptr};std::atomic<CmdBindIndexBuffer> cmdBindIndexBuffer{nullptr};
+std::atomic<BeginCommandBuffer> beginCommandBuffer{nullptr};
+std::atomic<CmdDrawIndexed> cmdDrawIndexed{nullptr};
 ms::vkcap::Tracker& T(){return ms::vkcap::tracker();}
 
 VkResult onCreateBuffer(void* d,const VkBufferCreateInfo* info,const void* a,uint64_t* out){VkResult r=createBuffer.load()(d,info,a,out);if(r==0&&info&&out)T().created(*out,info->size,info->usage);return r;}
@@ -63,7 +67,16 @@ VkResult onMapMemory(void* d,uint64_t m,uint64_t o,uint64_t size,uint32_t flags,
 void onUnmapMemory(void* d,uint64_t m){T().unmapped(m);unmapMemory.load()(d,m);}
 void onFreeMemory(void* d,uint64_t m,const void* a){T().unmapped(m);freeMemory.load()(d,m,a);}
 void onCmdCopyBuffer(void* c,uint64_t src,uint64_t dst,uint32_t n,const ms::vkcap::Copy* r){if(r)T().copied(src,dst,r,n);cmdCopyBuffer.load()(c,src,dst,n,r);}
-void onCmdBindIndexBuffer(void* c,uint64_t b,uint64_t o,int32_t type){T().indexBound(b,o);cmdBindIndexBuffer.load()(c,b,o,type);}
+void onCmdBindIndexBuffer(void* c,uint64_t b,uint64_t o,int32_t type){T().indexBound(b,o,reinterpret_cast<uintptr_t>(c),type);cmdBindIndexBuffer.load()(c,b,o,type);}
+VkResult onBeginCommandBuffer(void* c,const void* info){
+ auto result=beginCommandBuffer.load()(c,info);
+ if(result==0)T().beginCommands(reinterpret_cast<uintptr_t>(c));
+ return result;
+}
+void onCmdDrawIndexed(void* c,uint32_t count,uint32_t instances,uint32_t first,int32_t baseVertex,uint32_t firstInstance){
+ try{T().drawIndexed(reinterpret_cast<uintptr_t>(c),count,instances,first,baseVertex,firstInstance);}catch(...){}
+ cmdDrawIndexed.load()(c,count,instances,first,baseVertex,firstInstance);
+}
 
 // Each wrapper calls the loader's exported function of the same name (its trampoline), which dispatches through the
 // handle's own table: right for any device the game makes, a probe device included. A name the loader does not export
@@ -80,6 +93,10 @@ PFN wrapped(const char* name,PFN real){if(!real||!name||!T().enabled)return real
  if(n=="vkFreeMemory")return wrap(freeMemory,real,&onFreeMemory);
  if(n=="vkCmdCopyBuffer")return wrap(cmdCopyBuffer,real,&onCmdCopyBuffer);
  if(n=="vkCmdBindIndexBuffer")return wrap(cmdBindIndexBuffer,real,&onCmdBindIndexBuffer);
+ if(T().probing()){
+  if(n=="vkBeginCommandBuffer")return wrap(beginCommandBuffer,real,&onBeginCommandBuffer);
+  if(n=="vkCmdDrawIndexed")return wrap(cmdDrawIndexed,real,&onCmdDrawIndexed);
+ }
  // vkGetDeviceProcAddr looked up through vkGetInstanceProcAddr is the loader's internal function, not the exported stub:
  // ours instead, which goes through the stub's original target (the same lookup).
  if(n=="vkGetDeviceProcAddr"&&deviceProcOriginal){T().resolvedName(true);return reinterpret_cast<PFN>(&onGetDeviceProcAddr);}
@@ -129,7 +146,9 @@ bool install(std::string& detail){
  auto get=[lib](auto& slot,const char* name){slot.store(reinterpret_cast<typename std::remove_reference_t<decltype(slot)>::value_type>(dlsym(lib,name)));};
  get(createBuffer,"vkCreateBuffer");get(destroyBuffer,"vkDestroyBuffer");get(bindBufferMemory,"vkBindBufferMemory");get(bindBufferMemory2,"vkBindBufferMemory2");get(bindBufferMemory2KHR,"vkBindBufferMemory2KHR");
  get(mapMemory,"vkMapMemory");get(unmapMemory,"vkUnmapMemory");get(freeMemory,"vkFreeMemory");get(cmdCopyBuffer,"vkCmdCopyBuffer");get(cmdBindIndexBuffer,"vkCmdBindIndexBuffer");
+ get(beginCommandBuffer,"vkBeginCommandBuffer");get(cmdDrawIndexed,"vkCmdDrawIndexed");
  if(!createBuffer.load()||!bindBufferMemory.load()||!mapMemory.load()||!cmdCopyBuffer.load()||!cmdBindIndexBuffer.load()){detail="libvulkan.so 没有导出缓冲相关函数";vkcap::tracker().installed(false,detail);return false;}
+ if(vkcap::tracker().probing()&&(!beginCommandBuffer.load()||!cmdDrawIndexed.load())){detail="libvulkan.so 没有导出绘制探针入口";vkcap::tracker().installed(false,detail);return false;}
  // Both stubs are checked before either is written: one of another shape leaves libvulkan.so untouched.
  auto shape=[](void* at){uint32_t w0,w1;std::memcpy(&w0,at,4);std::memcpy(&w1,static_cast<const char*>(at)+4,4);return isB(w0)||(isLanding(w0)&&isB(w1));};
  if(!shape(gipa)||!shape(gdpa)){detail="libvulkan.so 的入口不是 [bti] + b 形式（vkGetInstanceProcAddr "+words(reinterpret_cast<uintptr_t>(gipa))+"，vkGetDeviceProcAddr "+words(reinterpret_cast<uintptr_t>(gdpa))+"），未写入";vkcap::tracker().installed(false,detail);return false;}

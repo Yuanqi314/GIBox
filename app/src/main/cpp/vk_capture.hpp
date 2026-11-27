@@ -18,11 +18,14 @@
 // frame analysis: "match" hashes each upload once, as uploaded (every hash this device ever tied to a PC one was that
 // form), and checks it against the mods' rules; "collect" also ties every shown mesh (characters, NPCs, monsters) to
 // its upload for hash-map.json; "full" is the old diagnostic: every form, ib-hashes.txt, per-mesh candidate lines.
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -38,6 +41,12 @@ inline Mode modeFrom(const std::string& mode,bool ibHash,bool capture){
  if(mode=="off"){return Mode::Off;}if(mode=="match"){return Mode::Match;}if(mode=="collect"){return Mode::Collect;}if(mode=="full"){return Mode::Full;}
  return capture?Mode::Collect:ibHash?Mode::Match:Mode::Off;}
 inline const char* modeName(Mode m){return m==Mode::Match?"匹配":m==Mode::Collect?"采集":m==Mode::Full?"完整诊断":"关闭";}
+inline std::optional<uint32_t> drawHash(const std::string& value){
+ if(value.size()!=8)return std::nullopt;
+ uint32_t hash=0;auto r=std::from_chars(value.data(),value.data()+value.size(),hash,16);
+ if(r.ec!=std::errc{}||r.ptr!=value.data()+value.size())return std::nullopt;
+ return hash;
+}
 inline const std::array<uint32_t,256>& crcTable(){static const auto table=[]{std::array<uint32_t,256> t{};
   for(uint32_t i=0;i<256;i++){uint32_t c=i;for(int k=0;k<8;k++)c=(c&1)?(c>>1)^0x82F63B78u:c>>1;t[i]=c;}return t;}();return table;}
 #if defined(__aarch64__)
@@ -74,29 +83,52 @@ inline std::vector<Hash> ibHashes(const uint8_t* p,size_t n){std::vector<Hash> o
 
 // One index upload: where it came from, its hashes and enough of its content to compare by hand.
 struct Blob {uint64_t seq=0,buffer=0,offset=0;uint32_t bytes=0;std::string via;std::vector<Hash> hashes;std::vector<uint16_t> head16;uint32_t max16=0,max32=0;};
-struct Stats {uint64_t uploads=0,bytes=0,copies=0,mappedBinds=0,notMapped=0,outOfRange=0,tooLarge=0,dropped=0,resolved=0,wrapped=0;bool installed=false;std::string error;};
+struct Stats {uint64_t uploads=0,bytes=0,copies=0,mappedBinds=0,notMapped=0,outOfRange=0,tooLarge=0,dropped=0,resolved=0,wrapped=0,indexedDraws=0,drawProbeUploads=0;bool installed=false;std::string error;};
 struct Copy {uint64_t srcOffset=0,dstOffset=0,size=0;};   // VkBufferCopy
+struct Draw {
+ uint64_t upload=0,buffer=0,uploadOffset=0,bindOffset=0;
+ uint32_t first=0,relativeFirst=0,count=0,instances=0,firstInstance=0;
+ int32_t baseVertex=0;uint32_t indexBits=0;
+};
 
 // The buffers, memory bindings and host mappings needed to find index data in CPU memory: a staging buffer copied
 // into an index buffer (read when the copy is recorded), or an index buffer in mapped memory (read at its first bind).
 class Tracker {
- struct Buffer {uint64_t size=0,memory=0,memoryOffset=0;uint32_t usage=0;bool bound=false,captured=false;};
+ struct Upload {uint64_t seq,offset,bytes;};
+ struct Buffer {uint64_t size=0,memory=0,memoryOffset=0,generation=0;uint32_t usage=0;bool bound=false,captured=false;std::vector<Upload> matches;};
  struct Mapping {const uint8_t* base=nullptr;uint64_t offset=0,size=0;};
+ struct IndexBinding {uint64_t buffer,generation,offset;uint32_t width;};
  std::mutex m;std::unordered_map<uint64_t,Buffer> buffers;std::unordered_map<uint64_t,Mapping> maps;std::vector<Blob> out;Stats st;uint64_t seq=0;
+ std::unordered_map<uintptr_t,IndexBinding> drawBindings;
+ std::vector<Draw> observedDraws;
+ size_t reportedDraws=0;
+ uint64_t bufferGeneration=0;
  static constexpr uint32_t indexUsage=0x40,transferSrc=0x1;static constexpr size_t maxBlob=64u<<20,maxQueue=65536;
  // Host address of [memory offset, +size) or null when that range is not mapped.
  const uint8_t* host(const Buffer& b,uint64_t at,uint64_t size){auto x=maps.find(b.memory);if(x==maps.end()||!x->second.base)return nullptr;uint64_t from=b.memoryOffset+at;
   if(from<x->second.offset||(x->second.size!=~0ull&&from+size>x->second.offset+x->second.size)){return nullptr;}return x->second.base+(from-x->second.offset);}
  // Under the lock: an unmap waits until the bytes are read.
- void add(const uint8_t* p,uint64_t n,uint64_t buffer,uint64_t offset,const char* via){st.uploads++;st.bytes+=n;if(out.size()>=maxQueue){st.dropped++;return;}
+ void add(const uint8_t* p,uint64_t n,uint64_t buffer,Buffer& dst,uint64_t offset,const char* via){st.uploads++;st.bytes+=n;
+  const auto probe=probeHash.load(std::memory_order_relaxed);
+  if(probe==noProbe&&out.size()>=maxQueue){st.dropped++;return;}
   Blob b;b.seq=++seq;b.buffer=buffer;b.offset=offset;b.bytes=uint32_t(n);b.via=via;if(allForms)b.hashes=ibHashes(p,size_t(n));else hashFormat(p,size_t(n),0,b.hashes);
+  if(probe!=noProbe&&std::any_of(b.hashes.begin(),b.hashes.end(),[&](const Hash& h){return h.variant<4&&h.value==probe;})){
+   st.drawProbeUploads++;
+   if(dst.matches.size()<16)dst.matches.push_back({b.seq,offset,n});
+  }
+  if(probeOnly.load(std::memory_order_relaxed))return;
+  if(out.size()>=maxQueue){st.dropped++;return;}
   for(size_t i=0;i<n/2;i++){uint16_t v;std::memcpy(&v,p+2*i,2);if(i<8)b.head16.push_back(v);if(v>b.max16)b.max16=v;}
   if(n%4==0)for(size_t i=0;i<n/4;i++){uint32_t v;std::memcpy(&v,p+4*i,4);if(v>b.max32)b.max32=v;}
   out.push_back(std::move(b));}
 public:
+ static constexpr uint64_t noProbe=~uint64_t(0);
  std::atomic<bool> enabled{false};
  std::atomic<bool> allForms{true};   // false (match / collect): the data as uploaded only, one pass over it
- void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;buffers[buffer]=b;}
+ std::atomic<uint64_t> probeHash{noProbe};
+ std::atomic<bool> probeOnly{false};
+ bool probing()const{return probeHash.load(std::memory_order_relaxed)!=noProbe;}
+ void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;if(probing())b.generation=++bufferGeneration;buffers[buffer]=std::move(b);}
  void destroyed(uint64_t buffer){std::lock_guard<std::mutex> l(m);buffers.erase(buffer);}
  void bound(uint64_t buffer,uint64_t memory,uint64_t offset){std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end())return;b->second.memory=memory;b->second.memoryOffset=offset;b->second.bound=true;}
  void mapped(uint64_t memory,uint64_t offset,uint64_t size,const void* p){std::lock_guard<std::mutex> l(m);maps[memory]={static_cast<const uint8_t*>(p),offset,size};}
@@ -105,14 +137,47 @@ public:
  void copied(uint64_t src,uint64_t dst,const Copy* regions,uint32_t count){
   std::lock_guard<std::mutex> l(m);auto d=buffers.find(dst);if(d==buffers.end()||!(d->second.usage&indexUsage))return;d->second.captured=true;auto s=buffers.find(src);
    for(uint32_t i=0;i<count;i++){const Copy& r=regions[i];st.copies++;
+    auto& matches=d->second.matches;
+    if(r.dstOffset>d->second.size||r.size>d->second.size-r.dstOffset){st.outOfRange++;continue;}
+    if(!matches.empty())matches.erase(std::remove_if(matches.begin(),matches.end(),[&](const Upload& u){return r.dstOffset<u.offset+u.bytes&&u.offset<r.dstOffset+r.size;}),matches.end());
     if(s==buffers.end()||!s->second.bound){st.notMapped++;continue;}if(r.size>maxBlob){st.tooLarge++;continue;}
-    if(r.srcOffset+r.size>s->second.size||r.dstOffset+r.size>d->second.size){st.outOfRange++;continue;}
-    const uint8_t* p=host(s->second,r.srcOffset,r.size);if(!p){st.notMapped++;continue;}add(p,r.size,dst,r.dstOffset,"staging copy");}}
+    if(r.srcOffset>s->second.size||r.size>s->second.size-r.srcOffset){st.outOfRange++;continue;}
+    const uint8_t* p=host(s->second,r.srcOffset,r.size);if(!p){st.notMapped++;continue;}add(p,r.size,dst,d->second,r.dstOffset,"staging copy");}}
  // An index buffer bound for drawing that no copy filled: read from its mapped memory once, offset to its end.
- void indexBound(uint64_t buffer,uint64_t offset){
-  std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end()||b->second.captured||!b->second.bound||!(b->second.usage&indexUsage)||offset>=b->second.size)return;b->second.captured=true;
-  uint64_t n=b->second.size-offset;if(n>maxBlob){st.tooLarge++;return;}const uint8_t* p=host(b->second,offset,n);if(!p){st.notMapped++;return;}st.mappedBinds++;
-  add(p,n,buffer,offset,"mapped memory at its first bind (offset to the buffer's end)");}
+ void indexBound(uint64_t buffer,uint64_t offset,uintptr_t command=0,int32_t indexType=-1){
+  std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);
+  if(command&&probing())drawBindings.erase(command);
+  if(b==buffers.end()||!b->second.bound||!(b->second.usage&indexUsage)||offset>=b->second.size)return;
+  auto& dst=b->second;
+  if(!dst.captured){
+   dst.captured=true;uint64_t n=dst.size-offset;
+   if(n>maxBlob)st.tooLarge++;
+   else if(const uint8_t* p=host(dst,offset,n)){st.mappedBinds++;add(p,n,buffer,dst,offset,"mapped memory at its first bind (offset to the buffer's end)");}
+   else st.notMapped++;
+  }
+  if(command&&!dst.matches.empty()&&(indexType==0||indexType==1)&&drawBindings.size()<512)
+   drawBindings.emplace(command,IndexBinding{buffer,dst.generation,offset,indexType==0?2u:4u});
+ }
+ void beginCommands(uintptr_t command){std::lock_guard<std::mutex> l(m);drawBindings.erase(command);}
+ void drawIndexed(uintptr_t command,uint32_t count,uint32_t instances,uint32_t first,int32_t baseVertex,uint32_t firstInstance){
+  if(!count||!instances)return;
+  std::lock_guard<std::mutex> l(m);
+  st.indexedDraws++;
+  if(observedDraws.size()>=64)return;
+  auto binding=drawBindings.find(command);if(binding==drawBindings.end())return;
+  const auto& state=binding->second;
+  auto buffer=buffers.find(state.buffer);if(buffer==buffers.end()||buffer->second.generation!=state.generation)return;
+  uint64_t begin=uint64_t(first)*state.width,bytes=uint64_t(count)*state.width;
+  if(begin+bytes>buffer->second.size-state.offset)return;
+  begin+=state.offset;
+  for(const auto& upload:buffer->second.matches){
+   if(begin<upload.offset||begin+bytes>upload.offset+upload.bytes||(begin-upload.offset)%state.width)continue;
+   if(std::any_of(observedDraws.begin(),observedDraws.end(),[&](const Draw& d){return d.upload==upload.seq&&d.bindOffset==state.offset&&d.indexBits==8*state.width&&d.first==first&&d.count==count&&d.instances==instances&&d.baseVertex==baseVertex&&d.firstInstance==firstInstance;}))continue;
+   observedDraws.push_back({upload.seq,state.buffer,upload.offset,state.offset,first,uint32_t((begin-upload.offset)/state.width),count,instances,firstInstance,baseVertex,8*state.width});
+   break;
+  }
+ }
+ std::vector<Draw> takeDraws(){std::lock_guard<std::mutex> l(m);std::vector<Draw> draws(observedDraws.begin()+reportedDraws,observedDraws.end());reportedDraws=observedDraws.size();return draws;}
  void resolvedName(bool wrapped){std::lock_guard<std::mutex> l(m);st.resolved++;if(wrapped)st.wrapped++;}
  void installed(bool ok,const std::string& error){std::lock_guard<std::mutex> l(m);st.installed=ok;st.error=error;enabled=ok;}
  std::vector<Blob> take(){std::lock_guard<std::mutex> l(m);std::vector<Blob> r;r.swap(out);return r;}

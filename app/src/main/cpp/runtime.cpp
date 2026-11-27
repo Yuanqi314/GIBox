@@ -881,7 +881,7 @@ struct Runtime::Impl {
   std::string missing;unsigned usable=0;auto want=sceneWant(m,missing,usable);
   if(!usable){sceneWhy="没有按索引缓冲 hash 写的规则；只按贴图 hash 的规则在安卓上对不上（游戏贴图的压缩格式不同）";return out;}
   // While the hashes are read, every scene mesh is read once so that an upload of a missing hash can be tied to it.
-  const bool learn=!missing.empty()&&vkcap::tracker().enabled;
+  const bool learn=!missing.empty()&&vkcap::tracker().enabled&&!vkcap::tracker().probeOnly;
   if(want.empty()&&!learn){sceneWhy="hash 表里还没有 "+missing+" 对应的网格：把 hash 模式设为“匹配”或“采集”并重启游戏，再让这个 NPC / 怪物出现一次";return out;}
   // The scene (every 2 s), our slots, and the controlled character's own renderers (a glider is one while it is out).
   std::vector<Ptr> pool=sceneRenderers(texClock());if(L)for(auto& x:L->slots)pool.push_back(x.renderer);try{for(Ptr r:worldRenderers())pool.push_back(r);}catch(const std::exception&){}
@@ -1175,6 +1175,18 @@ struct Runtime::Impl {
  struct IbHit {uint64_t seq=0;uint32_t value=0,bytes=0,max16=0,max32=0;uint8_t variant=0;std::string via;bool done=false;};std::vector<IbHit> ibHits;
  std::vector<vkcap::Blob> ibBlobs;uint64_t ibAt=0,ibSince=0,ibReported=0,ibFileLines=0;std::string ibWantedKey;std::set<std::string> ibWanted;bool devMapRelevant=false;uint64_t ibReportAt=0;bool ibSaidNothing=false,ibFileStarted=false;std::set<std::string> ibSaid;
  static std::string hex8(uint32_t v){char b[12];std::snprintf(b,sizeof b,"%08x",v);return b;}
+ uint64_t drawProbeReportAt=0;
+ void drawProbeTick(vkcap::Tracker& capture,uint64_t now){
+  const std::string hash=hex8(uint32_t(capture.probeHash.load(std::memory_order_relaxed)));
+  for(const auto& draw:capture.takeDraws()){
+   log("vulkan-draw",hash+"：索引上传 #"+std::to_string(draw.upload)+"，缓冲 "+hex(draw.buffer)+"，上传偏移 "+std::to_string(draw.uploadOffset)+
+    "，绑定偏移 "+std::to_string(draw.bindOffset)+"，firstIndex "+std::to_string(draw.first)+"，上传内起点 "+std::to_string(draw.relativeFirst)+
+    "，indexCount "+std::to_string(draw.count)+"，indexBits "+std::to_string(draw.indexBits)+"，vertexOffset "+std::to_string(draw.baseVertex)+
+    "，instanceCount "+std::to_string(draw.instances)+"，firstInstance "+std::to_string(draw.firstInstance));
+  }
+  if(now>=drawProbeReportAt){drawProbeReportAt=now+10000;auto stats=capture.stats();
+   log("vulkan-draw-status",hash+"：索引上传 "+std::to_string(stats.uploads)+" 次，哈希命中 "+std::to_string(stats.drawProbeUploads)+" 次，vkCmdDrawIndexed "+std::to_string(stats.indexedDraws)+" 次");}
+ }
  static uint64_t meshIndices(const std::vector<std::pair<uint32_t,uint32_t>>& subs){uint64_t n=0;for(auto& s:subs)n=std::max<uint64_t>(n,uint64_t(s.first)+s.second);return n;}
  std::string ibDescribe(const vkcap::Blob& b){std::string head;for(auto v:b.head16)head+=(head.empty()?"":" ")+std::to_string(v);
   return "上传 #"+std::to_string(b.seq)+"（"+b.via+"，"+std::to_string(b.bytes)+" 字节，即 16 位索引 "+std::to_string(b.bytes/2)+" 个或 32 位索引 "+(b.bytes%4?std::string("-"):std::to_string(b.bytes/4))+" 个，16 位最大值 "+std::to_string(b.max16)+"，前几个 16 位值 "+head+"）";}
@@ -1234,6 +1246,8 @@ struct Runtime::Impl {
   return tied;}
  void texSay0(const std::string& key,const std::string& state,const std::string& line){if(ibSaid.insert(key).second)log(state,line);}
  void ibHashTick(uint64_t now){auto& T=vkcap::tracker();if(!T.enabled)return;if(!ibSince)ibSince=now;if(now<ibAt)return;ibAt=now+1000;
+  if(T.probing())drawProbeTick(T,now);
+  if(T.probeOnly.load(std::memory_order_relaxed))return;
   auto fresh=T.take();std::string dump;const bool full=ctl.tex.hash==vkcap::Mode::Full;
   for(auto& b:fresh){if(!full||ibFileLines>=20000)break;ibFileLines++;dump+="#"+std::to_string(b.seq)+" "+std::to_string(b.bytes)+" bytes via "+b.via+" buffer "+hex(b.buffer)+"+"+std::to_string(b.offset)+" max16 "+std::to_string(b.max16)+" |";
    for(auto& h:b.hashes){dump+=" "+std::to_string(h.variant)+"="+hex8(h.value);}dump+="\n";}
@@ -1340,7 +1354,7 @@ struct Runtime::Impl {
   catch(...){freeOwned(tmp);throw;}freeOwned(tmp);if(capMeshRead.size()>200000)capMeshRead.clear();
   capAllMeshes=looked;capAllAdded+=added;
   log("hash-capture","为 "+std::to_string(capOpen.size())+" 个未显示网格的 PC 上传扫描已加载网格：共 "+std::to_string(looked)+" 个，索引数和顶点数相符 "+std::to_string(added)+" 个");}
- void captureTick(uint64_t now){auto& T=vkcap::tracker();if(!ctl.tex.capture||!T.enabled)return;if(now<capAt)return;capAt=now+1000;
+ void captureTick(uint64_t now){auto& T=vkcap::tracker();if(!ctl.tex.capture||!T.enabled||T.probeOnly)return;if(now<capAt)return;capAt=now+1000;
   if(!capSaid){capSaid=true;log("hash-capture","已开启：读取显示中的每个角色、NPC、怪物网格并关联索引上传，与 PC 数据库（"+(pcDb?pcDb->commit.substr(0,7):std::string("未安装"))+"）对比，写入 "+shared+"/hash-report.txt 和 hash-map.json"+(ctl.enabled?std::string():"；模型替换已关闭，只读取当前操控角色的渲染器（开启后读取整个场景）"));}
   if(!devMap)devMap=std::make_shared<pcdb::DeviceMap>();
   // 1. Meshes: what discovery and the controlled character show, at most 32 new ones a second; not a renderer GIBox
