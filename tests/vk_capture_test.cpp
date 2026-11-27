@@ -41,7 +41,7 @@ int main(){
  {Tracker one;one.allForms=false;uint8_t h2[12];std::memcpy(h2,idx,12);one.created(7,12,0x40);one.bound(7,12,0);one.mapped(12,0,12,h2);one.indexBound(7,0);auto b=one.take();
   assert(b.size()==1&&b[0].hashes.size()==4);for(size_t i=0;i<4;i++)assert(b[0].hashes[i].value==hs[i].value&&b[0].hashes[i].variant==hs[i].variant);}
  assert(drawHash("5B4cDC9c")==0x5b4cdc9cu&&drawHash("00000000")==0u&&!drawHash("0xfedcba")&&!drawHash("-1234567"));
- {Tracker probe;probe.allForms=false;probe.probeOnly=true;probe.probeHash=hs[1].value;
+ {Tracker probe;probe.allForms=false;probe.probeOnly=true;probe.setDrawHashes({hs[1].value});
   probe.created(1,64,0x40);probe.created(2,32,0x1);probe.bound(1,10,0);probe.bound(2,9,0);probe.mapped(9,0,32,staging);
   Copy upload{8,16,12};probe.copied(2,1,&upload,1);
   probe.indexBound(1,4,11,0); // 16-bit indices, bind twelve bytes before this upload
@@ -50,7 +50,7 @@ int main(){
   probe.drawIndexed(11,3,1,10,0,0); // ends after the upload
   assert(probe.takeDraws().empty());
   probe.drawIndexed(11,3,2,7,-4,1);probe.drawIndexed(11,3,2,7,-4,1);
-  auto draws=probe.takeDraws();assert(draws.size()==1&&draws[0].buffer==1&&draws[0].uploadOffset==16&&draws[0].bindOffset==4&&draws[0].first==7&&draws[0].relativeFirst==1&&
+  auto draws=probe.takeDraws();assert(draws.size()==1&&draws[0].hash==hs[1].value&&draws[0].buffer==1&&draws[0].uploadOffset==16&&draws[0].bindOffset==4&&draws[0].first==7&&draws[0].relativeFirst==1&&
     draws[0].indexBits==16&&draws[0].count==3&&draws[0].baseVertex==-4&&draws[0].instances==2&&draws[0].firstInstance==1);
   assert(probe.take().empty()&&probe.takeDraws().empty()&&probe.stats().indexedDraws==5);
   probe.beginCommands(11);probe.drawIndexed(11,2,1,7,0,0);assert(probe.takeDraws().empty());
@@ -62,5 +62,21 @@ int main(){
   probe.drawIndexed(11,2,1,0,0,0);assert(probe.takeDraws().empty());
   probe.indexBound(1,16,11,1);probe.drawIndexed(11,2,1,1,0,0);
   draws=probe.takeDraws();assert(draws.size()==1&&draws[0].indexBits==32&&draws[0].relativeFirst==1);
+ }
+ {Tracker probe;probe.allForms=false;probe.probeOnly=true;
+  const std::array<uint16_t,6> elsewhere{10,20,30,40,50,60};
+  auto other=ibHashes(reinterpret_cast<const uint8_t*>(elsewhere.data()),sizeof elsewhere)[1].value;
+  probe.setDrawHashes({hs[1].value,hs[2].value,hs[2].value,other,0});
+  probe.created(11,12,0x40);probe.bound(11,11,0);probe.mapped(11,0,12,idx);
+  probe.created(22,12,0x40);probe.bound(22,22,0);probe.mapped(22,0,12,elsewhere.data());
+  probe.indexBound(11,0,1,0);probe.indexBound(22,0,2,0);
+  // An instanced draw family for one object reaches the cap; the other object still reports independently.
+  for(uint32_t i=0;i<=Tracker::maxDrawsPerHash;i++)probe.drawIndexed(1,6,1,0,0,i);
+  probe.drawIndexed(2,3,1,3,0,0);
+  auto draws=probe.takeDraws();assert(draws.size()==2*Tracker::maxDrawsPerHash+1&&probe.takeDraws().empty());
+  for(const auto& d:draws){if(d.hash==other){assert(d.buffer==22&&d.relativeFirst==3);}else{assert((d.hash==hs[1].value||d.hash==hs[2].value)&&d.buffer==11&&d.relativeFirst==0);}}
+  auto stats=probe.drawStats();assert(stats.size()==4&&stats.front().hash==0&&stats.front().uploads==0&&stats.front().draws==0);
+  for(size_t i=1;i<stats.size();++i){assert(stats[i].uploads==1&&stats[i].draws==(stats[i].hash==other?1:Tracker::maxDrawsPerHash));}
+  assert(probe.stats().uploads==2&&probe.stats().drawProbeUploads==2&&probe.take().empty());
  }
  std::cout<<"Vulkan index-buffer hashes and draw probe: PASS (hash variants, staging and mapped buffers, targeted draws and offsets, overwrite and command buffer reuse)\n";}

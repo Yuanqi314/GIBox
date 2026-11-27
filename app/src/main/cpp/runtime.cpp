@@ -1177,15 +1177,15 @@ struct Runtime::Impl {
  static std::string hex8(uint32_t v){char b[12];std::snprintf(b,sizeof b,"%08x",v);return b;}
  uint64_t drawProbeReportAt=0;
  void drawProbeTick(vkcap::Tracker& capture,uint64_t now){
-  const std::string hash=hex8(uint32_t(capture.probeHash.load(std::memory_order_relaxed)));
   for(const auto& draw:capture.takeDraws()){
-   log("vulkan-draw",hash+"：索引上传 #"+std::to_string(draw.upload)+"，缓冲 "+hex(draw.buffer)+"，上传偏移 "+std::to_string(draw.uploadOffset)+
+   log("vulkan-draw",hex8(draw.hash)+"：索引上传 #"+std::to_string(draw.upload)+"，缓冲 "+hex(draw.buffer)+"，上传偏移 "+std::to_string(draw.uploadOffset)+
     "，绑定偏移 "+std::to_string(draw.bindOffset)+"，firstIndex "+std::to_string(draw.first)+"，上传内起点 "+std::to_string(draw.relativeFirst)+
     "，indexCount "+std::to_string(draw.count)+"，indexBits "+std::to_string(draw.indexBits)+"，vertexOffset "+std::to_string(draw.baseVertex)+
     "，instanceCount "+std::to_string(draw.instances)+"，firstInstance "+std::to_string(draw.firstInstance));
   }
-  if(now>=drawProbeReportAt){drawProbeReportAt=now+10000;auto stats=capture.stats();
-   log("vulkan-draw-status",hash+"：索引上传 "+std::to_string(stats.uploads)+" 次，哈希命中 "+std::to_string(stats.drawProbeUploads)+" 次，vkCmdDrawIndexed "+std::to_string(stats.indexedDraws)+" 次");}
+  if(now>=drawProbeReportAt){drawProbeReportAt=now+10000;auto stats=capture.stats();std::string targets;
+   for(const auto& p:capture.drawStats()){targets+=(targets.empty()?"":"，")+hex8(p.hash)+"：上传 "+std::to_string(p.uploads)+" / 绘制样本 "+std::to_string(p.draws);}
+   log("vulkan-draw-status","索引上传 "+std::to_string(stats.uploads)+" 次，哈希命中 "+std::to_string(stats.drawProbeUploads)+" 次，vkCmdDrawIndexed "+std::to_string(stats.indexedDraws)+" 次；"+targets);}
  }
  static uint64_t meshIndices(const std::vector<std::pair<uint32_t,uint32_t>>& subs){uint64_t n=0;for(auto& s:subs)n=std::max<uint64_t>(n,uint64_t(s.first)+s.second);return n;}
  std::string ibDescribe(const vkcap::Blob& b){std::string head;for(auto v:b.head16)head+=(head.empty()?"":" ")+std::to_string(v);

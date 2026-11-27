@@ -128,22 +128,25 @@ void bootStatus(const std::string& pkg,const std::string& state,const std::strin
 extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv* env,jclass,jstring jp,jstring jd,jbyteArray iconData){try{
  auto pkg=jstringValue(env,jp),priv=jstringValue(env,jd);auto icon=readSynthesisIcon(env,iconData);if(env->ExceptionCheck())return;ms::require(pkg=="com.miHoYo.Yuanshen"||pkg=="com.miHoYo.ys.bilibili"||pkg=="com.miHoYo.GenshinImpact","不支持的包名");if(started.exchange(true))return;
  // Install before device creation when either hash capture or the targeted draw probe was requested at startup.
- {auto mode=ms::vkcap::Mode::Off;std::optional<uint32_t> probe;
+ {auto mode=ms::vkcap::Mode::Off;std::vector<uint32_t> probes;
   try{auto c=ms::JsonParser(ms::text(sharedDir(pkg)+"/control.json")).parse();const auto& t=c.at("textureMods");
    if(t.type==ms::Json::Object){auto flag=[&](const char* k){return t.at(k).type==ms::Json::Bool&&t.at(k).boolean;};
     mode=ms::vkcap::modeFrom(t.at("hashMode").type==ms::Json::String?t.at("hashMode").string:std::string(),flag("ibHash"),flag("capture"));
-    const auto& value=t.at("vulkanDrawHash");
-    if(value.type==ms::Json::String&&!value.string.empty()){
-     probe=ms::vkcap::drawHash(value.string);
-     if(!probe)bootLog(pkg,"vulkan-capture-disabled","vulkanDrawHash 应为八位十六进制哈希");
-    }
+    size_t invalid=0,excess=0;
+    auto add=[&](const ms::Json& value){auto hash=value.type==ms::Json::String?ms::vkcap::drawHash(value.string):std::nullopt;
+     if(!hash){++invalid;return;}if(std::find(probes.begin(),probes.end(),*hash)!=probes.end())return;
+     if(probes.size()==ms::vkcap::Tracker::maxDrawHashes){++excess;return;}probes.push_back(*hash);};
+    const auto& single=t.at("vulkanDrawHash");if(single.type!=ms::Json::Null)add(single);
+    const auto& list=t.at("vulkanDrawHashes");
+    if(list.type==ms::Json::Array){for(const auto& value:list.array)add(value);}else if(list.type!=ms::Json::Null){++invalid;}
+    if(invalid||excess)bootLog(pkg,"vulkan-draw-config-warning","忽略无效哈希或配置 "+std::to_string(invalid)+" 项，超过探针上限 "+std::to_string(excess)+" 项");
    }}catch(const std::exception&){}
-  if(mode!=ms::vkcap::Mode::Off||probe){
+  if(mode!=ms::vkcap::Mode::Off||!probes.empty()){
    auto& tracker=ms::vkcap::tracker();tracker.allForms=mode==ms::vkcap::Mode::Full;
    tracker.probeOnly=mode==ms::vkcap::Mode::Off;
-   if(probe)tracker.probeHash=*probe;
+   tracker.setDrawHashes(probes);
    std::string detail;bool ok=false;try{ok=ms::vkhook::install(detail);}catch(const std::exception& e){detail=e.what();}
-   bootLog(pkg,ok?"vulkan-capture":"vulkan-capture-disabled",ok?"已安装："+detail+"（索引采集模式 "+ms::vkcap::modeName(mode)+(probe?"，已启用指定哈希的绘制探针":"")+"）":detail);
+   bootLog(pkg,ok?"vulkan-capture":"vulkan-capture-disabled",ok?"已安装："+detail+"（索引采集模式 "+ms::vkcap::modeName(mode)+(probes.empty()?"":"，绘制探针目标 "+std::to_string(probes.size())+" 个")+"）":detail);
   }}
  std::thread([pkg,priv,icon=std::move(icon)]() mutable{try{bootStatus(pkg,"waiting","等待 libyuanshen.so");Image image;for(unsigned n=0;n<480&&!image.base;n++){dl_iterate_phdr(findImage,&image);if(!image.base)std::this_thread::sleep_for(std::chrono::milliseconds(500));}ms::require(image.base!=0,"等待 libyuanshen.so 加载超时");
  auto actual=ms::loadedBuildId(image.base,image.ph,image.count,sizeof(ElfW(Phdr)));if(!ms::abi::select(actual)){bootStatus(pkg,"buildid-mismatch","实际 Build ID："+actual);return;}

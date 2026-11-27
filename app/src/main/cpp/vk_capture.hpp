@@ -18,12 +18,14 @@
 // frame analysis: "match" hashes each upload once, as uploaded (every hash this device ever tied to a PC one was that
 // form), and checks it against the mods' rules; "collect" also ties every shown mesh (characters, NPCs, monsters) to
 // its upload for hash-map.json; "full" is the old diagnostic: every form, ib-hashes.txt, per-mesh candidate lines.
+// The optional draw probe watches a set of hashes against the same uploads without enabling mesh collection.
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <charconv>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -88,20 +90,21 @@ struct Copy {uint64_t srcOffset=0,dstOffset=0,size=0;};   // VkBufferCopy
 struct Draw {
  uint64_t upload=0,buffer=0,uploadOffset=0,bindOffset=0;
  uint32_t first=0,relativeFirst=0,count=0,instances=0,firstInstance=0;
- int32_t baseVertex=0;uint32_t indexBits=0;
+ int32_t baseVertex=0;uint32_t indexBits=0,hash=0;
 };
+struct DrawStats {uint32_t hash=0;uint64_t uploads=0;size_t draws=0;};
 
 // The buffers, memory bindings and host mappings needed to find index data in CPU memory: a staging buffer copied
 // into an index buffer (read when the copy is recorded), or an index buffer in mapped memory (read at its first bind).
 class Tracker {
- struct Upload {uint64_t seq,offset,bytes;};
+ struct Upload {uint64_t seq,offset,bytes;std::array<uint32_t,4> hashes{};size_t count=0;};
+ struct Probe {uint64_t uploads=0;size_t reported=0;std::vector<Draw> draws;};
  struct Buffer {uint64_t size=0,memory=0,memoryOffset=0,generation=0;uint32_t usage=0;bool bound=false,captured=false;std::vector<Upload> matches;};
  struct Mapping {const uint8_t* base=nullptr;uint64_t offset=0,size=0;};
  struct IndexBinding {uint64_t buffer,generation,offset;uint32_t width;};
  std::mutex m;std::unordered_map<uint64_t,Buffer> buffers;std::unordered_map<uint64_t,Mapping> maps;std::vector<Blob> out;Stats st;uint64_t seq=0;
  std::unordered_map<uintptr_t,IndexBinding> drawBindings;
- std::vector<Draw> observedDraws;
- size_t reportedDraws=0;
+ std::map<uint32_t,Probe> probes; // keys set once before the loader hooks are installed
  uint64_t bufferGeneration=0;
  static constexpr uint32_t indexUsage=0x40,transferSrc=0x1;static constexpr size_t maxBlob=64u<<20,maxQueue=65536;
  // Host address of [memory offset, +size) or null when that range is not mapped.
@@ -109,12 +112,14 @@ class Tracker {
   if(from<x->second.offset||(x->second.size!=~0ull&&from+size>x->second.offset+x->second.size)){return nullptr;}return x->second.base+(from-x->second.offset);}
  // Under the lock: an unmap waits until the bytes are read.
  void add(const uint8_t* p,uint64_t n,uint64_t buffer,Buffer& dst,uint64_t offset,const char* via){st.uploads++;st.bytes+=n;
-  const auto probe=probeHash.load(std::memory_order_relaxed);
-  if(probe==noProbe&&out.size()>=maxQueue){st.dropped++;return;}
+  if(!probing()&&out.size()>=maxQueue){st.dropped++;return;}
   Blob b;b.seq=++seq;b.buffer=buffer;b.offset=offset;b.bytes=uint32_t(n);b.via=via;if(allForms)b.hashes=ibHashes(p,size_t(n));else hashFormat(p,size_t(n),0,b.hashes);
-  if(probe!=noProbe&&std::any_of(b.hashes.begin(),b.hashes.end(),[&](const Hash& h){return h.variant<4&&h.value==probe;})){
-   st.drawProbeUploads++;
-   if(dst.matches.size()<16)dst.matches.push_back({b.seq,offset,n});
+  if(probing()){
+   Upload match{b.seq,offset,n};
+   for(const auto& h:b.hashes){if(h.variant>=4)break;auto probe=probes.find(h.value);
+    auto end=match.hashes.begin()+match.count;
+    if(probe!=probes.end()&&std::find(match.hashes.begin(),end,h.value)==end){++probe->second.uploads;match.hashes[match.count++]=h.value;}}
+   if(match.count){++st.drawProbeUploads;if(dst.matches.size()<16)dst.matches.push_back(match);}
   }
   if(probeOnly.load(std::memory_order_relaxed))return;
   if(out.size()>=maxQueue){st.dropped++;return;}
@@ -122,12 +127,13 @@ class Tracker {
   if(n%4==0)for(size_t i=0;i<n/4;i++){uint32_t v;std::memcpy(&v,p+4*i,4);if(v>b.max32)b.max32=v;}
   out.push_back(std::move(b));}
 public:
- static constexpr uint64_t noProbe=~uint64_t(0);
+ static constexpr size_t maxDrawHashes=64,maxDrawsPerHash=64;
  std::atomic<bool> enabled{false};
  std::atomic<bool> allForms{true};   // false (match / collect): the data as uploaded only, one pass over it
- std::atomic<uint64_t> probeHash{noProbe};
  std::atomic<bool> probeOnly{false};
- bool probing()const{return probeHash.load(std::memory_order_relaxed)!=noProbe;}
+ // Startup only. The wrappers and runtime may read the keys once installation succeeds.
+ void setDrawHashes(const std::vector<uint32_t>& hashes){probes.clear();for(uint32_t hash:hashes){if(probes.size()==maxDrawHashes)break;probes.try_emplace(hash);}}
+ bool probing()const{return !probes.empty();}
  void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;if(probing())b.generation=++bufferGeneration;buffers[buffer]=std::move(b);}
  void destroyed(uint64_t buffer){std::lock_guard<std::mutex> l(m);buffers.erase(buffer);}
  void bound(uint64_t buffer,uint64_t memory,uint64_t offset){std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end())return;b->second.memory=memory;b->second.memoryOffset=offset;b->second.bound=true;}
@@ -163,7 +169,6 @@ public:
   if(!count||!instances)return;
   std::lock_guard<std::mutex> l(m);
   st.indexedDraws++;
-  if(observedDraws.size()>=64)return;
   auto binding=drawBindings.find(command);if(binding==drawBindings.end())return;
   const auto& state=binding->second;
   auto buffer=buffers.find(state.buffer);if(buffer==buffers.end()||buffer->second.generation!=state.generation)return;
@@ -172,12 +177,16 @@ public:
   begin+=state.offset;
   for(const auto& upload:buffer->second.matches){
    if(begin<upload.offset||begin+bytes>upload.offset+upload.bytes||(begin-upload.offset)%state.width)continue;
-   if(std::any_of(observedDraws.begin(),observedDraws.end(),[&](const Draw& d){return d.upload==upload.seq&&d.bindOffset==state.offset&&d.indexBits==8*state.width&&d.first==first&&d.count==count&&d.instances==instances&&d.baseVertex==baseVertex&&d.firstInstance==firstInstance;}))continue;
-   observedDraws.push_back({upload.seq,state.buffer,upload.offset,state.offset,first,uint32_t((begin-upload.offset)/state.width),count,instances,firstInstance,baseVertex,8*state.width});
+   for(size_t i=0;i<upload.count;i++){
+    const auto hash=upload.hashes[i];auto& draws=probes.at(hash).draws;
+    if(draws.size()==maxDrawsPerHash||std::any_of(draws.begin(),draws.end(),[&](const Draw& d){return d.upload==upload.seq&&d.bindOffset==state.offset&&d.indexBits==8*state.width&&d.first==first&&d.count==count&&d.instances==instances&&d.baseVertex==baseVertex&&d.firstInstance==firstInstance;}))continue;
+    draws.push_back({upload.seq,state.buffer,upload.offset,state.offset,first,uint32_t((begin-upload.offset)/state.width),count,instances,firstInstance,baseVertex,8*state.width,hash});
+   }
    break;
   }
  }
- std::vector<Draw> takeDraws(){std::lock_guard<std::mutex> l(m);std::vector<Draw> draws(observedDraws.begin()+reportedDraws,observedDraws.end());reportedDraws=observedDraws.size();return draws;}
+ std::vector<Draw> takeDraws(){std::lock_guard<std::mutex> l(m);std::vector<Draw> draws;for(auto& kv:probes){auto& p=kv.second;draws.insert(draws.end(),p.draws.begin()+p.reported,p.draws.end());p.reported=p.draws.size();}return draws;}
+ std::vector<DrawStats> drawStats(){std::lock_guard<std::mutex> l(m);std::vector<DrawStats> out;for(const auto& kv:probes)out.push_back({kv.first,kv.second.uploads,kv.second.draws.size()});return out;}
  void resolvedName(bool wrapped){std::lock_guard<std::mutex> l(m);st.resolved++;if(wrapped)st.wrapped++;}
  void installed(bool ok,const std::string& error){std::lock_guard<std::mutex> l(m);st.installed=ok;st.error=error;enabled=ok;}
  std::vector<Blob> take(){std::lock_guard<std::mutex> l(m);std::vector<Blob> r;r.swap(out);return r;}
