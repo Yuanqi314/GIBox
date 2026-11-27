@@ -10,9 +10,8 @@ std::map<Ptr,Object> objects;std::vector<void*> allocations;std::map<unsigned,Pt
 Ptr object(){auto* bytes=std::calloc(1,512);assert(bytes);allocations.push_back(bytes);Ptr p=reinterpret_cast<Ptr>(bytes);store<Ptr>(p,p+0x100);store<Ptr>(p+0x10,p+0x180);objects[p].p=p;return p;}
 Ptr go(Ptr p,Ptr){return objects.at(p).go;}Ptr sprite(Ptr p,Ptr){return objects.at(p).sprite;}void setSprite(Ptr p,Ptr v,Ptr){objects.at(p).sprite=v;}
 bool failOverride=false;void setOverride(Ptr p,Ptr v,Ptr){if(failOverride){failOverride=false;throw std::runtime_error("fake-override-failure");}store<Ptr>(p+0xe0,v);}Ptr displayed(Ptr p){Ptr over=load<Ptr>(p+0xe0);return over?over:objects.at(p).sprite;}
-std::vector<Ptr> canvases;Ptr find(Ptr,Ptr){auto p=object();assert(canvases.size()<=32);store<uint64_t>(p+0x18,canvases.size());for(size_t i=0;i<canvases.size();i++)store<Ptr>(p+0x20+i*8,canvases[i]);return p;}
-Ptr classFromType(Ptr type,int){return type-0x98;}
-Ptr typeObject(Ptr){return object();}
+unsigned objectSearches=0;
+std::vector<Ptr> canvases;Ptr find(Ptr,Ptr){objectSearches++;auto p=object();assert(canvases.size()<=32);store<uint64_t>(p+0x18,canvases.size());for(size_t i=0;i<canvases.size();i++)store<Ptr>(p+0x20+i*8,canvases[i]);return p;}
 int type(Ptr p,Ptr){return objects.at(p).type;}void setType(Ptr p,int v,Ptr){objects.at(p).type=v;}
 uint32_t aspect(Ptr p,Ptr){return objects.at(p).aspect;}void setAspect(Ptr p,int v,Ptr){objects.at(p).aspect=v!=0;}
 Color color(Ptr p,Ptr){return objects.at(p).color;}void setColor(Ptr p,Color c,Ptr){objects.at(p).color=c;}
@@ -29,7 +28,7 @@ Ptr createSprite(Ptr texture,Rect r,Pivot p,Ptr){assert(texture&&r.w>0&&r.h>0&&p
 void destroy(Ptr p,Ptr){destroyed++;store<Ptr>(p+0x10,0);}
 Ptr resolve(abi::Offset o){assert(abi::at(o)<abi::notFound);switch(o){
 #define F(a,b) case abi::a:return reinterpret_cast<Ptr>(&b)
- F(findObjectsOfType,find);F(classFromType,classFromType);F(typeObject,typeObject);F(imageSetOverride,setOverride);F(graphicRect,rectTransform);F(rectBounds,bounds);F(textureWrap,setWrap);F(textureFilter,setFilter);
+ F(findObjectsOfType,find);F(imageSetOverride,setOverride);F(graphicRect,rectTransform);F(rectBounds,bounds);F(textureWrap,setWrap);F(textureFilter,setFilter);
  F(gameObject,go);F(imageSprite,sprite);F(imageSetSprite,setSprite);F(imageType,type);F(imageSetType,setType);F(imageAspect,aspect);F(imageSetAspect,setAspect);F(graphicColor,color);F(graphicSetColor,setColor);
  F(imageActive,imageActive);F(goActive,active);F(goActiveSelf,active);F(goSetActive,setActive);F(pin,pin);F(unpin,unpin);F(textureType,textureType);F(objectNew,newTexture);F(textureInit,init);F(texturePixels,pixels);F(textureApply,action);F(spriteCreate,createSprite);F(destroy,destroy);
 #undef F
@@ -79,7 +78,9 @@ int main(int argc,char** argv){
  // A profile package may install just an avatar or just a namecard.
  {ProfileReader profileReader;ProfileScreens profile(e);Ptr page=object(),avatar=object(),card=object(),gameAvatar=object(),gameCard=object();
   objects[avatar].go=object();objects[card].go=object();objects[avatar].sprite=gameAvatar;objects[card].sprite=gameCard;
-  store<Ptr>(page+0x88,avatar);store<Ptr>(page+0xb8,card);canvases={page};profile.observe(0,load<Ptr>(page));
+  const unsigned searches=objectSearches;
+  Ptr native=load<Ptr>(page+0x10);store<Ptr>(page+0x10,0);profile.observe(page,600);profile.tick(true,{},600);
+  store<Ptr>(page+0x88,avatar);store<Ptr>(page+0xb8,card);store<Ptr>(page+0x10,native);
   for(auto role:profileRoles){std::string mod=root+"/"+role;std::filesystem::create_directories(mod+"/images");
    write(mod+"/profile.json",std::string(R"({"format":"gibox-profile-images","version":1,)")+"\""+role+R"(":{"file":"images/)"+role+R"(.rgba","width":2,"height":2}})");
    write(mod+"/images/"+role+".rgba",data.data(),data.size());}
@@ -91,12 +92,18 @@ int main(int argc,char** argv){
   const auto& circle=onlyAvatar->images[0];assert(circle.w==6&&circle.h==6&&circle.pixels[3]==0);
   assert(circle.pixels[4*(2*6+2)]==3&&circle.pixels[4*(2*6+2)+3]==127);
   assert(circle.pixels[4+3]>0&&circle.pixels[4+3]<127);
-  expectedEdge=6;expectedLinear=1;profile.receive(onlyAvatar);profile.tick(true,{"avatar"},0x98,1000);
+  expectedEdge=6;expectedLinear=1;profile.receive(onlyAvatar);profile.tick(true,{"avatar"},1000);
   assert(displayed(avatar)!=gameAvatar&&displayed(card)==gameCard&&objects[avatar].aspect);
+  objects[avatar].active=false;profile.tick(true,{"avatar"},1300);
+  assert(displayed(avatar)==gameAvatar&&!objects[avatar].aspect);
+  objects[avatar].active=true;profile.tick(true,{"avatar"},1600);
+  assert(displayed(avatar)!=gameAvatar&&objects[avatar].aspect);
   expectedEdge=2;expectedLinear=0;
-  auto onlyCard=profileReader.update(root,{"namecard"},true);assert(onlyCard&&onlyCard->error.empty());profile.receive(onlyCard);profile.tick(true,{"namecard"},0x98,1400);
+  auto onlyCard=profileReader.update(root,{"namecard"},true);assert(onlyCard&&onlyCard->error.empty());profile.receive(onlyCard);profile.tick(true,{"namecard"},1900);
   assert(displayed(avatar)==gameAvatar&&displayed(card)!=gameCard&&!objects[avatar].aspect&&!objects[card].aspect);
-  profile.tick(true,{},0x98,1800);assert(displayed(card)==gameCard);
+  profile.tick(true,{},2200);assert(displayed(card)==gameCard);
+  store<Ptr>(page+0x10,0);profile.tick(true,{},2500);
+  assert(handles.empty()&&objectSearches==searches);
   profile.shutdown();assert(handles.empty());}
  std::filesystem::remove_all(pattern);for(auto p:allocations)std::free(p);std::cout<<"Loading images: PASS (pooled teleports, new canvas and background discovery, override recovery without reallocating, stale-cycle fallback, strict paths, aspect/color/UI restoration, bounded resources)\n";
 }

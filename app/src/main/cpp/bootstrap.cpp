@@ -80,7 +80,7 @@ void onLoginSceneUpdate(uintptr_t scene,uintptr_t method){
 }
 template<unsigned Page> void onProfileInit(uintptr_t self,uintptr_t method){
  profileOriginal[Page](self,method);
- if(self)if(auto* p=published.load(std::memory_order_acquire))p->profileClass(Page,ms::load<uintptr_t>(self));
+ if(auto* p=published.load(std::memory_order_acquire))p->profileView(self,now());
 }
 void onLoadingStart(uintptr_t self,uintptr_t method){loadingStartOriginal(self,method);if(auto* p=published.load(std::memory_order_acquire))if(self)p->loadingCanvas(self,ms::load<uintptr_t>(self+0x28));}
 void onLoadingDestroy(uintptr_t self,uintptr_t method){if(auto* p=published.load(std::memory_order_acquire))p->loadingDestroyed(self);loadingDestroyOriginal(self,method);}

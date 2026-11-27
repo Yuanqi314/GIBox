@@ -123,7 +123,8 @@ int32_t texSide(Ptr t,Ptr){assert(t&&load<Ptr>(t+0x10));return 4;}int32_t texFor
 // the loader switches by itself, else the level it is held at (IsLodLoaderSelfPaused: != 0xff).
 std::map<Ptr,Ptr> lodOnGo;std::map<Ptr,unsigned> lodHeld,lodNow;unsigned lodLookups=0;
 std::map<Ptr,std::vector<Ptr>> transformChildren;
-int childCount(Ptr t,Ptr){return int(transformChildren[t].size());}
+unsigned childCounts=0;
+int childCount(Ptr t,Ptr){childCounts++;return int(transformChildren[t].size());}
 Ptr childAt(Ptr t,int i,Ptr){return transformChildren.at(t).at(size_t(i));}
 Ptr byName(Ptr go,Ptr name,Ptr){assert(f->obj.at(go).kind=="gameobject");auto label=f->strings.at(name);if(label=="Transform")return f->transformByGo[go];if(label=="MeshFilter")return f->filterByGo[go];if(label=="MeshRenderer"||label=="SkinnedMeshRenderer")return f->rendererByGo[go];assert(label=="MiHoYoLodLoader");lodLookups++;auto it=lodOnGo.find(go);return it==lodOnGo.end()?0:it->second;}
 uint32_t gameObjectActive(Ptr go,Ptr){assert(f->obj.at(go).kind=="gameobject");return f->inactiveGos.count(go)?0:1;}
@@ -1067,7 +1068,15 @@ int main(int argc,char** argv){Fake fake;f=&fake;abi::allocVerified=true;   // t
   m.arrays[abi::getBindposes]=f->array(64,13,binds.data());
   for(uint64_t t=8911000;t<8914000;t+=100)rt.loginFrame(scene,t);
   assert(meshOf(r)!=original&&meshOf(other)==original&&f->boneReads[r]>0);
-  rt.tick(8916000);assert(meshOf(r)==original);
+  store<uint32_t>(f->manager+kCurrent,saved);f->world(f->renderer(f->mesh()));
+  const unsigned hierarchyReads=childCounts;
+  rt.tick(8914000);
+  for(uint64_t t=8914100;t<8916000;t+=100){rt.loginFrame(scene,t);rt.tick(t);}
+  assert(meshOf(r)==original&&childCounts==hierarchyReads&&text(sp+"/GIBox Log.txt").find("model-released Door")!=std::string::npos);
+  store<uint32_t>(f->manager+kCurrent,0);f->world(0);rt.tick(8916000);
+  for(uint64_t t=8916100;t<8918000;t+=100)rt.loginFrame(scene,t);
+  assert(meshOf(r)!=original);
+  rt.tick(8920000);assert(meshOf(r)==original);
   rt.shutdown();assert(f->handles.empty());transformChildren.clear();f->scene.clear();store<uint32_t>(f->manager+kCurrent,saved);}
  // 50. Merged draws: neighbours with the same material row share a submesh, their index ranges joined in draw order.
  //     A draw hidden by the variant between two of them is not drawn, ranges that continue each other become one, a

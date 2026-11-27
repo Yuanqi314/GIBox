@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <random>
 namespace ms {
 struct LoadingPrepared {std::string name,key,error;unsigned cycle=0,index=0;bool hide=false;Texture image;};
@@ -138,16 +139,25 @@ struct ProfileReader {
 class ProfileScreens {
  struct Rect {float x,y,w,h;};struct Pivot {float x,y;};
  struct Image {Ptr native=0,original=0,replacement=0;uint32_t root=0,saved=0;bool changedAspect=false;};
+ struct View {Ptr object=0;uint64_t observed=0;uint32_t root=0;bool bound=false;};
+ static constexpr size_t maxViews=16;
  Engine& e;
- std::array<std::atomic<Ptr>,2> classes{};
- std::array<Ptr,2> types{},sprites{},textures{};
- std::array<uint32_t,2> typeRoots{},spriteRoots{},textureRoots{};
+ std::mutex viewMutex;
+ std::array<View,maxViews> views{};
+ std::array<Ptr,2> sprites{},textures{};
+ std::array<uint32_t,2> spriteRoots{},textureRoots{};
  std::map<Ptr,Image> images;
  std::shared_ptr<ProfilePrepared> prepared;
  uint64_t scanAt=0;
  static bool alive(Ptr p){return p&&load<Ptr>(p+0x10)!=0;}
  uint32_t pin(Ptr p){if(!p)return 0;auto h=e.call<uint32_t>(abi::pin,p,2,Ptr(0));require(h!=0,"个人资料图片引用失败");return h;}
  void release(uint32_t& h){if(h)e.call<void>(abi::unpin,h);h=0;}
+ void pruneViews(uint64_t now){
+  for(auto& view:views)if(view.object){
+   if(alive(view.object))view.bound=true;
+   else if(view.bound||now>=view.observed+10000){release(view.root);view={};}
+  }
+ }
  void dispose(Ptr& p,uint32_t& h){if(alive(p))e.action(abi::destroy,p);p=0;release(h);}
  void restore(Ptr image,Image& row){
   if(alive(image)&&load<Ptr>(image+0x10)==row.native){
@@ -180,7 +190,13 @@ class ProfileScreens {
  }
  public:
  explicit ProfileScreens(Engine& engine):e(engine){}
- void observe(unsigned page,Ptr klass){if(page<classes.size()&&klass)classes[page].store(klass);}
+ void observe(Ptr object,uint64_t now){
+  if(!object)return;
+  std::lock_guard<std::mutex> lock(viewMutex);
+  for(const auto& view:views)if(view.object==object)return;
+  // The native Unity object may still be unbound when the managed constructor finishes.
+  for(auto& view:views)if(!view.object){view={object,now,pin(object),false};break;}
+ }
  void receive(std::shared_ptr<ProfilePrepared> next){clear();prepared=std::move(next);scanAt=0;}
  bool ready()const{return prepared&&(!prepared->names[0].empty()||!prepared->names[1].empty());}
  void appendActive(std::vector<std::string>& active)const{
@@ -190,33 +206,28 @@ class ProfileScreens {
    if(showing&&std::find(active.begin(),active.end(),mod)==active.end())active.push_back(mod);
   }
  }
- void shutdown(){clear();for(auto& handle:typeRoots)release(handle);types.fill(0);}
- void tick(bool enabled,const std::vector<std::string>& selected,unsigned byval,uint64_t now){
+ void shutdown(){
+  {std::lock_guard<std::mutex> lock(viewMutex);for(auto& view:views){release(view.root);view={};}}
+  clear();
+ }
+ void tick(bool enabled,const std::vector<std::string>& selected,uint64_t now){
   std::array<bool,2> wanted{};
   if(enabled&&prepared)for(size_t i=0;i<wanted.size();i++)if(!prepared->names[i].empty())
    wanted[i]=std::find(selected.begin(),selected.end(),prepared->names[i])!=selected.end();
-  if(!wanted[0]&&!wanted[1]){if(!images.empty()||textures[0]||textures[1])clear();return;}
-  if(!byval||now<scanAt)return;
-  scanAt=now+300;std::set<Ptr> seen;
-  for(size_t page=0;page<classes.size();page++){
-   Ptr klass=classes[page].load();if(!klass)continue;
-   if(!types[page]){
-    require(e.call<Ptr>(abi::classFromType,klass+byval,1)==klass,"个人资料页 Type 校验失败");
-    Ptr type=e.call<Ptr>(abi::typeObject,klass+byval);require(alive(type),"个人资料页 Type 未就绪");typeRoots[page]=pin(type);types[page]=type;
-   }
-   Ptr array=e.call<Ptr>(abi::findObjectsOfType,types[page],Ptr(0));if(!array)continue;
-   uint32_t root=pin(array);
-   try{
-    auto count=load<uint64_t>(array+0x18);require(count<=64,"个人资料页数量异常");
-    for(uint64_t n=0;n<count;n++){
-     Ptr view=load<Ptr>(array+0x20+8*n);if(!alive(view)||load<Ptr>(view)!=klass)continue;
-     for(size_t i=0;i<wanted.size();i++)if(wanted[i]){
-      // playerIconImage and _nameCardPic in both profile classes, CN and global 7.2.
-      Ptr image=load<Ptr>(view+(i==0?0x88:0xb8));
-      if(alive(image)&&(e.call<uint32_t>(abi::imageActive,image,Ptr(0))&1)&&seen.insert(image).second)apply(image,i);
-     }
-    }
-   }catch(...){release(root);throw;}release(root);
+  const bool selectedImage=wanted[0]||wanted[1];
+  if(!selectedImage&&(!images.empty()||textures[0]||textures[1]))clear();
+  if(now<scanAt)return;
+  scanAt=now+300;std::array<Ptr,maxViews> live{};
+  {
+   std::lock_guard<std::mutex> lock(viewMutex);pruneViews(now);
+   if(!selectedImage)return;
+   for(size_t i=0;i<views.size();i++)if(views[i].bound)live[i]=views[i].object;
+  }
+  std::set<Ptr> seen;
+  for(Ptr view:live)if(alive(view))for(size_t i=0;i<wanted.size();i++)if(wanted[i]){
+   // playerIconImage and _nameCardPic in both profile classes, CN and global 7.2.
+   Ptr image=load<Ptr>(view+(i==0?0x88:0xb8));
+   if(alive(image)&&(e.call<uint32_t>(abi::imageActive,image,Ptr(0))&1)&&seen.insert(image).second)apply(image,i);
   }
   for(auto it=images.begin();it!=images.end();){
    if(seen.count(it->first)){++it;continue;}

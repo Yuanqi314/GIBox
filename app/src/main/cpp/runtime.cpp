@@ -1654,6 +1654,9 @@ struct Runtime::Impl {
  Ptr loginRoot=0,loginRootNative=0;uint64_t loginAt=0;
  struct LoginRenderer {Ptr native;uint32_t bindposeCrc;};
  std::map<Ptr,LoginRenderer> loginRenderers;std::string loginNote;
+ static bool loginOnly(const std::vector<SceneTarget>& targets){
+  return !targets.empty()&&std::all_of(targets.begin(),targets.end(),[](const SceneTarget& t){return t.target.mesh=="LoginScene_Door01_Vo";});
+ }
  void clearLoginDoor(){freeOwned(loginRendererPins);loginRenderers.clear();freeOwned(loginRootPin);loginRoot=loginRootNative=0;}
  void observeLoginDoor(Ptr root,uint64_t now){
   loginAt=now;Ptr native=alive(root)?load<Ptr>(root+0x10):0;
@@ -1663,6 +1666,7 @@ struct Runtime::Impl {
  }
  void reportLoginDoor(const std::string& note){if(note!=loginNote){loginNote=note;log("login-door",note);}}
  void discoverLoginDoor(std::vector<Ptr>& out){
+  if(ch.entity)return;
   std::set<uint32_t> checks;
   for(auto* m:wantedNow)for(const auto& t:m->sceneTargets)if(t.bindposeCrc)checks.insert(t.bindposeCrc);
   if(checks.empty()||!alive(loginRoot)||load<Ptr>(loginRoot+0x10)!=loginRootNative){
@@ -1809,7 +1813,7 @@ struct Runtime::Impl {
  // the order changed (discover); parts only one of them replaces are shown from each.
  std::vector<const ModelInfo*> chooseModels(){
   std::vector<const ModelInfo*> out;std::set<std::string> taken;
-  for(auto& n:ctl.selected)for(auto& m:models)if(m.name==n&&taken.insert(m.path).second){auto v=ctl.variables.find(m.name);
+  for(auto& n:ctl.selected)for(auto& m:models)if(m.name==n&&!(ch.entity&&loginOnly(m.sceneTargets))&&taken.insert(m.path).second){auto v=ctl.variables.find(m.name);
    if(drawn(m.replaceWhen,pick(m.variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second)))out.push_back(&m);}
   return out;}
  // A selected model left out only because its own switch (replaceWhen) is off.
@@ -3268,9 +3272,10 @@ struct Runtime::Impl {
    // consume() may replace `models`: hand-off pointers into it are dropped first and set again below.
    seen.erase(std::remove_if(seen.begin(),seen.end(),[&](const Seen& sn){return !seenLive(sn);}),seen.end());
    tickPhase="读取文件与当前角色";wantedNow.clear();bindingTargets.clear();bindingReady=false;if(!worker.background()){workerTick(now);}consume();synthesis.collect();ch=current();bindingStats();tickPhase="骨骼库与预览";
+   if(ch.entity&&loginRoot){clearLoginDoor();discoverAt=0;}
    if(ch.config!=shownCharacter){shownCharacter=ch.config;log("character",ch.entity?std::to_string(ch.config):std::string("无"));}
    try{loading.tick(ctl.enabled,ctl.selected,ctl.loadingFit);}catch(const std::exception& ex){if(loadingError!=ex.what()){loadingError=ex.what();log("loading-image-error",loadingError);}}
-   try{profile.tick(ctl.enabled,ctl.selected,byvalOffset,now);}catch(const std::exception& ex){if(profileError!=ex.what()){profileError=ex.what();log("profile-image-error",profileError);}}
+   try{profile.tick(ctl.enabled,ctl.selected,now);}catch(const std::exception& ex){if(profileError!=ex.what()){profileError=ex.what();log("profile-image-error",profileError);}}
    try{textureDiagTick(now);}catch(const std::exception& ex){log("texture-diag-unsupported",std::string("本轮诊断中止：")+ex.what());}
    try{textureModTick(now);}catch(const std::exception& ex){log("texture-error",std::string("本轮纯贴图 MOD 处理中止：")+ex.what());}
    try{ibHashTick(now);}catch(const std::exception& ex){log("ib-capture",std::string("本轮中止：")+ex.what());}
@@ -3299,7 +3304,7 @@ struct Runtime::Impl {
    bool restoring=false;for(auto& s:sets)if(!wantedPaths.count(s->path)&&!detachSet(*s))restoring=true;
    {std::vector<Set*> idle;for(auto& s:sets){bool attached=false;for(auto& a:attachments)attached|=a.second->set==s.get();if(attached)s->used=now;else if(!wantedPaths.count(s->path))idle.push_back(s.get());}
     std::sort(idle.begin(),idle.end(),[](Set* a,Set* b){return a->used>b->used;});uint64_t kept=0;
-    for(Set* x:idle){if(now>x->used+idleMs||kept+x->bytes>idleBudget){releaseSet(x);}else{kept+=x->bytes;}}}
+    for(Set* x:idle){if((ch.entity&&loginOnly(x->sceneTargets))||now>x->used+idleMs||kept+x->bytes>idleBudget){releaseSet(x);}else{kept+=x->bytes;}}}
    std::vector<Set*> live;for(auto* m:wanted)if(Set* s=liveSet(*m))live.push_back(s);
    tickPhase="场景扫描";if(now>=discoverAt){discoverAt=now+500;discover(live,now);if(rendererTypeObject&&!goClass)try{seedGameObjectClass();}catch(const std::exception& ex){log("spawn-ready-error",ex.what());}for(auto* m:wanted)try{learnTargets(*m);}catch(const std::exception& ex){log("target-error",ex.what());}
     live.clear();for(auto* m:wanted)if(Set* s=liveSet(*m))live.push_back(s);}  // a moved target releases its set
@@ -3377,10 +3382,12 @@ void ms::Runtime::loadingCanvas(Ptr canvas,Ptr background)noexcept{try{if(!p->ti
 void ms::Runtime::loadingImage(Ptr image,bool shown)noexcept{try{if(!p->inTick&&p->onTickThread("loading-image")){if(p->loading.matches(image)){p->loading.event(image,shown);p->pollLoading();}else if(shown&&p->loading.ready()){auto now=p->texClock();if(now>=p->loadingImageProbeAt){p->loadingImageProbeAt=now+50;p->loadingDiscoverAt=0;p->pollLoading();}}}}catch(const std::exception& ex){p->log("loading-image-error",ex.what());}}
 void ms::Runtime::loadingDestroyed(Ptr canvas)noexcept{try{if(!p->inTick&&p->onTickThread("loading-destroy"))p->loading.destroyed(canvas);}catch(const std::exception& ex){p->log("loading-image-error",ex.what());}}
 
-void ms::Runtime::profileClass(unsigned page,Ptr klass)noexcept{p->profile.observe(page,klass);}
+void ms::Runtime::profileView(Ptr view,uint64_t now)noexcept{
+ try{p->profile.observe(view,now);}catch(const std::exception& ex){p->log("profile-image-error",ex.what());}
+}
 void ms::Runtime::loginFrame(Ptr scene,uint64_t now)noexcept{try{
  if(!p->tickTid.load())p->tickTid.store(threadId());
- if(p->inTick||!p->onTickThread("login-door")||!alive(scene))return;
+ if(!p->onTickThread("login-door")||p->inTick||p->ch.entity||!alive(scene))return;
  p->observeLoginDoor(load<Ptr>(scene+abi::loginDoorNode),now);
  if(now>=p->next)p->tick(now);
  }catch(const std::exception& ex){p->reportLoginDoor(ex.what());}}
