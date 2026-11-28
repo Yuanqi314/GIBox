@@ -527,8 +527,13 @@ public:
    const auto bytes=cols(w),pitch=cols(copy.rowLength?copy.rowLength:w),rows=(uint64_t(h)+image.blockHeight-1)/image.blockHeight;
    const auto n=(rows-1)*pitch+bytes;
    if(pitch>=bytes&&n<=maxBlob&&copy.offset<=source->second.size&&n<=source->second.size-copy.offset){
-    if(auto* hostData=host(source->second,copy.offset,n)){uint32_t digest=0;
-     for(uint64_t row=0;row<rows;row++)digest=crc32c(digest,hostData+row*pitch,size_t(bytes));hash=digest;}
+    if(auto* hostData=host(source->second,copy.offset,n)){
+     uint32_t digest=0;
+     for(uint64_t row=0;row<rows;row++){
+      digest=crc32c(digest,hostData+row*pitch,size_t(bytes));
+     }
+     hash=digest;
+    }
    }
   }
   saveWrite(command,{dst,image.generation,0,0,copy.mip,copy.layer,true,hash});
