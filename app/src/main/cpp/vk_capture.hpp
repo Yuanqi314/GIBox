@@ -117,6 +117,7 @@ struct Draw {
 struct DrawStats {uint32_t hash=0;uint64_t uploads=0;size_t draws=0;};
 struct SkinHit {
  unsigned profile=~0u,slot=0;uint32_t first=0,count=0;
+ std::optional<uint32_t> iniHash{};
  explicit operator bool()const{return profile!=~0u;}
 };
 struct SkinRoute {uint32_t hash=0,total=0;unsigned profile=0;std::vector<std::pair<uint32_t,uint32_t>> ranges;bool pcRule=false;};
@@ -175,8 +176,9 @@ inline std::optional<std::vector<ResourceMatch>> resourceMatches(std::string_vie
  return std::nullopt;
 }
 struct SkinLayoutMiss {unsigned profile;uintptr_t pipeline;std::string details;};
-enum class SkinMiss : unsigned {DrawRange,Ambiguous,Graphics,SkinOutput,Bones,Resources,Pose,VertexBindings,Material,ComputeDescriptors,Total};
+enum class SkinMiss : unsigned {DrawRange,Ambiguous,Graphics,SkinOutput,Bones,Resources,Pose,VertexBindings,Material,ComputeDescriptors,Logic,Total};
 using SkinChoices=std::map<std::string,std::map<std::string,int>>;
+struct SkinKey {std::string mod,section;size_t file=0;int select=-1,hold=0;bool back=false;};
 inline constexpr uint32_t paimonBodyHash=0x5b4cdc9cu;
 // A narrow test route. Do not allow a partial match (instances, index format, range or base vertex).
 inline int paimonTintPart(uint32_t hash,uint64_t uploadBytes,uint32_t first,uint32_t count,uint32_t width,uint32_t instances,int32_t baseVertex,uint32_t firstInstance){
@@ -380,7 +382,26 @@ public:
  bool allSkins=false;
  bool inspectResources=false; // existing hash collection mode, set before installing the loader hooks
  std::vector<ResourceRule> resourceRules; // published with routesReady
+ bool logicResources=false; // published with routesReady
+ std::atomic<bool> skinLogic{false};
  bool gpuEnabled()const{return inspectResources||(allSkins&&(!routesReady.load(std::memory_order_acquire)||!resourceRules.empty()));}
+ bool gpuBuffersEnabled()const{return gpuEnabled()||(allSkins&&logicResources);}
+ std::optional<uint32_t> boundResource(uintptr_t command,const ResourceSlot& slot){
+  std::lock_guard<std::mutex> lock(m);return resourceHash(command,false,slot);
+ }
+ std::optional<uint32_t> liveStorage(uintptr_t command,uint64_t handle,uint64_t bytes){
+  std::lock_guard<std::mutex> lock(m);return bufferResource(command,{ResourceKind::Storage,handle,0,bytes});
+ }
+ void queueSkinKeys(std::vector<SkinKey> keys){
+  std::lock_guard<std::mutex> lock(m);
+  for(auto& key:keys){if(skinKeys.size()<256){skinKeys.push_back(std::move(key));}}
+ }
+ std::vector<SkinKey> takeSkinKeys(){
+  std::lock_guard<std::mutex> lock(m);std::vector<SkinKey> out;out.swap(skinKeys);return out;
+ }
+private:
+ std::vector<SkinKey> skinKeys;
+public:
  std::vector<std::string> skinMods; // profile index -> mod; published before install
  std::unordered_map<uint32_t,SkinRoute> skinRoutes;
  std::unordered_map<uint32_t,std::vector<IniSkinRule>> iniSkinRules;
@@ -415,8 +436,11 @@ public:
     uploads.erase(std::remove_if(uploads.begin(),uploads.end(),[](const auto& u){return !u.count;}),uploads.end());
    }
    if(!inspectResources&&resourceRules.empty()){
-    for(auto& resource:buffers)resource.second.signatures.clear();
-    images.clear();views.clear();shaders.clear();pipelines.clear();descriptorLayouts.clear();descriptors.clear();commands.clear();pending.clear();pendingOverflow.clear();
+    images.clear();views.clear();shaders.clear();pipelines.clear();descriptorLayouts.clear();descriptors.clear();
+    if(!logicResources){
+     for(auto& resource:buffers){resource.second.signatures.clear();}
+     commands.clear();pending.clear();pendingOverflow.clear();
+    }
    }
    routesReady.store(true,std::memory_order_release);
   }
@@ -442,7 +466,7 @@ public:
  void setSkinChoices(const SkinChoices& choices){std::atomic_store(&skinChoices,std::make_shared<const SkinChoices>(choices));}
  bool skinBackendReady()const{return enabled&&allSkins&&textureUpload.load(std::memory_order_relaxed)==1&&indexedDrawSeen.load(std::memory_order_relaxed);}
  bool hasSkin(const std::string& name)const{return std::find(skinMods.begin(),skinMods.end(),name)!=skinMods.end();}
- void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc))&&!(gpuEnabled()&&(usage&resourceUsages))&&!(skinnedModel&&(usage&0x20)&&skinSize(size)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;if(probing())b.generation=++bufferGeneration;buffers[buffer]=std::move(b);}
+ void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc))&&!(gpuBuffersEnabled()&&(usage&resourceUsages))&&!(skinnedModel&&(usage&0x20)&&skinSize(size)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;if(probing())b.generation=++bufferGeneration;buffers[buffer]=std::move(b);}
  void destroyed(uint64_t buffer){std::lock_guard<std::mutex> l(m);buffers.erase(buffer);}
  void bound(uint64_t buffer,uint64_t memory,uint64_t offset){std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end())return;b->second.memory=memory;b->second.memoryOffset=offset;b->second.bound=true;b->second.skinCrc=0;b->second.signatures.clear();}
  void mapped(uint64_t memory,uint64_t offset,uint64_t size,const void* p){std::lock_guard<std::mutex> l(m);maps[memory]={static_cast<const uint8_t*>(p),offset,size};}
@@ -450,7 +474,7 @@ public:
  // A copy into an index buffer: each region's source bytes, as written into the staging memory before the copy.
  void copied(uint64_t src,uint64_t dst,const Copy* regions,uint32_t count,uintptr_t command=0){
   std::lock_guard<std::mutex> l(m);auto d=buffers.find(dst);if(d==buffers.end())return;auto s=buffers.find(src);
-  if(gpuEnabled()&&(d->second.usage&resourceUsages))for(uint32_t i=0;i<count;i++){
+  if(gpuBuffersEnabled()&&(d->second.usage&resourceUsages))for(uint32_t i=0;i<count;i++){
    const auto& r=regions[i];if(!r.size||r.dstOffset>d->second.size||r.size>d->second.size-r.dstOffset)continue;
    std::optional<uint32_t> hash;
    if(r.size<=maxBlob)hash=bufferResource(command,{ResourceKind::Vertex,src,r.srcOffset,r.size},true);
@@ -495,7 +519,7 @@ public:
   auto p=pending.find(command);if(p==pending.end())return;
   for(const auto& w:p->second)remember(w);}
  void updated(uintptr_t command,uint64_t dst,uint64_t offset,uint64_t size,const void* data){
-  if(!gpuEnabled())return;
+  if(!gpuBuffersEnabled())return;
   std::lock_guard<std::mutex> l(m);auto d=buffers.find(dst);if(d==buffers.end()||offset>=d->second.size)return;
   if(size==~0ull&&!data)size=d->second.size-offset;
   if(!size||size>d->second.size-offset)return;
@@ -605,13 +629,13 @@ public:
   int part=-1;
   bool conflict=false,compatConflict=false,iniChecked=false;
   SkinHit compatibility;
-  auto accept=[&](SkinHit& hit,unsigned profile,unsigned slot,uint32_t relative,bool& ambiguous){
+  auto accept=[&](SkinHit& hit,unsigned profile,unsigned slot,uint32_t relative,bool& ambiguous,std::optional<uint32_t> hash={}){
    if(hit&&(hit.profile!=profile||hit.slot!=slot)){
     const bool previous=skinActive(hit.profile),next=skinActive(profile);
     if(previous&&!next)return;
     ambiguous=previous==next;
    }
-   hit={profile,slot,relative,count};
+   hit={profile,slot,relative,count,hash};
   };
   if(skin&&allSkins&&!baseVertex&&instances==1&&count%3==0)for(const auto& rule:resourceRules){
    const auto& d=rule.draw;
@@ -634,7 +658,7 @@ public:
        if(baseVertex||instances!=1||count%3||upload.bytes%state.width)continue;
        if(rule.first>=0?relative!=rule.first:(relative||uint64_t(count)*state.width!=upload.bytes))continue;
        if(rule.count>=0&&count!=rule.count)continue;
-       accept(*skin,rule.profile,rule.slot,relative,conflict);
+       accept(*skin,rule.profile,rule.slot,relative,conflict,hash);
       }
      }
      auto route=skinRoutes.find(hash);

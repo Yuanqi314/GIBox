@@ -221,7 +221,8 @@ public final class CompatibilityTest {
         File mixedOut=new File(base,"gpu-resources-out");
         ModelConverter.convert(mixed,null,mixedOut,Characters.SCENE,gpuSceneOpt,DECODE,new StringBuilder());
         List<Object> matches=Json.arr(Fixtures.part(mixedOut,0).get("sourceDraws"),"source draws",2,2);
-        ok(matches.stream().anyMatch(x->gpuMatch.equals(Json.obj(x,"draw").get("gpu"))&&!Json.obj(x,"draw").containsKey("ib"))&&
+        ok(matches.stream().anyMatch(x->gpuMatch.equals(Json.obj(x,"draw").get("gpu"))&&!Json.obj(x,"draw").containsKey("ib")&&
+           "44444444".equals(Json.obj(x,"draw").get("logicIb")))&&
            matches.stream().anyMatch(x->"44444444".equals(Json.obj(x,"draw").get("ib"))),"Vulkan rules and PC IB rules can target separate draws in one model");
         if(nativeChecker!=null){Process check=new ProcessBuilder(nativeChecker,mixedOut.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"native loader accepts mixed resource rules");}
         File sceneBones=new File(base,"scene-bones");Map<String,Object> sceneTarget=Fixtures.target("NpcBody",6,2,2);

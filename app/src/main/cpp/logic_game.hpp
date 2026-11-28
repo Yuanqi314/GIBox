@@ -25,18 +25,56 @@ namespace ms {
 
 class LogicDriver {
 public:
+ enum class Source {Replay,Live};
+ struct LiveDraw {std::string signature;size_t pre=0,total=0;bool original=true;};
+ using Bindings=std::map<std::string,migoto::Ref>;
+ struct RelatedDraw {Bindings original;Bindings selected;};
  struct Stats {uint64_t presents=0,gaps=0,misses=0,changes=0,keys=0,stepUs=0,maxStepUs=0;};
  // Refuses logic data it cannot match by (spec.unsupported); the runtime then keeps FrameLoop and logs why.
  // persisted: the persist variables saved for this model, by full name (persistent()); others are ignored, as upstream
  // ignores d3dx_user.ini lines for variables that are not persist.
- explicit LogicDriver(const LogicSpec& s,const std::map<std::string,float>& persisted={}):spec(s){
+ explicit LogicDriver(const LogicSpec& s,const std::map<std::string,float>& persisted={},Source source=Source::Replay):spec(s){
   if(!spec.unsupported.empty())throw std::runtime_error(spec.unsupported);
   std::vector<migoto::IniFile> files;for(auto& f:spec.files)files.push_back({f.ns,f.text});
   engine.load(files);engine.start(persisted);
   for(auto& p:persisted){auto g=engine.globals.find(p.first);if(g!=engine.globals.end()&&(g->second.flags&migoto::VarPersist))restored.insert(p.first);}
   for(auto& r:engine.resources)if(!spec.resources.count(r.first))unknown.push_back(r.second.name);
-  for(auto& p:spec.passes){migoto::Session::Pass x;x.name=p.name;for(auto& b:p.bindings)x.draw.bindings[b.first]=migoto::Ref::game(b.second);x.draw.checks=p.checks;x.draw.call=p.call;passes.push_back(std::move(x));}
-  draws();}
+  if(source==Source::Replay){
+   for(auto& p:spec.passes){migoto::Session::Pass x;x.name=p.name;for(auto& b:p.bindings)x.draw.bindings[b.first]=migoto::Ref::game(b.second);x.draw.checks=p.checks;x.draw.call=p.call;passes.push_back(std::move(x));}
+   draws();
+  }}
+ void present(double seconds){engine.frame(seconds);stats.presents++;}
+ // A related pass (for example skinning) can supply resource bindings for the indexed draw.
+ RelatedDraw observe(const migoto::DrawInfo& d){
+  auto r=engine.draw(d);
+  if(!r.draws.empty()||!r.customShaders.empty()||r.unsupported)return {};
+  return {d.bindings,std::move(r.bindings)};}
+ void useRelated(const std::string& name,const RelatedDraw& related){
+  liveBindings[name]=related.original;
+  current[name].bindings=related.selected;}
+ LiveDraw drawLive(const std::string& part,const migoto::DrawInfo& d){
+  auto result=engine.draw(d);
+  if(result.unsupported||!result.customShaders.empty()||(!result.skip&&result.bindings!=d.bindings))return {};
+  const auto fields=spec.parts.find(part);if(fields==spec.parts.end())return {};
+  std::set<std::string> slots;
+  for(const auto& field:fields->second){if(field.pass==part){slots.insert(field.slot);}}
+  LiveDraw plan;plan.original=!result.skip;
+  for(size_t i=0;i<result.draws.size();i++){
+   const auto& draw=result.draws[i];
+   if(emptyIndexed(draw))continue;
+   const auto ib=draw.bindings.find("ib");
+   if(draw.kind!="drawindexed"||draw.fromCaller||ib==draw.bindings.end()||ib->second.kind!=migoto::Ref::Mod)return {};
+   for(const auto& binding:draw.bindings){
+    const auto original=d.bindings.find(binding.first);
+    if(original!=d.bindings.end()&&binding.second==original->second)continue;
+    if(!slots.count(binding.first)||binding.second.kind!=migoto::Ref::Mod)return {};
+   }
+   if(i<result.preDraws){plan.pre++;}
+   plan.total++;
+  }
+  liveBindings[part]=d.bindings;current[part]=std::move(result);
+  plan.signature=signature(part,true);
+  return plan;}
  // The prebuilt choice (animation frame or outfit) the current selection matches; -1 when it matches none.
  int frame()const{return matched;}
  // engineFrame: the game's frame counter (Time.frameCount); seconds: a monotonic clock. Returns true when the
@@ -46,7 +84,7 @@ public:
   uint32_t elapsed=engineFrame-last;if(!elapsed)return false;last=engineFrame;
   if(elapsed>240){stats.gaps++;return false;}
   auto start=std::chrono::steady_clock::now();int before=matched;
-  for(uint32_t n=0;n<elapsed;n++){engine.frame(seconds);stats.presents++;draws();}
+  for(uint32_t n=0;n<elapsed;n++){present(seconds);draws();}
   auto us=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());stats.stepUs+=us;stats.maxStepUs=std::max(stats.maxStepUs,us);
   if(matched!=before)stats.changes++;
   return matched!=before;}
@@ -55,10 +93,9 @@ public:
  // each with its kind, range and the identity of every field; "original|" first when the game's draw is not skipped.
  // A drawindexed of 0 indices, or one with ib = null, draws nothing and is not recorded (the converter's rules,
  // ModelConverter drawCalls).
- std::string signature(const std::string& part)const{auto it=spec.parts.find(part);auto own=current.find(part);if(it==spec.parts.end()||own==current.end())return "?";
+ std::string signature(const std::string& part,bool live=false)const{auto it=spec.parts.find(part);auto own=current.find(part);if(it==spec.parts.end()||own==current.end())return "?";
   const auto& r=own->second;std::vector<const migoto::IssuedDraw*> drawn;
-  for(auto& d:r.draws){if(d.kind=="drawindexed"&&!d.automatic&&!d.args.empty()&&d.args[0]==0)continue;
-   auto ib=d.bindings.find("ib");if(d.kind=="drawindexed"&&ib!=d.bindings.end()&&ib->second.kind==migoto::Ref::Null)continue;drawn.push_back(&d);}
+  for(auto& d:r.draws){if(!emptyIndexed(d)){drawn.push_back(&d);}}
   if(drawn.empty())return r.skip?"hidden":"original";
   std::string out=r.skip?"":"original|";
   for(auto* p:drawn){auto& d=*p;out+="kind="+d.kind+";";
@@ -68,6 +105,12 @@ public:
    for(auto& f:it->second){const std::map<std::string,migoto::Ref>* b=&d.bindings;
     if(f.pass!=part){auto other=current.find(f.pass);b=nullptr;if(other!=current.end())b=other->second.draws.empty()?&other->second.bindings:&other->second.draws.front().bindings;}
     migoto::Ref ref;if(b){auto x=b->find(f.slot);if(x!=b->end())ref=x->second;}
+    if(live&&ref.kind==migoto::Ref::Game){
+     auto initial=liveBindings.find(f.pass);
+     if(initial!=liveBindings.end()){
+      auto slot=initial->second.find(f.slot);if(slot!=initial->second.end()&&slot->second==ref){ref={};}
+     }
+    }
     out+=f.name+"="+identity(ref)+";";}
    out+="|";}
   return out;}
@@ -123,8 +166,13 @@ public:
    +"警告 "+std::to_string(warn)+" 条，限制 "+std::to_string(lim)+" 条";}
 private:
  const LogicSpec& spec;migoto::Engine engine;std::vector<migoto::Session::Pass> passes;
+ std::map<std::string,Bindings> liveBindings;
  std::map<std::string,migoto::DrawResult> current;int matched=-1;bool clock=false;uint32_t last=0;std::set<std::string> restored;
- static std::string number(float v){if(v==float(int64_t(v))&&std::fabs(v)<1e15f)return std::to_string(int64_t(v));char b[32];std::snprintf(b,sizeof b,"%.9g",double(v));return b;}
+ static bool emptyIndexed(const migoto::IssuedDraw& d){
+  if(d.kind!="drawindexed")return false;
+  if(!d.automatic&&!d.args.empty()&&d.args[0]==0)return true;
+  const auto ib=d.bindings.find("ib");return ib!=d.bindings.end()&&ib->second.kind==migoto::Ref::Null;}
+ static std::string number(float v){if(std::fabs(v)<1e15f&&v==float(int64_t(v)))return std::to_string(int64_t(v));char b[32];std::snprintf(b,sizeof b,"%.9g",double(v));return b;}
  // What the converter calls a ref: a [Resource] by its identity (file and layout; aliases of one file are one), a game
  // resource by its hash, "null", or "-" when nothing is bound.
  std::string identity(const migoto::Ref& r)const{switch(r.kind){case migoto::Ref::None:return "-";case migoto::Ref::Null:return "null";

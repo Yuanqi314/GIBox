@@ -1206,7 +1206,7 @@ struct Runtime::Impl {
       log("vulkan-skin-bounds",capture.skinMods[i]+"：MOD 骨骼索引至少需要 "+std::to_string(bones>>16)+" 根，实时矩阵只有 "+std::to_string(bones&0xffffu)+" 根，保留原版绘制");
     }
     std::string models;for(const auto& entry:draws)models+=(models.empty()?"；":"，")+entry.first+" "+std::to_string(entry.second);
-    static constexpr const char* reasons[]={"绘制范围或实例不符","INI 规则冲突","未登记兼容的顶点布局","未关联原版蒙皮输出","骨骼超出实时矩阵","资源未就绪","等待姿势","顶点缓冲绑定不兼容","贴图绑定未确认","蒙皮描述符不兼容"};
+    static constexpr const char* reasons[]={"绘制范围或实例不符","INI 规则冲突","未登记兼容的顶点布局","未关联原版蒙皮输出","骨骼超出实时矩阵","资源未就绪","等待姿势","顶点缓冲绑定不兼容","贴图绑定未确认","蒙皮描述符不兼容","实时 INI 无对应绘制资源"};
     static_assert(std::size(reasons)==unsigned(vkcap::SkinMiss::Total));
     for(size_t i=0;i<std::size(reasons);i++){
      const auto n=capture.skinMisses[i].load(std::memory_order_relaxed);if(n)models+="；"+std::string(reasons[i])+" "+std::to_string(n);
@@ -3364,6 +3364,22 @@ struct Runtime::Impl {
    if(capture.allSkins){
     capture.setSkinReplacement(ctl.enabled,!ctl.useUnityModels,ctl.selected);
     if(!previousVars||!std::atomic_load(&capture.skinChoices))capture.setSkinChoices(ctl.variables);
+    capture.skinLogic.store(ctl.exp.logicCore,std::memory_order_relaxed);
+    if(!ctl.useUnityModels&&capture.routesReady.load(std::memory_order_acquire)){
+     std::vector<vkcap::SkinKey> keys;
+     for(const auto& mod:ctl.keys){
+      if(!capture.hasSkin(mod.first))continue;
+      auto& seen=keySeen[mod.first];
+      for(const auto& key:mod.second){
+       if(key.seq<=seen)continue;
+       seen=key.seq;
+       if(ctl.enabled&&ctl.exp.logicCore&&std::find(ctl.selected.begin(),ctl.selected.end(),mod.first)!=ctl.selected.end()){
+        keys.push_back({mod.first,key.section,key.file,key.select,key.hold,key.back});
+       }
+      }
+     }
+     if(!keys.empty()){capture.queueSkinKeys(std::move(keys));}
+    }
    }
    else capture.setPaimonReplacement(ctl.enabled&&!(ctl.useUnityModels&&capture.skinnedModel),ctl.tex.paimonTint,capture.skinnedModel?ctl.tex.paimonMeshMod:ctl.tex.paimonTextureMod);
    if(!diagnosticOnly){failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();bindingRejected.clear();bindingStamp.clear();}}

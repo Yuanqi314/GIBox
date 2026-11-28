@@ -831,6 +831,7 @@ public final class ModelConverter {
         String key=(gpu==null?draw.hash:gpu)+"|"+first+"|"+count;Integer existing=g.sourceSlots.get(key);if(existing!=null)return existing;
         int slot=g.sourceDraws.size();if(slot>=64)return -1;
         Map<String,Object> rule=gpu==null?Json.of("ib",draw.hash,"slot",slot):Json.of("gpu",gpu,"slot",slot);
+        if(gpu!=null&&draw.hash.matches("[0-9a-f]{8}"))rule.put("logicIb",draw.hash);
         if(first!=null)rule.put("first",first);if(count!=null)rule.put("count",count);
         g.sourceSlots.put(key,slot);g.sourceDraws.add(rule);return slot;
     }
@@ -1089,10 +1090,13 @@ public final class ModelConverter {
      *  "hidden" (handling = skip, no draw of its own), "original" (the game draws it), or its draws in 3DMigoto's
      *  order (match_priority, section name, command order), each with its range and the identity of every field,
      *  "original|" first when the game's own draw is not skipped. Null with the reason when it cannot be stated. */
-    private static String logicSignature(List<Draw> draws,boolean skip,Map<String,LogicSection> byName,Map<String,String> table,String mainNs,StringBuilder why){
-        if(draws.isEmpty())return skip?"hidden":"original";
+    private static List<Draw> logicOrder(List<Draw> draws,Map<String,LogicSection> byName){
         List<Draw> order=new ArrayList<>(draws);
         order.sort((x,y)->{LogicSection a=byName.get(x.issuer),b=byName.get(y.issuer);int pa=a==null?0:a.priority,pb=b==null?0:b.priority;return pa!=pb?Integer.compare(pa,pb):("TextureOverride"+x.issuer).compareTo("TextureOverride"+y.issuer);});
+        return order;}
+    private static String logicSignature(List<Draw> draws,boolean skip,Map<String,LogicSection> byName,Map<String,String> table,String mainNs,StringBuilder why){
+        if(draws.isEmpty())return skip?"hidden":"original";
+        List<Draw> order=logicOrder(draws,byName);
         StringBuilder out=new StringBuilder(skip?"":"original|");
         for(Draw d:order){for(String k:d.bindings.keySet())if(k.startsWith("compat:")||k.startsWith("texture-role:")){why.append(d.part).append(" 用了 TexFx / ORFix 兼容转换");return null;}
             out.append("kind=drawindexed;count=").append(d.count<0?"auto":Integer.toString(d.count)).append(";start=").append(d.start).append(";base=0;");
@@ -1120,7 +1124,7 @@ public final class ModelConverter {
         if(kept.size()>256){log.append("逻辑核心数据：").append(kept.size()).append(" 种绘制结果，超过 256，不写入\n");return null;}
         Map<String,Object> data=logicData(ini,src,kept,mapping,out,log,"种款式");if(data==null)return null;List<Object> sigs=(List<Object>)data.remove("choices"),variants=new ArrayList<>();
         for(int i=0;i<sigs.size();i++){Map<String,Object> values=new LinkedHashMap<>();for(String v:variables)values.put(v,kept.get(i).get(v));variants.add(Json.of("assignment",values,"draws",sigs.get(i)));}
-        data.put("variants",variants);return data;}
+        data.put("variants",variants);if(variables.isEmpty())data.put("static",true);return data;}
     /** What frames and outfits share: files, resources, the draws replayed, fields; per assignment the signatures
      *  ("choices", taken out by the callers). unit names the choices in the log. */
     /** The 3DMigoto backend: for each assignment (a static model's one, every outfit, every animation frame), the
@@ -1237,23 +1241,25 @@ public final class ModelConverter {
         return L;}
     private static Map<String,Object> logicData(Ini ini,File src,List<Map<String,Integer>> assignments,Map<String,String> mapping,File out,StringBuilder log,String unit)throws Exception{
         StringBuilder why=new StringBuilder();LogicLayout L=layout(ini,src,assignments,mapping,why);if(L==null){log.append("逻辑核心数据：").append(why).append("，不写入\n");return null;}
+        if(L.firstDraw.isEmpty())return null;
         File dir=new File(out,"logic");check(dir.mkdirs(),"无法创建 logic 目录");List<Object> list=new ArrayList<>();
         for(int i=0;i<L.files.size();i++){write(dir,i+".ini",text(L.texts.get(i)));list.add(Json.of("namespace",L.namespaces.get(i),"file","logic/"+i+".ini"));}
         List<File> files=L.files;String mainNs=L.mainNs;Map<String,String> table=L.table;Map<String,LogicSection> byName=L.byName;List<Object> passes=L.passes;Map<String,Object> fields=L.fields;
         Map<String,Draw> firstDraw=L.firstDraw;List<List<Draw>> drawn=L.drawn;List<String> texts=L.texts;
         // Whether a part's own draw is skipped: any section 3DMigoto matches for it (same hash, its first index or none) skips.
-        List<Object> frames=new ArrayList<>();
+        List<Object> frames=new ArrayList<>();boolean ordered=true;
         for(int i=0;i<assignments.size();i++){Map<String,Integer> vars=assignments.get(i);Map<String,Resource> rs=resources(ini,src,vars);Map<String,Object> sig=new LinkedHashMap<>();
             for(Draw part:firstDraw.values()){LogicSection own=byName.get(part.part);Long first=own==null?null:own.first;boolean skip=false;
                 for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")){LogicSection x=byName.get(s.name.substring(15));
                     if(x==null||!x.hash.equals(part.hash)||(x.first!=null&&!x.first.equals(first)))continue;skip|="skip".equals(new Evaluated(ini,s,vars,rs).bindings.get("handling"));}
                 List<Draw> mine=new ArrayList<>();for(Draw d:drawn.get(i))if(d.part.equals(part.part))mine.add(d);
+                if(ordered&&!mine.equals(logicOrder(mine,byName)))ordered=false;
                 String text=logicSignature(mine,skip,byName,table,mainNs,why);if(text==null){log.append("逻辑核心数据：").append(why).append("，不写入\n");return null;}
                 sig.put(part.part,text);}
             frames.add(sig);}
         List<Object> keyList=logicKeys(texts);
         log.append("逻辑核心数据：").append(files.size()).append(" 个 INI、").append(table.size()).append(" 个资源、").append(passes.size()).append(" 次绘制、").append(frames.size()).append(" ").append(unit).append("的资源记录、").append(keyList.size()).append(" 个可在 App 里按的按键（实验开关“逻辑核心驱动”使用；关闭时仍按原来的方式）\n");
-        return Json.of("signature",2,"main",mainNs,"files",list,"resources",table,"passes",passes,"fields",fields,"choices",frames,"keys",keyList);}
+        return Json.of("signature",2,"ordered",ordered,"main",mainNs,"files",list,"resources",table,"passes",passes,"fields",fields,"choices",frames,"keys",keyList);}
     /** The [Key] sections of the logic files, for the App's switch panel: every type (activate, toggle, hold, cycle; the
      *  first type= line counts, as in 3DMigoto), the file's index, the section as the file writes it, "back" for a cycle
      *  with back =, "bind" (its key= values, as labels) and "presets": what each preset assigns, split as 3DMigoto splits a
@@ -1469,7 +1475,7 @@ public final class ModelConverter {
             // among them in the game (real clock, the App's keys). Without outfits to pick it would show only the start.
             if(driven!=null){check(!shown.isEmpty(),driven+"；也没有可在游戏里选择的款式变量，只能显示初始状态，所以不转换");
                 log.append("Present 程序跟随游戏（时钟、游戏的绘制等），无法预演播放顺序：按款式变量的全部取值转换；打开实验开关“逻辑核心驱动”时，进游戏由逻辑核心按真实时间和 App 里的按键选择款式；关闭时按款式表手动切换。原因：").append(driven).append('\n');}
-            if(!shown.isEmpty()){Map<String,Object> logic=logicVariants(ini,src,kept,shown,map,tmp,log);if(logic!=null){if(driven!=null)logic.put("driven",true);manifest.put("logic",logic);}
+            if(!shown.isEmpty()||(o.indexedVulkan&&b.groups.values().stream().anyMatch(g->!g.sourceDraws.isEmpty()))){Map<String,Object> logic=logicVariants(ini,src,kept,shown,map,tmp,log);if(logic!=null){if(driven!=null)logic.put("driven",true);manifest.put("logic",logic);}
                 else if(driven!=null)log.append("逻辑核心数据未写入（原因见上）：此 MOD 只能按款式表手动切换\n");}
             if(replaceWhen!=null){manifest.put("version",3);manifest.put("replaceWhen",replaceWhen);log.append("未启用几何替换的款式保留游戏原模型和材质；此模型需要支持格式 3 的 GIBox\n");}
             if(o.sourcePath!=null)manifest.put("source",Json.of("path",o.sourcePath,"signature",o.sourceSignature==null?"":o.sourceSignature));

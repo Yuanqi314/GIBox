@@ -162,6 +162,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv*
       if(var.second.type==ms::Json::Number&&std::abs(var.second.number)<=1000000&&var.second.number==std::floor(var.second.number))
        choices[model.first][var.first]=int(var.second.number);
      tracker.setSkinChoices(choices);
+     const auto& logic=c.at("experiments").at("logicCore");
+     tracker.skinLogic.store(logic.type==ms::Json::Bool&&logic.boolean,std::memory_order_relaxed);
     }catch(const std::exception& e){bootLog(pkg,"vulkan-skin-disabled",e.what());}
     paimonTint=flag("vulkanPaimonTint");
     const auto& skin=t.at("vulkanPaimonModel");skinned=skin.type==ms::Json::String&&!skin.string.empty();

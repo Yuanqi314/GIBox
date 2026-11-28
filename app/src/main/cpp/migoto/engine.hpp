@@ -49,11 +49,15 @@ struct DrawInfo {
  std::map<std::string,Ref> bindings;
  std::vector<std::string> checks;
  std::map<std::string,float> call;   // vertex_count, index_count, instance_count, first_vertex, first_index, first_instance, ...
+ bool live=false;
+ std::string vulkanMatch{};
 };
 struct IssuedDraw {std::string kind,where;std::vector<float> args;bool automatic=false,fromCaller=false;std::map<std::string,Ref> bindings;};
 struct DrawResult {
  bool skip=false;                        // handling = skip: the game's own draw does not happen
  std::vector<IssuedDraw> draws;          // draws the command lists issue, with the slots at that moment
+ size_t preDraws=0;
+ bool unsupported=false;
  std::map<std::string,Ref> bindings;     // the slots after the pre lists
  std::vector<std::string> matched;       // TextureOverride sections run (pre), in order
  std::vector<std::string> customShaders; // run = CustomShader...: recorded, not executed
@@ -75,7 +79,7 @@ struct ListSection {std::string name,ns;CommandList pre,post;std::deque<Var> loc
 
 struct FuzzyNumber {enum Op {Any,Eq,Ne,Lt,Le,Gt,Ge} op=Any;uint32_t value=0;
  bool matches(uint32_t v)const{switch(op){case Any:return true;case Eq:return v==value;case Ne:return v!=value;case Lt:return v<value;case Le:return v<=value;case Gt:return v>value;case Ge:return v>=value;}return false;}};
-struct TextureOverride {ListSection* list=nullptr;std::string name;uint32_t hash=0;int priority=0;float filterIndex=FLT_MAX;bool drawMatch=false;std::map<std::string,FuzzyNumber> match;};
+struct TextureOverride {ListSection* list=nullptr;std::string name;uint32_t hash=0;int priority=0;float filterIndex=FLT_MAX;bool drawMatch=false;std::map<std::string,FuzzyNumber> match;std::string vulkanMatch;};
 
 struct Transition {float start=0,target=0;double activation=0;int time=-1;bool cosine=false;};
 struct Preset {
@@ -125,9 +129,12 @@ public:
  ListSection* listSection(const std::string& name,const std::string& ns){auto* p=bySection(lists,name,ns);return p?p->get():nullptr;}
  std::string resourceKey(const std::string& name,const std::string& ns){auto* r=bySection(resources,name,ns);return r?lower(r->name):std::string();}
  std::vector<const TextureOverride*> matches(uint32_t hash,const DrawInfo* d){std::vector<const TextureOverride*> out;auto it=overrides.find(hash);if(it==overrides.end())return out;
-  for(auto& t:it->second){if(t.drawMatch){if(!d)continue;bool ok=true;for(auto& m:t.match){auto c=d->call.find(m.first);
+  for(auto& t:it->second){
+   if(d&&d->live&&!t.vulkanMatch.empty()&&t.vulkanMatch!=d->vulkanMatch)continue;
+   if(t.drawMatch){if(!d)continue;bool ok=true;for(auto& m:t.match){auto c=d->call.find(m.first);
      if(c==d->call.end()){limitation(t.name,"match_"+m.first+" 需要绘制调用的 "+m.first+"，但适配层未提供");ok=false;break;}
-     ok=ok&&m.second.matches(uint32_t(c->second));}
+     const double value=c->second;
+     ok=ok&&value>=0&&value<=0xffffffffu&&m.second.matches(uint32_t(value));}
     if(!ok)continue;}
    out.push_back(&t);}
   return out;}
@@ -223,7 +230,7 @@ struct Skip:Command {std::string where;void run(RunState& s)override{s.e.note(Ev
 struct Abort:Command {std::string where;void run(RunState& s)override{s.e.note(Event::Abort,where,"handling = abort");s.aborted=true;}};
 struct CheckOverride:Command {std::string slot,where;bool together=false;void run(RunState& s)override{s.e.checkSlot(s,slot,together,where);}};
 struct CustomShaderRun:Command {Kind kind()const override{return Kind::CustomShader;}std::string name,where;void run(RunState& s)override{s.e.note(Event::Unported,where,"run = "+name);if(s.result)s.result->customShaders.push_back(name);}};
-struct Unported:Command {Kind kind()const override{return Kind::Unported;}std::string where,what;void run(RunState& s)override{s.e.note(Event::Unported,where,what);}};
+struct Unported:Command {Kind kind()const override{return Kind::Unported;}std::string where,what;void run(RunState& s)override{s.e.note(Event::Unported,where,what);if(s.result){s.result->unsupported=true;}}};
 // dst = [options] src. A slot gets the source as the draw sees it; a [Resource] keeps what the source held then.
 struct Bind:Command {Kind kind()const override{return Kind::Bind;}std::string dst,src,options,where,ns;bool dstResource=false;
  Ref resolve(RunState& s){if(src=="null")return Ref{Ref::Null,0,{}};
@@ -243,9 +250,12 @@ inline RunState::RunState(Engine& engine):e(engine){}
 inline float RunState::keywordValue(const Keyword& k){std::string n=k.name;
  if(k.scope==Scope::Frame){if(n=="time")return float(e.nowSeconds);if(n=="frame_time")return e.frameTime;if(n=="fps")return e.fps;return float(e.frameNumber);}
  if(k.scope==Scope::Draw){if(!draw)return 0;auto it=draw->call.find(n);if(it!=draw->call.end())return it->second;
+  if(result){result->unsupported=true;}
   e.limitation(n,"适配层未提供绘制调用的 "+n+"，按 0 读取");return 0;}
  auto it=e.host.find(n);if(it!=e.host.end())return it->second;e.limitation(n,"宿主值 "+n+" 不可用，按 0 读取");return 0;}
-inline float RunState::slotFilter(const std::string& slot){auto it=bindings->find(slot);if(it==bindings->end()||it->second.kind==Ref::None||it->second.kind==Ref::Null)return -0.0f;
+inline float RunState::slotFilter(const std::string& slot){auto it=bindings->find(slot);if(it==bindings->end()||it->second.kind==Ref::None){
+ if(draw&&draw->live&&result){result->unsupported=true;}return -0.0f;}
+ if(it->second.kind==Ref::Null)return -0.0f;
  if(it->second.kind==Ref::Mod){e.limitation(slot,"对存放 MOD 资源的槽位使用贴图过滤：该资源没有可追踪的 hash，按 0 读取（不匹配）");return 0;}
  auto m=e.matches(it->second.hash,draw);if(m.empty())return 0;for(auto r=m.rbegin();r!=m.rend();++r)if((*r)->filterIndex!=FLT_MAX)return (*r)->filterIndex;return 1;}
 inline float RunState::param(int i,char c){auto it=e.params.find({i,c});return it==e.params.end()?0:it->second;}
@@ -384,6 +394,7 @@ inline void Engine::parseTextureOverride(const Section& s,ListSection& ls){
    limitation("["+s.name+"]","模糊资源匹配（无 hash）需要 D3D 资源描述，未移植");return;}
   warning("["+s.name+"]","TextureOverride 缺少 hash");return;}
  TextureOverride t;t.list=&ls;t.name=s.name;t.hash=uint32_t(std::strtoul(kv["hash"].c_str(),nullptr,16));
+ if(auto gpu=kv.find("match_vulkan");gpu!=kv.end()){t.vulkanMatch=trim(gpu->second);}
  if(kv.count("match_priority"))t.priority=std::atoi(kv["match_priority"].c_str());
  if(kv.count("filter_index")){bool ok;float f=staticValue(kv["filter_index"],s.ns,"["+s.name+"] filter_index",ok);if(ok)t.filterIndex=f;}
  for(const char* m:{"first_vertex","first_index","first_instance","vertex_count","index_count","instance_count"}){auto it=kv.find(std::string("match_")+m);if(it==kv.end())continue;
@@ -515,8 +526,10 @@ inline DrawResult Engine::draw(const DrawInfo& d){
  // BeforeDraw: the host lists' checktextureoverride lines, pre. One state for the whole draw (the host's lists are
  // modelled as one list; upstream gives each shader stage's list its own state, which matters only for abort).
  {RunState s(*this);s.draw=&d;s.result=&r;s.bindings=&r.bindings;for(auto& slot:d.checks)checkSlot(s,slot,false,"draw "+slot);}
+ r.preDraws=r.draws.size();const bool skip=r.skip;
  // AfterDraw: the post lists, looked up again by what each slot holds now.
  {RunState s(*this);s.post=true;s.draw=&d;s.result=&r;auto after=r.bindings;s.bindings=&after;for(auto& slot:d.checks)checkSlot(s,slot,false,"draw "+slot+" (post)");}
+ r.skip=skip;
  return r;}
 
 }  // namespace migoto

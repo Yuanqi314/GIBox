@@ -233,6 +233,73 @@ static void tintTrial(){
  T().pipelineCreated(gpuHandle(p),gpuHandle(layout),{{16,210}});T().bindPipeline(command,false,gpuHandle(p));
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);assert(call==expected&&T().lightMapDraws==3);
  T().pipelineDestroyed(gpuHandle(p));call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);assert((call==std::vector<uintptr_t>{26226}));
+ // A live draw runs the INI with the tracked IB, VB and call arguments. Present advances it once, then the
+ // replacement draws bracket the game's own draw and restore its actual bindings before it runs.
+ T().resourceRules.clear();T().iniSkinRules[ms::vkcap::paimonBodyHash]={{1,0,0,26226}};
+ auto logic=std::make_shared<ms::LogicSpec>();logic->ordered=true;
+ char hashes[80];std::snprintf(hashes,sizeof hashes,"hash=%08x\n",ms::vkcap::paimonBodyHash);
+ std::string ini=R"ini(
+[Constants]
+global $ready = 0
+global $mode = 0
+[Present]
+$ready = 1
+[KeyMode]
+key = k
+type = cycle
+$mode = 1
+[ResourceMod]
+[ResourceGame]
+[ResourcePosition]
+[CommandListReplacement]
+ResourceGame = ref ib
+ib = ResourceMod
+drawindexed = 6, 0, 0
+ib = ResourceGame
+[CommandListAfter]
+ib = ResourceMod
+if $mode == 1
+ drawindexed = 3, 15, 0
+else
+ drawindexed = 9, 6, 0
+endif
+[TextureOverrideBody]
+)ini";
+ ini+=hashes;
+ ini+=R"ini(match_first_index=0
+if $ready && index_count == 26226 && vertex_count == 124 && vb1 == 42
+run = CommandListReplacement
+post run = CommandListAfter
+endif
+[TextureOverrideVertex]
+)ini";
+ std::snprintf(hashes,sizeof hashes,"hash=%08x\nfilter_index=42\n",hash);ini+=hashes;
+ ini+="[TextureOverridePosition]\nhash=11223344\nvb0=ResourcePosition\n";
+ ini+="[TextureOverrideOtherGpu]\n";
+ std::snprintf(hashes,sizeof hashes,"hash=%08x\n",ms::vkcap::paimonBodyHash);
+ ini+=hashes;ini+="match_vulkan = vb0:12345678\nhandling = skip\n";
+ logic->files.push_back({"","",ini});logic->resources["resourcemod"]="modib";logic->resources["resourceposition"]="rest";
+ logic->keys={{0,"KeyMode","cycle",false}};
+ logic->passes={{"skin",{{"vb0",0x11223344}},{"vb0"},{}},
+                {"Body",{{"ib",ms::vkcap::paimonBodyHash}},{"ib"},{{"first_index",0}}}};
+ logic->parts["Body"]={{"ib","Body","ib"},{"position","skin","vb0"}};
+ logic->assignments={{{"$vision",0}}};
+ logic->choices={{{"Body","original|kind=drawindexed;count=6;start=0;base=0;ib=modib;position=rest;|kind=drawindexed;count=9;start=6;base=0;ib=modib;position=rest;|"}}};
+ profile.logic=logic;profile.logicPasses={{&logic->passes.back(),{}}};
+ profile.iniDraws[0][0].images={~0u,~0u,~0u};
+ indexLogicRows(profile.logicPasses.front(),*logic,profile.iniDraws.front());
+ T().logicResources=true;T().skinLogic=true;
+ const auto queue=fake<VkQueue>(999);
+ tintState().queues[queue]={d,8};
+ logicQueuePresent=+[](VkQueue,const VkPresentInfoKHR*){return VK_SUCCESS;};
+ call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);assert((call==std::vector<uintptr_t>{26226}));
+ logicOnQueuePresent(queue,nullptr);
+ call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
+ assert((call==std::vector<uintptr_t>{204,204,2000,14,101,200,201,26226,204,204,2000,23,101,200,201}));
+ // The key's next result was never converted. Retain the complete original draw.
+ T().queueSkinKeys({{"Beta","KeyMode",0}});
+ logicOnQueuePresent(queue,nullptr);
+ call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);assert((call==std::vector<uintptr_t>{26226}));
  std::cout<<"Vulkan draw replacement: PASS (scoped textures, skinned vertex and index rebind, queue ownership, restoration and master switch)\n";
 }
 #endif

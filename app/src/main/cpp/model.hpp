@@ -102,7 +102,7 @@ struct FrameLoop {AnimationSpec spec;float counter=0;size_t current=0,step=0;uin
   for(uint32_t n=0;n<elapsed;n++){if(std::fmod(counter,spec.period)==0){int value=spec.frames[current].value;value=value<spec.last?value+spec.step:spec.first;size_t next=spec.index(value);changed|=next!=current;current=next;advances++;}counter+=spec.counterStep;require(std::isfinite(counter),"动画计数器溢出");}return changed;}};
 
 // ---------------------------------------------------------------- manifest summary (what the runtime scans every second)
-struct SourceDraw {std::string ib;unsigned slot=0;int64_t first=-1,count=-1;std::string gpu{};};
+struct SourceDraw {std::string ib;unsigned slot=0;int64_t first=-1,count=-1;std::string gpu{},logicIb{};};
 struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false,indexedBones=false;Fingerprint target;std::vector<SourceDraw> sourceDraws{};};
 // outfit (model.json character.outfit, 0.7.94): the prefab of the outfit (original look or skin) the model was converted for,
 // as the runtime reads it from a renderer ("avatar_lady_pole_shenhecostumedai"); "" for a model made before outfits.
@@ -129,6 +129,7 @@ inline ModelSummary summaryOf(const Json& m){checkFormat(m);ModelSummary s;s.ani
    SourceDraw d;
    if(x.at("gpu").type!=Json::Null){d.gpu=jstr(x,"gpu",512);require(!d.gpu.empty(),"Vulkan 资源匹配规则为空");}
    if(x.at("ib").type!=Json::Null){d.ib=jstr(x,"ib",8);require(d.ib.size()==8&&d.ib.find_first_not_of("0123456789abcdef")==d.ib.npos,"原绘制索引哈希无效");}
+   if(x.at("logicIb").type!=Json::Null){d.logicIb=jstr(x,"logicIb",8);require(!d.gpu.empty()&&d.logicIb.size()==8&&d.logicIb.find_first_not_of("0123456789abcdef")==d.logicIb.npos,"INI 逻辑索引别名无效");}
    require(!d.ib.empty()||!d.gpu.empty(),"缺少原绘制匹配规则");
    d.slot=unsigned(juint(x,"slot",0,model::maxSlot-1));
    if(x.at("first").type!=Json::Null)d.first=int64_t(juint(x,"first",0,0xffffffffu));
@@ -224,7 +225,7 @@ struct LogicSpec {
  struct Key {size_t file=0;std::string section,type;bool back=false;};std::vector<Key> keys;   // back: a cycle with back = (the App's "previous")
  // An outfit model whose Present program follows the game (clock, its draws; 0.7.40): the converter could not show
  // it finite, converted every outfit its draws can show, and the core picks among them by real time and keys.
- bool driven=false;
+ bool driven=false,ordered=false;
  std::string unsupported;
  bool present()const{return !files.empty()||!unsupported.empty();}
 };
@@ -261,11 +262,13 @@ inline LogicSpec logicOf(const Json& m,const std::string& dir,const AnimationSpe
  if(animation.present()){require(j.at("variants").type==Json::Null,"logic：动画模型应使用 frames 而非 variants");
   const auto& frames=jarr(j,"frames",animation.frames.size(),animation.frames.size());
   for(size_t i=0;i<frames.size();i++){require(jint(jfield(frames[i],"value"),"logic 帧值")==animation.frames[i].value,"logic：帧值与动画不符");l.choices.push_back(partsOf(jfield(frames[i],"draws"),"frame "+std::to_string(i)));}}
- else{require(!variants.vars.empty(),"logic：仅用于动画或款式模型");
-  for(auto& v:jarr(j,"variants",1,256)){const auto& a=jfield(v,"assignment");require(a.type==Json::Object&&a.object.size()==variants.vars.size(),"logic：款式赋值无效");Assignment x;
+ else{
+  require(!variants.vars.empty()||jbool(j,"static",false),"logic：仅用于动画或款式模型");
+  for(auto& v:jarr(j,"variants",1,variants.vars.empty()?1:256)){const auto& a=jfield(v,"assignment");require(a.type==Json::Object&&a.object.size()==variants.vars.size(),"logic：款式赋值无效");Assignment x;
    for(auto& var:variants.vars){const auto& n=a.at(var.first);int value=jint(n,"logic："+var.first);require(std::find(var.second.begin(),var.second.end(),value)!=var.second.end(),"logic："+var.first+" = "+std::to_string(value)+" 不是已转换的取值");x[var.first]=value;}
    l.assignments.push_back(x);l.choices.push_back(partsOf(jfield(v,"draws"),"outfit "+std::to_string(l.choices.size())));}}
- l.driven=jbool(j,"driven",false);require(!l.driven||!animation.present(),"logic：driven 仅用于款式模型");
+ l.driven=jbool(j,"driven",false);require(!l.driven||(!animation.present()&&!variants.vars.empty()),"logic：driven 仅用于款式模型");
+ l.ordered=jbool(j,"ordered",false);
  const auto& keys=j.at("keys");if(keys.type!=Json::Null)for(auto& k:jarr(j,"keys",0,256)){LogicSpec::Key x;x.file=size_t(juint(k,"file",0,l.files.size()-1));x.section=jstr(k,"section",256);x.type=jstr(k,"type",16);x.back=jbool(k,"back",false);
   require(x.section.size()>3&&(x.section[0]|32)=='k'&&(x.section[1]|32)=='e'&&(x.section[2]|32)=='y'&&x.section.find_first_of("\\[]\r\n")==std::string::npos,"logic：按键段名无效："+x.section);require(x.type=="cycle"||x.type=="toggle"||x.type=="activate"||x.type=="hold","logic：按键类型无效："+x.type);l.keys.push_back(std::move(x));}
  return l;}
