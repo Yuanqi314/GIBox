@@ -1,4 +1,5 @@
 #include "portable_synthesis.hpp"
+#include <array>
 #include <cassert>
 #include <iostream>
 #include <map>

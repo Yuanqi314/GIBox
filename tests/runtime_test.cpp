@@ -4,6 +4,7 @@
 #include "texture_diag.hpp"
 #include "json.hpp"
 #include "model_fixture.hpp"
+#include <array>
 #include <cassert>
 #include <cstdlib>
 #include <iostream>

@@ -1,6 +1,7 @@
 // The one-instruction redirect of vk_hook.cpp, checked as bytes on the host (the code is ARM64 and is not run here):
 // a [bti c] + b stub keeps its landing pad, its b goes to our page, our page goes on to the hook and back to the target;
 // both entries are ready before either stub is written.
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <sys/mman.h>
