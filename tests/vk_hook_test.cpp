@@ -255,9 +255,11 @@ static void tintTrial(){
  }
  // A texture absent from the upload requests only the sampled role and leaves the game draw intact.
  sharedImages.resize(2);auto lightView=dev.upload.images[1].view;dev.upload.images[1].view={};
+ warmSkinImages(dev,1ull<<1,true);
+ assert((dev.upload.warm==std::set<unsigned>{0,1}));
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
  assert((call==std::vector<uintptr_t>{26226})&&dev.upload.requested==std::set<unsigned>{1});
- dev.upload.images[1].view=lightView;dev.upload.requested.clear();sharedImages.clear();
+ dev.upload.images[1].view=lightView;dev.upload.requested.clear();dev.upload.warm.clear();sharedImages.clear();
  // The same draw executor can select its model by a Vulkan shader and vertex upload without a PC IB rule.
  T().iniSkinRules.clear();
  const uint32_t code[]={0x07230203u,0x10000u,0u,8u,0u};const unsigned usedVertex=203;
@@ -276,7 +278,7 @@ static void tintTrial(){
  std::string ini=R"ini(
 [Constants]
 global $ready = 0
-global $mode = 0
+global persist $mode = 0
 [Present]
 $ready = 1
 [KeyMode]
@@ -325,6 +327,7 @@ endif
  logic->choices={{{"Body","original|kind=drawindexed;count=6;start=0;base=0;ib=modib;position=rest;blend=weights;|"
                           "kind=drawindexed;count=9;start=6;base=0;ib=modib;position=rest;blend=weights;|"}}};
  profile.logic=logic;profile.logicPasses={{&logic->passes.back(),{}}};
+ profile.persistFile="fixture/logic-persist/Beta.json";
  profile.iniDraws[0][0].images={~0u,~0u,~0u};
  std::swap(profile.iniDraws[0][0],profile.iniDraws[0][1]); // Row order inherited from another outfit.
  indexLogicRows(profile.logicPasses.front(),*logic,profile.iniDraws.front());
@@ -339,6 +342,14 @@ endif
  // The key's next result was never converted. Retain the complete original draw.
  T().queueSkinKeys({{"Beta","KeyMode",0}});
  logicOnQueuePresent(queue,nullptr);
+ call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);assert((call==std::vector<uintptr_t>{26226}));
+ auto saves=T().logicSaves("fixture/logic-persist/");
+ assert(saves.size()==1&&saves.at(profile.persistFile)->values.at("$mode")==1);
+ T().logicWritten(profile.persistFile,saves.at(profile.persistFile));
+ T().skinLogic=false;logicOnQueuePresent(queue,nullptr);
+ assert(dev.logic.empty());
+ T().skinLogic=true;onCmdDrawIndexed(c,26226,1,0,0,0);logicOnQueuePresent(queue,nullptr);
+ assert(dev.logic.at(logic.get()).driver.restoredCount()==1);
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);assert((call==std::vector<uintptr_t>{26226}));
  std::cout<<"Vulkan draw replacement: PASS (scoped textures, skinned vertex and index rebind, queue ownership, restoration and master switch)\n";
 }

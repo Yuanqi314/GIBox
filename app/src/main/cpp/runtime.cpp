@@ -230,7 +230,7 @@ struct Runtime::Impl {
   std::vector<std::shared_ptr<ModelFile>> cpu;std::vector<std::vector<Ptr>> meshes;std::vector<std::vector<Ptr>> owned;std::vector<Ptr> back;
  };
  // experiments.logicCore: the set's own INI logic, picking its animation frame or its outfit (logic_game.hpp).
- struct LogicRun {std::unique_ptr<LogicDriver> driver;bool failed=false,fresh=false,noted=false;uint64_t misses=0,lastStats=0;unsigned missLines=0;std::string missLogged;std::map<std::string,int> pushed;Assignment want;bool persistDue=false;uint64_t persistAt=0,persistSaves=0;};   // want: the outfit it picked (applyVariant may wait for textures)
+ struct LogicRun {std::unique_ptr<LogicDriver> driver;bool failed=false,fresh=false,noted=false;uint64_t misses=0,lastStats=0;unsigned missLines=0;std::string missLogged;std::map<std::string,int> pushed;Assignment want;bool persistDue=false;uint64_t persistAt=0;};   // want: the outfit it picked (applyVariant may wait for textures)
  uint64_t animationToken=0;
  struct Set:Owned {std::vector<SceneTarget> sceneTargets;bool lost=false;std::string name,path,generation,outfit;unsigned id=0;std::shared_ptr<ModelFile> data;std::vector<Fingerprint> targets;std::vector<BuiltPart> parts;std::map<std::string,MatTex> textures;std::map<std::string,MaterialFile> mats;std::string meshKey;AnimationRun animation;uint64_t blobSize=0;std::string fileGeneration,textureWait;Variants variants;bool originalMaterials=false,built=false,mergeDraws=true;std::vector<TextureSwap> swaps;LogicSpec logicSpec;LogicRun logic;Assignment assignment;uint64_t used=0,bytes=0;
   std::vector<std::unique_ptr<BuiltPart>> lods;std::set<std::pair<Ptr,Ptr>> lodWanted;std::set<std::string> lodFailed;};  // bytes: estimated memory of the built set; lods: parts built on lower-LOD renderers with other bone lists (lodWanted: renderer, native waiting for one)
@@ -314,7 +314,24 @@ struct Runtime::Impl {
  }
 
  // ---------------------------------------------------------------- worker side
+ uint64_t logicPersistAt=0;
+ bool flushLogicPersist(){
+  auto& capture=vkcap::tracker();
+  const auto dir=shared+"/logic-persist/";
+  const auto saves=capture.logicSaves(dir);
+  for(const auto& [file,state]:saves){
+   const auto label=std::filesystem::path(file).stem().string();
+   try{
+    std::filesystem::create_directories(dir);
+    writeAtomic(file,logicPersistText(state->main,state->values));
+    capture.logicWritten(file,state);
+    log("logic-persist-saved",label+"：已保存持久变量 "+std::to_string(state->values.size())+" 个");
+   }catch(const std::exception& ex){log("logic-persist-error",label+"："+ex.what());}
+  }
+  return !saves.empty();
+ }
  void workerTick(uint64_t now){
+  if(now>=logicPersistAt&&flushLogicPersist()){logicPersistAt=now+1000;}
   if(now>=controlAt){controlAt=now+100;try{auto file=shared+"/control.json";if(exists(file)){auto raw=text(file);if(raw!=controlRaw){controlRaw=raw;scanAt=0;
      // A file caught while the App replaces it reads cut short ("JSON EOF", 0.7.52 log): read again next time, and
      // report only the same text failing twice.
@@ -2381,20 +2398,19 @@ struct Runtime::Impl {
  // included, as 3DMigoto writes d3dx_user.ini) and the main INI's namespace they belong to; another INI under the same
  // model name does not get them. Written whole to a temporary file and renamed; at most once a second while they
  // change, and when the logic stops.
- std::string persistFile(const Set& s)const{return shared+"/logic-persist/"+s.name+".json";}
- std::map<std::string,float> loadPersist(const Set& s){std::map<std::string,float> out;auto file=persistFile(s);if(!exists(file))return out;
-  try{Json j=JsonParser(text(file)).parse();require(j.type==Json::Object&&j.at("format").type==Json::String&&j.at("format").string=="gibox-logic-persist","不是持久变量文件");
-   const auto& main=j.at("main");if(main.type!=Json::String||main.string!=s.logicSpec.mainNs){log("logic-persist",s.name+"：保存的值属于另一个 INI（"+(main.type==Json::String?main.string:std::string("?"))+"），不恢复");return out;}
-   const auto& v=j.at("values");require(v.type==Json::Object&&v.object.size()<=4096,"values");
-   for(auto& kv:v.object){require(kv.first.size()>1&&kv.first[0]=='$'&&kv.second.type==Json::Number&&std::isfinite(kv.second.number),"值 "+kv.first);out[kv.first]=float(kv.second.number);}}
-  catch(const std::exception& ex){out.clear();log("logic-persist-error",s.name+"："+file+" 读取失败："+ex.what()+"，不恢复");}
-  return out;}
+ std::map<std::string,float> loadPersist(const Set& s){
+  const auto file=logicPersistFile(shared,s.name);
+  if(auto pending=vkcap::tracker().savedLogic(file,s.logicSpec.mainNs,true)){return std::move(*pending);}
+  try{
+   std::string different;auto out=readLogicPersist(file,s.logicSpec.mainNs,&different);
+   if(!different.empty()){log("logic-persist",s.name+"：保存的值属于另一个 INI（"+different+"），不恢复");}
+   return out;
+  }catch(const std::exception& ex){log("logic-persist-error",s.name+"："+file+" 读取失败："+ex.what()+"，不恢复");}
+  return {};
+ }
  void savePersist(Set& s){auto& L=s.logic;auto values=L.driver->persistent();L.persistDue=false;if(values.empty())return;
-  std::string body="{\"format\":\"gibox-logic-persist\",\"version\":1,\"main\":"+quote(s.logicSpec.mainNs)+",\"values\":{";bool first=true;
-  for(auto& kv:values){if(!std::isfinite(kv.second))continue;char b[32];std::snprintf(b,sizeof b,"%.9g",double(kv.second));body+=(first?"":",")+quote(kv.first)+":"+b;first=false;}
-  body+="}}\n";auto dir=shared+"/logic-persist",file=persistFile(s);
-  worker.post([dir,file,body]{try{std::filesystem::create_directories(dir);writeAtomic(file,body);}catch(...){}});
-  log(L.persistSaves++?"logic-persist-saved":"logic-persist",s.name+"：已保存持久变量 "+std::to_string(values.size())+" 个");}
+  vkcap::tracker().rememberLogic(logicPersistFile(shared,s.name),{s.logicSpec.mainNs,std::move(values)},true);
+  worker.post([this]{flushLogicPersist();});}
  // The App's key presses for this model since the last ones taken: each goes to the core once, as a key event of the
  // next Present; a press while the core does not run the model is dropped (and said so), not kept for later.
  void logicKeys(Set& s){auto it=ctl.keys.find(s.name);if(it==ctl.keys.end())return;long long& seen=keySeen[s.name];
@@ -3370,12 +3386,14 @@ struct Runtime::Impl {
    if(!(c->exp==ctl.exp))log("experiments",c->exp.text());
    if(c->useUnityModels!=ctl.useUnityModels)log("model-backend",c->useUnityModels?"Unity":"Vulkan");
    auto previousVars=ctl.variables==c->variables;
+   const bool finishLogic=ctl.exp.logicCore&&(!c->exp.logicCore||(ctl.enabled&&!c->enabled)||ctl.useUnityModels!=c->useUnityModels||ctl.selected!=c->selected);
    ctl=*c;synthesis.setEnabled(ctl.synthesisButton);
    auto& capture=vkcap::tracker();
    if(capture.allSkins){
     capture.setSkinReplacement(ctl.enabled,!ctl.useUnityModels,ctl.selected);
     if(!previousVars||!std::atomic_load(&capture.skinChoices))capture.setSkinChoices(ctl.variables);
     capture.skinLogic.store(ctl.exp.logicCore,std::memory_order_relaxed);
+    capture.skinSharedChoices.store(ctl.sharedChoices,std::memory_order_relaxed);
     if(!ctl.useUnityModels&&capture.routesReady.load(std::memory_order_acquire)){
      std::vector<vkcap::SkinKey> keys;
      for(const auto& mod:ctl.keys){
@@ -3393,6 +3411,7 @@ struct Runtime::Impl {
     }
    }
    else capture.setPaimonReplacement(ctl.enabled&&!(ctl.useUnityModels&&capture.skinnedModel),ctl.tex.paimonTint,capture.skinnedModel?ctl.tex.paimonMeshMod:ctl.tex.paimonTextureMod);
+   if(finishLogic){worker.post([this]{flushLogicPersist();});}
    if(!diagnosticOnly){failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();bindingRejected.clear();bindingStamp.clear();}}
 
   if(!cerr.empty())log("control-error",cerr);}
@@ -3503,7 +3522,7 @@ void Runtime::spawned(Ptr go)noexcept{try{p->spawned(go);}catch(...){}}
 void Runtime::spawnedAfter()noexcept{try{p->spawnedAfter();}catch(...){}}
 Ptr Runtime::bindMesh(Ptr renderer,Ptr mesh)noexcept{try{return p->bindMesh(renderer,mesh);}catch(...){return mesh;}}
 void Runtime::meshBound(Ptr renderer)noexcept{try{p->meshBound(renderer);}catch(...){}}
-void Runtime::shutdown(){p->synthesis.setEnabled(false);p->clearLoginDoor();try{p->loading.shutdown();if(p->loadingTypeHandle){p->e.call<void>(abi::unpin,p->loadingTypeHandle);p->loadingTypeHandle=0;p->loadingType=0;}}catch(const std::exception&){}try{p->profile.shutdown();}catch(const std::exception&){}try{p->lodUnpinAll("运行时关闭");}catch(const std::exception&){}try{p->texRestoreEverything("运行时关闭");}catch(const std::exception&){}if(p->releaseAll()){p->pruneRestoreBackups(true);p->sceneClear(p->sceneCacheRoots);p->sceneClear(p->sceneListRoots);p->sceneClear(p->gliderRoots);p->gliderChildren.clear();p->sceneCache.clear();p->sceneList.clear();for(auto& r:p->rigidRefs)p->freeOwned(r.second);p->rigidRefs.clear();p->freeOwned(p->rigidTypeRoots);p->rigidFilterType=0;p->rigidTransformType=0;}}
+void Runtime::shutdown(){p->worker.post([impl=p.get()]{impl->flushLogicPersist();});p->synthesis.setEnabled(false);p->clearLoginDoor();try{p->loading.shutdown();if(p->loadingTypeHandle){p->e.call<void>(abi::unpin,p->loadingTypeHandle);p->loadingTypeHandle=0;p->loadingType=0;}}catch(const std::exception&){}try{p->profile.shutdown();}catch(const std::exception&){}try{p->lodUnpinAll("运行时关闭");}catch(const std::exception&){}try{p->texRestoreEverything("运行时关闭");}catch(const std::exception&){}if(p->releaseAll()){p->pruneRestoreBackups(true);p->sceneClear(p->sceneCacheRoots);p->sceneClear(p->sceneListRoots);p->sceneClear(p->gliderRoots);p->gliderChildren.clear();p->sceneCache.clear();p->sceneList.clear();for(auto& r:p->rigidRefs)p->freeOwned(r.second);p->rigidRefs.clear();p->freeOwned(p->rigidTypeRoots);p->rigidFilterType=0;p->rigidTransformType=0;}}
 }
 
 void ms::Runtime::synthesisFrame(Ptr controller,uint64_t now)noexcept{

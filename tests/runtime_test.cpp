@@ -1,5 +1,6 @@
 // Fake managed objects exercise runtime state transitions without a game process.
 #include "runtime.hpp"
+#include "logic_game.hpp"
 #include "vk_capture.hpp"
 #include "texture_diag.hpp"
 #include "json.hpp"
@@ -1959,7 +1960,10 @@ int main(int argc,char** argv){Fake fake;f=&fake;abi::allocVerified=true;   // t
   const Ptr loader=f->object("lodloader","MiHoYoLodLoader");lodHeld[loader]=0xff;lodNow[loader]=2;
   lodOnGo[goOf(renderer,0)]=loader;
   Runtime gpu(e,pkg,root+"/vulkan-fallback-private",dir,false);
+  const auto persist=ms::logicPersistFile(sharedGpu,"GpuFallback");
+  capture.rememberLogic(persist,{"fixture",{{"$variant",2}}},true);
   uint64_t now=20000000;for(unsigned i=0;i<20;i++,now+=100)gpu.tick(now);
+  assert(ms::readLogicPersist(persist,"fixture").at("$variant")==2&&capture.logicSaves(sharedGpu+"/logic-persist/").empty());
   assert(meshOf(renderer)==base&&capture.skinActive(0)&&lodHeld[loader]==0);
   capture.textureUpload=-1;gpu.tick(now);now+=100;
   assert(meshOf(renderer)==base);

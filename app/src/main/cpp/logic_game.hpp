@@ -12,6 +12,7 @@
 #include "model.hpp"
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -19,9 +20,40 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 
 namespace ms {
+
+inline std::string logicPersistFile(const std::string& shared,const std::string& name){
+ return shared+"/logic-persist/"+name+".json";
+}
+inline std::map<std::string,float> readLogicPersist(const std::string& file,const std::string& main,std::string* different=nullptr){
+ if(!exists(file))return {};
+ const auto j=JsonParser(text(file)).parse();
+ require(j.type==Json::Object&&j.at("format").type==Json::String&&j.at("format").string=="gibox-logic-persist","不是持久变量文件");
+ const auto& ns=j.at("main");
+ if(ns.type!=Json::String||ns.string!=main){if(different){*different=ns.type==Json::String?ns.string:"?";}return {};}
+ const auto& values=j.at("values");
+ require(values.type==Json::Object&&values.object.size()<=4096,"持久变量列表无效");
+ std::map<std::string,float> out;
+ for(const auto& kv:values.object){
+  require(kv.first.size()>1&&kv.first[0]=='$'&&kv.second.type==Json::Number&&
+          std::fabs(kv.second.number)<=std::numeric_limits<float>::max(),"持久变量无效："+kv.first);
+  out[kv.first]=float(kv.second.number);
+ }
+ return out;
+}
+inline std::string logicPersistText(const std::string& main,const std::map<std::string,float>& values){
+ std::string out="{\"format\":\"gibox-logic-persist\",\"version\":1,\"main\":"+quote(main)+",\"values\":{";
+ bool first=true;
+ for(const auto& kv:values){
+  if(!std::isfinite(kv.second))continue;
+  char number[32];std::snprintf(number,sizeof number,"%.9g",double(kv.second));
+  out+=(first?"":",")+quote(kv.first)+":"+number;first=false;
+ }
+ return out+"}}\n";
+}
 
 class LogicDriver {
 public:
@@ -160,6 +192,10 @@ public:
  bool restoredVar(const std::string& name){migoto::Var* v=engine.global(migoto::lower(name),spec.mainNs);if(v)for(auto& g:engine.globals)if(&g.second==v)return restored.count(g.first)>0;return false;}
  // Whether the main INI has this variable (a global).
  bool has(const std::string& name){return engine.global(migoto::lower(name),spec.mainNs)!=nullptr;}
+ std::optional<float> value(const std::string& name){
+  auto* var=engine.global(migoto::lower(name),spec.mainNs);
+  return var?std::optional<float>(var->value):std::nullopt;
+ }
  // Draws again now (after set), without a Present; true when the matched choice changed.
  bool reselect(){int before=matched;draws();if(matched!=before)stats.changes++;return matched!=before;}
  // The finite-state analysis of the loaded logic (it sets variables while it runs and puts them back).

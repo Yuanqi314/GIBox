@@ -236,13 +236,14 @@ struct SkinImageFile {std::string dir,generation;uint64_t size=0;};
 struct SkinImage {std::shared_ptr<const SkinImageFile> file;ms::TexRef ref;bool linear=false;};
 using UploadPixels=std::vector<std::pair<std::shared_ptr<ms::Texture>,bool>>;
 constexpr uint64_t maxResidentSkinTextures=192ull<<20,skinTextureBatch=16ull<<20;
+constexpr uint64_t startupSkinTextureBudget=64ull<<20;
 struct TextureUpload {
  VkPhysicalDeviceMemoryProperties memory{};std::set<uint32_t> families;
  bool attempted=false,queued=false;uint32_t usedFamily=0;
  std::vector<TextureGpu> images{TextureGpu{},TextureGpu{}};
  VkCommandPool pool{};VkBuffer staging{};VkDeviceMemory stagingMemory{};VkFence fence{};
  uint64_t imageBytes=0;
- std::set<unsigned> requested,unavailable;
+ std::set<unsigned> requested,warm,unavailable;
  std::vector<unsigned> readingIds;
  std::future<UploadPixels> reading;
 };
@@ -319,16 +320,25 @@ struct SharedSkin {
  ms::VulkanSkinPayload mesh;unsigned originalVertices=0,bones=0;std::vector<unsigned> images;
  std::vector<std::vector<SharedSkinDraw>> iniDraws;ms::Variants variants;ms::When replaceWhen;
  std::shared_ptr<const ms::LogicSpec> logic;
+ std::string persistFile;
  std::vector<SkinLogicPass> logicPasses;
  bool rigid=false;
  bool generic()const{return !iniDraws.empty();}
 };
 struct SkinLogic {
  ms::LogicDriver driver;
+ std::string persistFile;
  std::shared_ptr<const ms::vkcap::SkinChoices> choices;
+ bool initialized=false,sharedChoices=false;
  ms::Assignment pushed;
  std::map<uint64_t,ms::LogicDriver::RelatedDraw> skinPasses;
- SkinLogic(const ms::LogicSpec& spec):driver(spec,{},ms::LogicDriver::Source::Live){}
+ SkinLogic(const ms::LogicSpec& spec,const std::string& file):
+  driver(spec,T().savedLogic(file,spec.mainNs).value_or(std::map<std::string,float>{}),ms::LogicDriver::Source::Live),persistFile(file){}
+ void save(const std::string& main){
+  if(persistFile.empty()||!driver.persistChanged())return;
+  auto values=driver.persistent();
+  if(!values.empty()){T().rememberLogic(persistFile,{main,std::move(values)},true);}
+ }
 };
 struct SharedGpuSkin {
  std::array<SkinBuffer,SkinStreamCount> input{};VkDescriptorSet count{};bool ready=false;
@@ -388,6 +398,7 @@ std::array<std::shared_ptr<ms::Texture>,2> paimonPixels; // immutable after star
 ms::VulkanSkinPayload paimonSkin; // immutable after startup
 std::vector<SharedSkin> sharedSkins;
 std::vector<SkinImage> sharedImages;
+void warmSkinImages(TintDevice& device,uint64_t profiles,bool startup);
 
 // Shader access flags (in addition to descriptor types/count) are part of set compatibility. Here every
 // layout has contiguous combined samplers; accept only the layouts seen for this Body in the capture.
@@ -590,14 +601,15 @@ void serviceSkinImages(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u
   return;
  }
  uint64_t bytes=0;
- for(auto at=u.requested.begin();at!=u.requested.end();){
+ auto& waiting=u.requested.empty()?u.warm:u.requested;
+ for(auto at=waiting.begin();at!=waiting.end();){
   const auto id=*at;const auto size=sharedImages.at(id).ref.len;
   if(size>maxResidentSkinTextures-u.imageBytes){u.unavailable.insert(id);}
   else{
    if(bytes&&(bytes+size>skinTextureBatch||bytes+size>maxResidentSkinTextures-u.imageBytes))break;
    bytes+=size;u.readingIds.push_back(id);
   }
-  at=u.requested.erase(at);
+  at=waiting.erase(at);
  }
  if(u.readingIds.empty())return;
  try{u.reading=std::async(std::launch::async,readSkinImages,u.readingIds);}
@@ -606,6 +618,7 @@ void serviceSkinImages(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u
 VkImageView skinImage(TextureUpload& u,unsigned id){
  if(id>=u.images.size())return {};
  if(auto view=u.images[id].view)return view;
+ u.warm.erase(id);
  if(id<sharedImages.size()&&!u.unavailable.count(id)&&
     std::find(u.readingIds.begin(),u.readingIds.end(),id)==u.readingIds.end()){u.requested.insert(id);}
  return {};
@@ -649,7 +662,10 @@ void uploadOnGetDeviceQueue2(VkDevice d,const VkDeviceQueueInfo2* i,VkQueue* q){
   if(!u.attempted){
    u.attempted=true;
    if(!T().skinnedModel||prepareSkinBuffers(d,it->second)){
-    if(T().allSkins){u.images.resize(sharedImages.size());u.usedFamily=family;u.queued=true;}
+    if(T().allSkins){
+     u.images.resize(sharedImages.size());u.usedFamily=family;u.queued=true;
+     warmSkinImages(it->second,T().activeSkins.load(std::memory_order_relaxed),true);
+    }
     else{stageSkinImages(d,queue,family,u,{{paimonPixels[0],false},{paimonPixels[1],false}},maxResidentSkinTextures);}
    }
    if(u.queued){T().textureUpload.store(1,std::memory_order_relaxed);}
@@ -657,7 +673,11 @@ void uploadOnGetDeviceQueue2(VkDevice d,const VkDeviceQueueInfo2* i,VkQueue* q){
   }
   if(!u.queued||u.usedFamily!=family)return;
   if(u.fence&&upGetFenceStatus.load()(d,u.fence)==VK_SUCCESS){releaseUploadStaging(d,u);}
-  if(T().allSkins){serviceSkinImages(d,queue,family,u);}
+  if(T().allSkins){
+   const auto seen=T().skinIndexUploads.exchange(0,std::memory_order_relaxed);
+   if(seen){warmSkinImages(it->second,seen&T().activeSkins.load(std::memory_order_relaxed),false);}
+   serviceSkinImages(d,queue,family,u);
+  }
  });
  const auto result=upQueueSubmit.load()(queue,n,p,fence);
  if(result==VK_SUCCESS&&T().gpuBuffersEnabled())for(uint32_t i=0;p&&i<n;i++)for(uint32_t j=0;j<p[i].commandBufferCount;j++)
@@ -1131,16 +1151,72 @@ const ms::Assignment& skinAssignment(SharedGpuSkin& gpu,const SharedSkin& skin,u
 bool liveLogic(const SharedSkin& skin){
  return skin.logic&&T().skinLogic.load(std::memory_order_relaxed);
 }
+ms::Assignment warmAssignment(TintDevice& device,const SharedSkin& skin,unsigned profile){
+ auto values=skinAssignment(device.skin.profiles[profile],skin,profile);
+ if(!liveLogic(skin))return values;
+ const auto running=device.logic.find(skin.logic.get());
+ const auto saved=running==device.logic.end()?T().savedLogic(skin.persistFile,skin.logic->mainNs):std::nullopt;
+ const auto app=std::atomic_load(&T().skinChoices);
+ const bool shared=T().skinSharedChoices.load(std::memory_order_relaxed);
+ for(const auto& [var,allowed]:skin.variants.vars){
+  std::optional<float> next;
+  if(running!=device.logic.end()){next=running->second.driver.value(var);}
+  else if(saved){
+   if(shared&&app){
+    const auto choice=app->find(T().skinMods[profile]);
+    if(choice!=app->end()&&choice->second.count(var))continue;
+   }
+   auto at=saved->find(migoto::namespacedVar(migoto::lower(var),skin.logic->mainNs));
+   if(at==saved->end()){at=saved->find(migoto::lower(var));}
+   if(at!=saved->end()){next=at->second;}
+  }
+  if(!next||std::fabs(*next)>1000000||std::floor(*next)!=*next)continue;
+  if(std::find(allowed.begin(),allowed.end(),int(*next))!=allowed.end()){values.insert_or_assign(var,int(*next));}
+ }
+ return values;
+}
+void warmSkinImages(TintDevice& device,uint64_t profiles,bool startup){
+ auto& upload=device.upload;
+ uint64_t budget=startupSkinTextureBudget;
+ for(;profiles;profiles&=profiles-1){
+  const auto profile=unsigned(__builtin_ctzll(profiles));
+  if(profile>=sharedSkins.size()||profile>=device.skin.profiles.size()||!device.skin.profiles[profile].ready)continue;
+  const auto& skin=sharedSkins[profile];
+  const auto assignment=warmAssignment(device,skin,profile);
+  if(!ms::drawn(skin.replaceWhen,assignment))continue;
+  std::set<unsigned> images;
+  if(skin.generic()){
+   for(const auto& slot:skin.iniDraws){
+    for(const auto& row:slot){if(ms::drawn(row.when,assignment)){images.insert(row.images.begin(),row.images.end());}}
+   }
+  }else{images.insert(skin.images.begin(),skin.images.end());}
+  images.erase(~0u);
+  if(!startup){
+   for(auto id:images){skinImage(upload,id);}
+   continue;
+  }
+  uint64_t bytes=0;
+  for(auto id:images){if(!upload.warm.count(id)){bytes+=sharedImages.at(id).ref.len;}}
+  if(bytes>budget)continue;
+  upload.warm.insert(images.begin(),images.end());budget-=bytes;
+ }
+}
 void syncSkinLogic(SkinLogic& logic,const SharedSkin& skin,unsigned profile){
  const auto choices=std::atomic_load(&T().skinChoices);
- if(skin.logic->driven||choices==logic.choices)return;
- logic.choices=choices;
- ms::Assignment selected=skin.variants.defaults;
+ const bool shared=T().skinSharedChoices.load(std::memory_order_relaxed);
+ if(logic.initialized&&choices==logic.choices&&shared==logic.sharedChoices)return;
+ const bool initial=!logic.initialized;
+ if(!initial&&logic.sharedChoices!=shared){logic.pushed.clear();}
+ logic.choices=choices;logic.initialized=true;logic.sharedChoices=shared;
+ const ms::Assignment* app=nullptr;
  if(choices){
   const auto it=choices->find(T().skinMods[profile]);
-  if(it!=choices->end()){selected=ms::pick(skin.variants,it->second);}
+  if(it!=choices->end()){app=&it->second;}
  }
+ auto selected=skin.logic->driven?ms::Assignment{}:app?ms::pick(skin.variants,*app):skin.variants.defaults;
+ if(shared&&app){for(const auto& entry:*app){selected.insert_or_assign(entry.first,entry.second);}}
  for(const auto& entry:selected){
+  if(initial&&logic.driver.restoredVar(entry.first)&&!(shared&&app&&app->count(entry.first)))continue;
   const auto previous=logic.pushed.find(entry.first);
   if(previous==logic.pushed.end()||previous->second!=entry.second){logic.driver.set(entry.first,entry.second);}
  }
@@ -1160,9 +1236,7 @@ void syncSkinLogic(SkinLogic& logic,const SharedSkin& skin,unsigned profile){
   for(unsigned profile=0;profile<sharedSkins.size();profile++){
    const auto& skin=sharedSkins[profile];
    if(!skin.logic||!T().skinActive(profile)||!advanced.insert(skin.logic.get()).second)continue;
-   auto found=device.logic.find(skin.logic.get());
-   if(found==device.logic.end())continue;
-   auto& logic=found->second;
+   auto& logic=device.logic.try_emplace(skin.logic.get(),*skin.logic,skin.persistFile).first->second;
    syncSkinLogic(logic,skin,profile);
    for(const auto& key:keys){
     if(key.mod!=T().skinMods[profile])continue;
@@ -1175,7 +1249,11 @@ void syncSkinLogic(SkinLogic& logic,const SharedSkin& skin,unsigned profile){
     }
    }
    logic.driver.present(seconds);
+   logic.save(skin.logic->mainNs);
    logic.skinPasses.clear();
+  }
+  for(auto it=device.logic.begin();it!=device.logic.end();){
+   if(advanced.count(it->first)){++it;}else{it=device.logic.erase(it);}
   }
  });
  return result;
@@ -1314,7 +1392,7 @@ ms::LogicDriver::LiveDraw skinLogicDraw(TintDevice& device,const SharedSkin& pro
  if(!match.pass)return {};
  const auto hash=hit.iniHash?hit.iniHash:match.alias;
  if(!hash)return {};
- auto& logic=device.logic.try_emplace(profile.logic.get(),*profile.logic).first->second;
+ auto& logic=device.logic.try_emplace(profile.logic.get(),*profile.logic,profile.persistFile).first->second;
  syncSkinLogic(logic,profile,hit.profile);
  auto& driver=logic.driver;
  const auto in=gpuHandle(command);
@@ -1360,7 +1438,9 @@ ms::LogicDriver::LiveDraw skinLogicDraw(TintDevice& device,const SharedSkin& pro
  }
  draw.call={{"first_index",float(hit.first)},{"index_count",float(hit.count)},{"instance_count",1},{"first_instance",float(firstInstance)}};
  if(source){draw.call.emplace("vertex_count",float(source->vertices));}
- return driver.drawLive(match.pass->name,draw);
+ auto result=driver.drawLive(match.pass->name,draw);
+ logic.save(profile.logic->mainNs);
+ return result;
 }
 TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},uint32_t firstInstance=0){
  using ms::vkcap::SkinMiss;
@@ -1436,7 +1516,10 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
      return;
     }
    }
-   if(!poseReady){miss(SkinMiss::Pose);return;}
+   if(!poseReady){
+    warmSkinImages(d,uint64_t(1)<<shared.profile,false);
+    miss(SkinMiss::Pose);return;
+   }
    if(plan.bindings&2){
     plan.newVertex[1]=skinAttributes(i->second.first,u,buffers,profile.mesh,layout->second.attributes);
     if(!plan.newVertex[1]){miss(SkinMiss::Resources);return;}
@@ -1785,7 +1868,7 @@ SkinLogicPass findSkinLogicPass(const LogicSpec& logic,const SourceDraw& draw){
  return {selected,{},draw.gpu.empty()?std::nullopt:hash,draw.gpu};
 }
 bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const std::string& dir,
-                     const std::string& name,std::vector<uint32_t>& probes,size_t& budget){
+                     const std::string& name,const std::string& persistFile,std::vector<uint32_t>& probes,size_t& budget){
  const auto legacy=legacyIniDraws(model);
  if(summary.parts.size()!=model.parts.size()||std::any_of(summary.parts.begin(),summary.parts.end(),[&](const auto& part){return part.sourceDraws.empty()&&legacy.empty();}))return false;
  std::vector<SharedSkin> skins;std::vector<SkinImage> pendingImages;
@@ -1813,7 +1896,9 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
   if(logic){
    skin.logicPasses.resize(count);
    for(const auto& rule:source){skin.logicPasses[rule.slot]=findSkinLogicPass(*logic,rule);}
-   if(std::any_of(skin.logicPasses.begin(),skin.logicPasses.end(),[](const auto& pass){return pass.pass!=nullptr;})){skin.logic=logic;}
+   if(std::any_of(skin.logicPasses.begin(),skin.logicPasses.end(),[](const auto& pass){return pass.pass!=nullptr;})){
+    skin.logic=logic;skin.persistFile=persistFile;
+   }
   }
   require(!model.logic.driven||skin.logic,"实时 INI 款式缺少可确认的 Vulkan 绘制入口");
   skin.iniDraws.resize(count);skin.mesh=packVulkanSkin(part,{},count,{},true);
@@ -1888,10 +1973,13 @@ std::vector<std::string> prepareVulkanSkins(const std::string& shared,const std:
    const auto summary=readSummary(dir);if(summary.animated){notes.push_back(name+"：逐帧动画尚未接入 Vulkan，保留游戏原模");continue;}
    auto m=loadModelFile(dir,false,true,-1,summary.generation);
    const auto at=sharedSkins.size(),gpuAt=T().resourceRules.size();
-   if(prepareIniSkins(summary,*m,dir,name,probes,budget)){
+   const auto persistFile=logicPersistFile(shared,name);
+   if(prepareIniSkins(summary,*m,dir,name,persistFile,probes,budget)){
     notes.push_back(name+(gpuAt==T().resourceRules.size()?"：已登记 INI 索引规则，":"：已登记 Vulkan 资源规则，")+
                     std::to_string(sharedSkins.size()-at)+" 个部件，等待 Vulkan 绘制与实时骨骼");
     if(std::any_of(sharedSkins.begin()+at,sharedSkins.end(),[](const auto& skin){return bool(skin.logic);})){
+     try{T().rememberLogic(persistFile,{m->logic.mainNs,readLogicPersist(persistFile,m->logic.mainNs)},false);}
+     catch(const std::exception& e){notes.push_back(name+"：读取 INI 持久变量失败，"+e.what());}
      notes.push_back(name+"：已登记 Vulkan 实时 INI，使用实验开关“逻辑核心驱动”");
     }
     continue;

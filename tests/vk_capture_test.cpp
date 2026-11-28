@@ -27,6 +27,7 @@ int main(){
   SkinHit before,after;
   early.drawIndexed(1,3,1,3,0,0,&before);assert(!before);
   early.iniSkinRules[hs[2].value]={{0,1,3,3}};early.setDrawHashes({hs[2].value});
+  assert(early.skinIndexUploads.exchange(0)==1);
   early.drawIndexed(1,3,1,3,0,0,&after);
   assert(after&&after.profile==0&&after.slot==1&&early.drawStats().front().uploads==1);
  }

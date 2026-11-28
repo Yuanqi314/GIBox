@@ -178,6 +178,7 @@ inline std::optional<std::vector<ResourceMatch>> resourceMatches(std::string_vie
 struct SkinLayoutMiss {unsigned profile;uintptr_t pipeline;std::string details;};
 enum class SkinMiss : unsigned {DrawRange,Ambiguous,Graphics,SkinOutput,Bones,Resources,Pose,VertexBindings,Material,ComputeDescriptors,Logic,Total};
 using SkinChoices=std::map<std::string,std::map<std::string,int>>;
+struct LogicPersist {std::string main;std::map<std::string,float> values;};
 struct SkinKey {std::string mod,section;size_t file=0;int select=-1,hold=0;bool back=false;};
 inline constexpr uint32_t paimonBodyHash=0x5b4cdc9cu;
 // A narrow test route. Do not allow a partial match (instances, index format, range or base vertex).
@@ -339,6 +340,14 @@ class Tracker {
   }
  }
  // Under the lock: an unmap waits until the bytes are read.
+ void noteSkinIndexUpload(uint32_t hash){
+  uint64_t profiles=0;
+  if(auto rules=iniSkinRules.find(hash);rules!=iniSkinRules.end()){
+   for(const auto& rule:rules->second){if(rule.profile<64){profiles|=uint64_t(1)<<rule.profile;}}
+  }
+  if(auto route=skinRoutes.find(hash);route!=skinRoutes.end()&&route->second.profile<64){profiles|=uint64_t(1)<<route->second.profile;}
+  if(profiles){skinIndexUploads.fetch_or(profiles,std::memory_order_relaxed);}
+ }
  void add(const uint8_t* p,uint64_t n,uint64_t buffer,Buffer& dst,uint64_t offset,const char* via){st.uploads++;st.bytes+=n;
   if(!probing()&&out.size()>=maxQueue){st.dropped++;return;}
   Blob b;b.seq=++seq;b.buffer=buffer;b.offset=offset;b.bytes=uint32_t(n);b.via=via;if(allForms)b.hashes=ibHashes(p,size_t(n));else hashFormat(p,size_t(n),0,b.hashes);
@@ -350,7 +359,9 @@ class Tracker {
     if(format&&!iniSkinRules.count(h.value)&&(route==skinRoutes.end()||!route->second.pcRule||n!=uint64_t(route->second.total)*(format==1?2u:4u)))return;
     const uint8_t widths=format?uint8_t(format==1?1:2):uint8_t(3);
     for(size_t i=0;i<match.count;i++)if(match.hashes[i].value==h.value){match.hashes[i].widths|=widths;return;}
-    ++probe->second.uploads;match.hashes[match.count++]={h.value,widths};};
+    ++probe->second.uploads;match.hashes[match.count++]={h.value,widths};
+    if(allSkins){noteSkinIndexUpload(h.value);}
+   };
    for(const auto& h:b.hashes){
     if(ready)keep(h);
     else if(h.variant<4)match.hashes[match.count++]={h.value,3};
@@ -384,6 +395,7 @@ public:
  std::vector<ResourceRule> resourceRules; // published with routesReady
  bool logicResources=false; // published with routesReady
  std::atomic<bool> skinLogic{false};
+ std::atomic<bool> skinSharedChoices{false};
  bool gpuEnabled()const{return inspectResources||(allSkins&&(!routesReady.load(std::memory_order_acquire)||!resourceRules.empty()));}
  bool gpuBuffersEnabled()const{return gpuEnabled()||(allSkins&&logicResources);}
  std::optional<uint32_t> boundResource(uintptr_t command,const ResourceSlot& slot){
@@ -399,14 +411,43 @@ public:
  std::vector<SkinKey> takeSkinKeys(){
   std::lock_guard<std::mutex> lock(m);std::vector<SkinKey> out;out.swap(skinKeys);return out;
  }
+ std::optional<std::map<std::string,float>> savedLogic(const std::string& file,const std::string& main,bool pendingOnly=false){
+  std::lock_guard<std::mutex> lock(m);
+  const auto& values=pendingOnly?pendingLogicValues:savedLogicValues;
+  const auto at=values.find(file);if(at==values.end())return {};
+  const auto& value=*at->second;
+  return value.main==main?value.values:std::map<std::string,float>{};
+ }
+ void rememberLogic(const std::string& file,LogicPersist value,bool dirty){
+  if(file.empty())return;
+  std::lock_guard<std::mutex> lock(m);
+  auto snapshot=std::make_shared<const LogicPersist>(std::move(value));
+  if(dirty){savedLogicValues.insert_or_assign(file,snapshot);pendingLogicValues.insert_or_assign(file,std::move(snapshot));}
+  else{savedLogicValues.try_emplace(file,std::move(snapshot));}
+ }
+ std::map<std::string,std::shared_ptr<const LogicPersist>> logicSaves(const std::string& dir){
+  std::lock_guard<std::mutex> lock(m);
+  std::map<std::string,std::shared_ptr<const LogicPersist>> out;
+  for(auto it=pendingLogicValues.lower_bound(dir);it!=pendingLogicValues.end()&&it->first.rfind(dir,0)==0;++it){
+   out.insert(*it);
+  }
+  return out;
+ }
+ void logicWritten(const std::string& file,const std::shared_ptr<const LogicPersist>& value){
+  std::lock_guard<std::mutex> lock(m);
+  auto at=pendingLogicValues.find(file);
+  if(at!=pendingLogicValues.end()&&at->second==value){pendingLogicValues.erase(at);}
+ }
 private:
  std::vector<SkinKey> skinKeys;
+ std::map<std::string,std::shared_ptr<const LogicPersist>> savedLogicValues,pendingLogicValues;
 public:
  std::vector<std::string> skinMods; // profile index -> mod; published before install
  std::unordered_map<uint32_t,SkinRoute> skinRoutes;
  std::unordered_map<uint32_t,std::vector<IniSkinRule>> iniSkinRules;
  std::shared_ptr<const SkinChoices> skinChoices;
  std::atomic<uint64_t> activeSkins{0},skinMatches{0},sharedDraws{0},sharedMisses{0},originalSkinJobs{0};
+ std::atomic<uint64_t> skinIndexUploads{0};
  std::atomic<uint64_t> lightMapDraws{0},normalMapDraws{0};
  std::array<std::atomic<uint64_t>,64> profileDraws{};
  std::array<std::atomic<uint64_t>,unsigned(SkinMiss::Total)> skinMisses{};
@@ -429,6 +470,7 @@ public:
      for(size_t i=0;i<u.count;i++)if(auto p=probes.find(u.hashes[i].value);p!=probes.end()){
       if(std::none_of(u.hashes.begin(),u.hashes.begin()+count,[&](const auto& h){return h.value==p->first;})){
        ++p->second.uploads;u.hashes[count++]=u.hashes[i];
+       if(allSkins){noteSkinIndexUpload(p->first);}
       }
      }
      u.count=count;if(count)++st.drawProbeUploads;
