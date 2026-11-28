@@ -15,6 +15,7 @@
 // left alone and its first words are logged.
 #include "vk_capture.hpp"
 #include "dobby.h"
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdio>

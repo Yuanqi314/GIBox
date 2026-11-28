@@ -1,4 +1,5 @@
 #include "core.hpp"
+#include <array>
 #define BCDEC_IMPLEMENTATION
 #include "bcdec.h"
 namespace ms {
