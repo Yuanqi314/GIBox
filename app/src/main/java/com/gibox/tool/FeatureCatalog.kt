@@ -21,6 +21,7 @@ internal val features = listOf(
     Feature("远处的简化模型","纯贴图 LOD 简化 完整模型",Screen.Debug,Glyph.Wrench),
     Feature("hash 模式","匹配 采集 完整诊断",Screen.Settings,Glyph.Wrench),
     Feature("替换方式","纯贴图 直接材质 复制材质",Screen.Debug,Glyph.Wrench),
+    Feature("使用 Unity 替换","模型 Vulkan 渲染 后端",Screen.Debug,Glyph.Wrench),
     Feature("动画播放方式","缓存帧 动态 暂停",Screen.Debug,Glyph.Wrench),
     Feature("不使用 3DMigoto 转换","INI 逻辑 按键",Screen.Debug,Glyph.Wrench),
     Feature("一键重新转换","全部 MOD 转换",Screen.Debug,Glyph.Refresh),

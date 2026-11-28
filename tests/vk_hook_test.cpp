@@ -149,6 +149,12 @@ static void tintTrial(){
  sharedSkinDispatch(d,c,state,dev,shortJob,(seen.vertices+63)/64);
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
  assert((call==std::vector<uintptr_t>{26226})&&dispatches==1);
+ profile.rigid=true;skin.graphics[p]=2;state.vertex[0]=fake<VkBuffer>(800);
+ gpu.input[Rest].buffer=fake<VkBuffer>(801);
+ upCmdBindVertexBuffers=+[](VkCommandBuffer,uint32_t,uint32_t n,const VkBuffer* buffers,const VkDeviceSize*){
+  assert(n==2);call.push_back(reinterpret_cast<uintptr_t>(buffers[0]));};
+ call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
+ assert((call==std::vector<uintptr_t>{801,2000,14,23,101,800})&&dispatches==1);
  std::cout<<"Vulkan draw replacement: PASS (scoped textures, skinned vertex and index rebind, queue ownership, restoration and master switch)\n";
 }
 #endif

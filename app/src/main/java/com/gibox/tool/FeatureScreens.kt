@@ -174,7 +174,9 @@ internal fun SettingsScreen(state: AppState, target: String?) {
 @Composable
 internal fun DebugScreen(state: AppState, target: String?) {
     PreferencePage("调试", state::back) {
+        ClientRow(state, showIcon = false)
         val revision = state.revision
+        val useUnity = remember(state.game, revision) { state.useUnityModels() }
         val strategy = remember(state.game, revision) { state.textureMods("strategy", "auto") }
         val lod = remember(state.game, revision) { state.textureMods("lod", "full") }
         val animation = remember(state.game, revision) { state.experimentInt("animationMode").toString() }
@@ -182,6 +184,9 @@ internal fun DebugScreen(state: AppState, target: String?) {
         val skip3dm = remember(state.game, revision) { state.experiment("skip3dmConversion") }
         val keySteps = remember(state.game, revision) { state.experiment("keySteps") }
         Group {
+            ToggleRow("使用 Unity 替换", useUnity, "关闭时，所有模型仅使用 Vulkan 替换",
+                modifier = focusRow("使用 Unity 替换", target), change = state::setUseUnityModels)
+            Divider()
             ChoiceRow("替换方式", strategy, listOf("auto" to "自动（默认）", "diagnose" to "只检查，不替换",
                 "direct" to "直接改游戏材质", "clone" to "复制材质再改"),
                 "其他方式用于对比排查，切换前会先还原", modifier = focusRow("替换方式", target)) { state.setTextureMods("strategy", it) }

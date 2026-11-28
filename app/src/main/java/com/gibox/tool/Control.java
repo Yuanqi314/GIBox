@@ -95,6 +95,7 @@ public final class Control {
     public static boolean lodPin(String pkg) { return load(pkg).optBoolean("lodPin", true); }
     public static synchronized void setLodPin(String pkg, boolean on) throws Exception { JSONObject j = load(pkg); j.put("lodPin", on); save(pkg, j); }
     public static synchronized void setEnabled(String pkg, boolean on) throws Exception { JSONObject j = load(pkg); j.put("enabled", on); save(pkg, j); }
+    public static synchronized void setUseUnityModels(String pkg, boolean on) throws Exception { JSONObject j = load(pkg); j.put("useUnityModels", on); save(pkg, j); }
     /** Log file verbosity, as in XXMI: disabled / warning / info / debug (control.json "logLevel", read by the game too). */
     public static final String[] LOG_LEVELS = {"disabled", "warning", "info", "debug"};
     public static final String[] LOG_LEVEL_LABELS = {"禁用", "警告", "信息", "调试"};

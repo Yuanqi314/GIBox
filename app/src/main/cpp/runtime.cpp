@@ -59,8 +59,8 @@ struct KeyPress {long long seq=0;size_t file=0;std::string section;bool back=fal
 // full / migrate, test rounds.
 // auto (0.7.60): the game's own per-renderer instance is written in place (its effects keep running on it); a loaded asset
 // or a material another renderer shows is copied first, and the game's instance made from that copy is followed in place.
-struct TexModControl {std::string strategy="auto",lod="full",paimonTextureMod,paimonMeshMod;bool capture=false,paimonTint=false,sharedSkins=true;vkcap::Mode hash=vkcap::Mode::Off;long long testRequest=0;std::vector<std::string> testStrategies{"auto","direct","clone"};int observeMs=4000;};
-struct ControlState {std::string loadingFit="original";cameraFade::Mode cameraFadeMode=cameraFade::Mode::Original;TexModControl tex;Experiments exp;bool sharedChoices=false,enabled=false,lodPin=true,hideUid=false,npcModels=false,synthesisButton=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;std::map<std::string,std::vector<KeyPress>> keys;};
+struct TexModControl {std::string strategy="auto",lod="full",paimonTextureMod,paimonMeshMod;bool capture=false,paimonTint=false;vkcap::Mode hash=vkcap::Mode::Off;long long testRequest=0;std::vector<std::string> testStrategies{"auto","direct","clone"};int observeMs=4000;};
+struct ControlState {std::string loadingFit="original";cameraFade::Mode cameraFadeMode=cameraFade::Mode::Original;TexModControl tex;Experiments exp;bool sharedChoices=false,enabled=false,useUnityModels=false,lodPin=true,hideUid=false,npcModels=false,synthesisButton=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;std::map<std::string,std::vector<KeyPress>> keys;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"control.json 不是对象");ControlState s;
  const auto& a=c.at("selected");require(a.type==Json::Array&&a.array.size()<=128,"selected 列表无效");
@@ -68,6 +68,7 @@ ControlState parseControl(const std::string& raw){
  auto integerOf=[](const Json& j){if(j.type==Json::Null)return 0LL;require(j.type==Json::Number&&std::floor(j.number)==j.number&&std::abs(j.number)<=9007199254740991.,"control.json 计数值无效");return static_cast<long long>(j.number);};
  s.sharedChoices=c.at("sharedModControl").type==Json::Bool&&c.at("sharedModControl").boolean;
  s.enabled=c.at("enabled").type==Json::Bool&&c.at("enabled").boolean;s.exportBones=integerOf(c.at("exportBones"));
+ s.useUnityModels=c.at("useUnityModels").type==Json::Bool&&c.at("useUnityModels").boolean;
  s.lodPin=c.at("lodPin").type!=Json::Bool||c.at("lodPin").boolean;   // default on (0.7.103)
  if(c.at("cameraFade").type==Json::String)s.cameraFadeMode=cameraFade::fromName(c.at("cameraFade").string);
  const auto& synthesis=c.at("synthesisButton");s.synthesisButton=synthesis.type==Json::Bool&&synthesis.boolean;
@@ -93,8 +94,6 @@ ControlState parseControl(const std::string& raw){
   s.tex.paimonTint=t.at("vulkanPaimonTint").type==Json::Bool&&t.at("vulkanPaimonTint").boolean;
   if(t.at("vulkanPaimonTextures").type==Json::String)s.tex.paimonTextureMod=t.at("vulkanPaimonTextures").string;
   if(t.at("vulkanPaimonModel").type==Json::String)s.tex.paimonMeshMod=t.at("vulkanPaimonModel").string;
-  const auto& configured=t.at("vulkanSkinModels");
-  s.tex.sharedSkins=configured.type==Json::Bool?configured.boolean:!s.tex.paimonTint&&s.tex.paimonTextureMod.empty()&&s.tex.paimonMeshMod.empty();
   const auto& ts=t.at("testStrategies");if(ts.type==Json::Array){s.tex.testStrategies.clear();for(auto& v:ts.array)if(v.type==Json::String&&(v.string=="auto"||v.string=="direct"||v.string=="clone")&&s.tex.testStrategies.size()<4)s.tex.testStrategies.push_back(v.string);if(s.tex.testStrategies.empty())s.tex.testStrategies={"auto","direct","clone"};}
   auto ms=integerOf(t.at("observeMs"));if(ms)s.tex.observeMs=int(std::min<long long>(60000,std::max<long long>(1000,ms)));}
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
@@ -1208,7 +1207,7 @@ struct Runtime::Impl {
     const bool ready=capture.skinBackendReady();
     log("vulkan-skin-status",std::string(capture.activeSkins.load(std::memory_order_relaxed)?"开启":"关闭")+
      (upload==1?"，资源已排入队列":upload<0?"，资源准备失败":"，等待上传")+
-     (ready?"":"，Vulkan 尚未接管，保留可用的 Unity 替换")+"，识别 "+std::to_string(capture.skinMatches.load(std::memory_order_relaxed))+
+     (ctl.useUnityModels?"，使用 Unity 替换":ready?"":"，等待 Vulkan 后端，保留游戏原模")+"，识别 "+std::to_string(capture.skinMatches.load(std::memory_order_relaxed))+
      "，已匹配原版蒙皮 "+std::to_string(capture.originalSkinJobs.load(std::memory_order_relaxed))+
      "，MOD 蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed))+"，换绑 "+std::to_string(capture.sharedDraws.load(std::memory_order_relaxed))+
      "，保持原样 "+std::to_string(capture.sharedMisses.load(std::memory_order_relaxed))+models);
@@ -1860,10 +1859,36 @@ struct Runtime::Impl {
  // the order changed (discover); parts only one of them replaces are shown from each.
  std::vector<const ModelInfo*> chooseModels(){
   std::vector<const ModelInfo*> out;std::set<std::string> taken;
-  for(auto& n:ctl.selected)for(auto& m:models)if(m.name==n&&!(ctl.tex.sharedSkins&&vkcap::tracker().ownsSkin(n))&&
-    (vkcap::tracker().allSkins||n!=ctl.tex.paimonMeshMod)&&!(ch.entity&&loginOnly(m.sceneTargets))&&taken.insert(m.path).second){auto v=ctl.variables.find(m.name);
+  if(!ctl.useUnityModels)return out;
+  for(auto& n:ctl.selected)for(auto& m:models)if(m.name==n&&!(ch.entity&&loginOnly(m.sceneTargets))&&taken.insert(m.path).second){auto v=ctl.variables.find(m.name);
    if(drawn(m.replaceWhen,pick(m.variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second)))out.push_back(&m);}
   return out;}
+ struct VulkanActivity {uint64_t draws=0,lastAt=0;};
+ std::array<VulkanActivity,64> vulkanActivity{};
+ std::string vulkanModelStatus(std::vector<std::string>& active,uint64_t now){
+  if(ctl.useUnityModels){vulkanActivity={};return {};}
+  auto& capture=vkcap::tracker();
+  if(capture.skinBackendReady())for(size_t i=0;i<capture.skinMods.size();i++){
+   auto& activity=vulkanActivity[i];const auto count=capture.profileDraws[i].load(std::memory_order_relaxed);
+   if(!capture.skinActive(unsigned(i))){activity={count,0};continue;}
+   if(count!=activity.draws)activity={count,now};
+   if(activity.lastAt&&now-activity.lastAt<=1000){
+    const auto& name=capture.skinMods[i];if(std::find(active.begin(),active.end(),name)==active.end())active.push_back(name);
+   }
+  }
+  for(const auto& m:models)if(std::find(ctl.selected.begin(),ctl.selected.end(),m.name)!=ctl.selected.end()){
+   auto v=ctl.variables.find(m.name);
+   if(!drawn(m.replaceWhen,pick(m.variants,v==ctl.variables.end()?Assignment{}:v->second)))continue;
+   if(capture.hasSkin(m.name)){
+    if(!capture.enabled)return "Vulkan 入口不可用，见运行日志";
+    if(capture.textureUpload.load(std::memory_order_relaxed)<0)return "Vulkan 资源准备失败，见运行日志";
+    return capture.skinBackendReady()?"等待 Vulkan 匹配模型绘制":"等待 Vulkan 绘制与资源上传";
+   }
+   if(capture.skinnedModel&&capture.paimonTextureMod==m.name)return "等待 Vulkan 匹配模型绘制";
+   return m.name+"：尚未登记 Vulkan 绘制规则，见启动日志";
+  }
+  return {};
+ }
  // A selected model left out only because its own switch (replaceWhen) is off.
  bool switchedOff(){for(auto& n:ctl.selected)for(auto& m:models)if(m.name==n){auto v=ctl.variables.find(m.name);if(!drawn(m.replaceWhen,pick(m.variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second)))return true;}return false;}
  size_t rank(const std::string& path){for(size_t i=0;i<wantedNow.size();i++)if(wantedNow[i]->path==path)return i;return wantedNow.size();}
@@ -3305,16 +3330,17 @@ struct Runtime::Impl {
   if(profileReady){if(!profileReady->error.empty())log("profile-image-error",profileReady->error);profile.receive(std::move(profileReady));}
   if(c&&c->sharedChoices!=ctl.sharedChoices){for(auto& set:sets)if(set->logic.driver){stopLogic(*set,"logic-control","款式控制方式已改变");}}
   if(c&&c->npcModels!=ctl.npcModels){skipped.clear();bindingRejected.clear();texQuickNo.clear();texWaitUntil.clear();npcTextureAt=0;discoverAt=0;}
-  if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel||c->keys!=ctl.keys);
+  if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->useUnityModels==ctl.useUnityModels&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel||c->keys!=ctl.keys);
    if(!(c->exp==ctl.exp))log("experiments",c->exp.text());
+   if(c->useUnityModels!=ctl.useUnityModels)log("model-backend",c->useUnityModels?"Unity":"Vulkan");
    auto previousVars=ctl.variables==c->variables;
    ctl=*c;synthesis.setEnabled(ctl.synthesisButton);
    auto& capture=vkcap::tracker();
    if(capture.allSkins){
-    capture.setSkinReplacement(ctl.enabled,ctl.tex.sharedSkins,ctl.selected);
+    capture.setSkinReplacement(ctl.enabled,!ctl.useUnityModels,ctl.selected);
     if(!previousVars||!std::atomic_load(&capture.skinChoices))capture.setSkinChoices(ctl.variables);
    }
-   else capture.setPaimonReplacement(ctl.enabled,ctl.tex.paimonTint,capture.skinnedModel?ctl.tex.paimonMeshMod:ctl.tex.paimonTextureMod);
+   else capture.setPaimonReplacement(ctl.enabled&&!(ctl.useUnityModels&&capture.skinnedModel),ctl.tex.paimonTint,capture.skinnedModel?ctl.tex.paimonMeshMod:ctl.tex.paimonTextureMod);
    if(!diagnosticOnly){failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();bindingRejected.clear();bindingStamp.clear();}}
 
   if(!cerr.empty())log("control-error",cerr);}
@@ -3397,17 +3423,19 @@ struct Runtime::Impl {
    tickPhase="动画与状态";animationPrepare(now);for(auto& s:sets)if(wantedSet(*s)&&s->animation.stopped)errors.push_back(s->name+"：动画已暂停："+s->animation.error);
    for(auto& n:notes)errors.push_back(n);
    for(auto& kv:attachments){auto& n=kv.second->set->name;if(std::find(active.begin(),active.end(),n)==active.end())active.push_back(n);}
+   auto vkWaiting=vulkanModelStatus(active,now);
    for(auto& kv:texLive)if(kv.second&&!kv.second->slots.empty()&&std::find(active.begin(),active.end(),kv.second->mod)==active.end())active.push_back(kv.second->mod);
    if(loading.active()&&std::find(active.begin(),active.end(),loading.name())==active.end())active.push_back(loading.name());
    profile.appendActive(active);
    if(wanted.empty()&&active.empty()&&loading.ready()&&texStatus.empty()){if(abi::at(abi::loadingStart)>=abi::notFound)errors.push_back("当前客户端尚未适配加载图片");else if(!loading.error().empty())errors.push_back(loading.name()+"："+loading.error());else waiting="加载图片已就绪，等待加载界面";}
    // Texture-only mods (no mesh model): their own state ("等待映射", "只诊断", written slots) is the status line.
-   if(wanted.empty()&&!texStatus.empty()&&waiting.empty()&&building.empty()&&errors.empty()&&!restoring){status(texApplied?"active":"waiting",texStatus,active,errors);inTick=false;animationTick(now);return;}
+   if(wanted.empty()&&!texStatus.empty()&&waiting.empty()&&vkWaiting.empty()&&building.empty()&&errors.empty()&&!restoring){status(texApplied?"active":"waiting",texStatus,active,errors);inTick=false;animationTick(now);return;}
    if(restoring)status("waiting","正在恢复已停用 MOD 的原模型；暂时失败的渲染器会单独重试",active,errors);
    else if(!animationWaiting.empty()&&errors.empty())status("waiting",animationWaiting,active,errors);
    else if(!active.empty())status("active",errors.empty()?"":errors[0],active,errors);
    else if(!building.empty())status("loading",building[0],active,errors);
    else if(!errors.empty())status("error",errors[0],active,errors);
+   else if(wanted.empty()&&!vkWaiting.empty())status("waiting",vkWaiting,active,errors);
    else if(wanted.empty()&&profile.ready())status("waiting","等待打开个人资料页",active,errors);
    else status("waiting",wanted.empty()?(switchedOff()?"显示替换已关闭，保留游戏原模型（在 App 的款式里打开）":"没有勾选的模型"):(waiting.empty()?"等待角色出现":waiting)+(stale?"":findOff?"（全场景扫描不可用，目前只认当前操控的角色；GIBox Log.txt 里有 renderer-type-dump）":"（大世界、队伍界面、角色详情页任一处出现即可）"),active,errors);
   }catch(const std::exception& ex){std::string what=std::string(ex.what())+"（步骤："+tickPhase+"）";

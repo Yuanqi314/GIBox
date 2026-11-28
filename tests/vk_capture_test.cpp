@@ -5,21 +5,29 @@
 using namespace ms::vkcap;
 int main(){
  {Tracker backend;backend.enabled=true;backend.allSkins=true;backend.skinMods={"Model"};
-  assert(!backend.ownsSkin("Model")); // A successful loader patch cannot prove activity in the renderer.
+  assert(backend.hasSkin("Model")&&!backend.hasSkin("Other")&&!backend.skinBackendReady());
   backend.drawIndexed(1,0,1,0,0,0);backend.textureUpload=1;
-  assert(!backend.ownsSkin("Model"));
+  assert(!backend.skinBackendReady());
   backend.textureUpload=0;backend.drawIndexed(1,3,1,0,0,0);
-  assert(!backend.ownsSkin("Model"));
+  assert(!backend.skinBackendReady());
   backend.textureUpload=1;
-  assert(backend.ownsSkin("Model")&&!backend.ownsSkin("Other"));
+  assert(backend.skinBackendReady());
   backend.textureUpload=-1;
-  assert(!backend.ownsSkin("Model"));
+  assert(!backend.skinBackendReady());
  }
  // CRC-32C check value, and crc32c_append: a CRC continued over a second part equals the CRC of both.
  assert(crc32c(0,"123456789",9)==0xE3069283u&&crc32c(0,"",0)==0);
  assert(crc32c(crc32c(0,"1234",4),"56789",5)==0xE3069283u);
  // HackerDevice::CreateBuffer: data hash, then the 24-byte desc appended (DEFAULT + IB, DEFAULT + IB|SRV|UAV, IMMUTABLE + IB).
  uint16_t idx[6]={0,1,2,2,1,3};auto hs=ibHashes(reinterpret_cast<const uint8_t*>(idx),sizeof idx);
+ {Tracker early;early.allSkins=true;early.allForms=false;early.probeOnly=true;early.routesReady=false;
+  early.created(19,sizeof idx,0x40);early.bound(19,19,0);early.mapped(19,0,sizeof idx,idx);early.indexBound(19,0,1,0);
+  SkinHit before,after;
+  early.drawIndexed(1,3,1,3,0,0,&before);assert(!before);
+  early.iniSkinRules[hs[2].value]={{0,1,3,3}};early.setDrawHashes({hs[2].value});
+  early.drawIndexed(1,3,1,3,0,0,&after);
+  assert(after&&after.profile==0&&after.slot==1&&early.drawStats().front().uploads==1);
+ }
  uint32_t data=crc32c(0,idx,sizeof idx);D3D11BufferDesc d;d.byteWidth=sizeof idx;d.bindFlags=2;
  assert(hs[0].variant==0&&hs[0].value==data&&hs[1].variant==1&&hs[1].value==crc32c(data,&d,sizeof d));
  d.bindFlags=0x8A;assert(hs[2].value==crc32c(data,&d,sizeof d));d.bindFlags=2;d.usage=1;assert(hs[3].value==crc32c(data,&d,sizeof d));

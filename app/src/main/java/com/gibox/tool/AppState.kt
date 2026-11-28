@@ -556,6 +556,10 @@ class AppState private constructor(private val context: Context) {
         Control.setTextureMods(pkg, key, value)
         AppLog.info(pkg, LOGGER, "texture-option $key = $value")
     }
+    fun useUnityModels(): Boolean = currentControl.optBoolean("useUnityModels", false)
+    fun setUseUnityModels(on: Boolean) = savePreference("保存模型替换后端") { pkg ->
+        Control.setUseUnityModels(pkg, on)
+    }
     fun hashMode(): String = Control.hashMode(currentControl)
     fun setHashMode(mode: String) = savePreference("保存 hash 模式") { pkg ->
         Control.setHashMode(pkg, mode)

@@ -170,22 +170,26 @@ class Tracker {
   Blob b;b.seq=++seq;b.buffer=buffer;b.offset=offset;b.bytes=uint32_t(n);b.via=via;if(allForms)b.hashes=ibHashes(p,size_t(n));else hashFormat(p,size_t(n),0,b.hashes);
   if(probing()){
    Upload match{b.seq,offset,n};
+   const bool ready=routesReady.load(std::memory_order_acquire);
    auto keep=[&](const Hash& h){auto probe=probes.find(h.value);if(probe==probes.end())return;
     const auto format=h.variant>>2;auto route=skinRoutes.find(h.value);
     if(format&&!iniSkinRules.count(h.value)&&(route==skinRoutes.end()||!route->second.pcRule||n!=uint64_t(route->second.total)*(format==1?2u:4u)))return;
     const uint8_t widths=format?uint8_t(format==1?1:2):uint8_t(3);
     for(size_t i=0;i<match.count;i++)if(match.hashes[i].value==h.value){match.hashes[i].widths|=widths;return;}
     ++probe->second.uploads;match.hashes[match.count++]={h.value,widths};};
-   for(const auto& h:b.hashes)keep(h);
+   for(const auto& h:b.hashes){
+    if(ready)keep(h);
+    else if(h.variant<4)match.hashes[match.count++]={h.value,3};
+   }
    // GIMI can hash 32-bit PC indices when the same mesh uses 16-bit indices on Android (or vice versa).
    // Try only widths with a verified PC route for the uploaded byte size.
-   if(!allForms){
+   if(ready&&!allForms){
     std::vector<Hash> alternate;
     if(pcIndexBytes16.count(n))indexWidthHashes<uint16_t,uint32_t>(p,size_t(n),1,alternate);
     if(pcIndexBytes32.count(n))indexWidthHashes<uint32_t,uint16_t>(p,size_t(n),2,alternate);
     for(const auto& h:alternate)keep(h);
    }
-   if(match.count){++st.drawProbeUploads;if(dst.matches.size()<16)dst.matches.push_back(match);}
+   if(match.count){if(ready)++st.drawProbeUploads;if(dst.matches.size()<16)dst.matches.push_back(match);}
   }
   if(probeOnly.load(std::memory_order_relaxed))return;
   if(out.size()>=maxQueue){st.dropped++;return;}
@@ -195,6 +199,7 @@ class Tracker {
 public:
  static constexpr size_t maxDrawHashes=64,maxDrawsPerHash=64;
  std::atomic<bool> enabled{false};
+ std::atomic<bool> routesReady{true};   // early hooks can record raw uploads while startup model data is loaded
  std::atomic<bool> allForms{true};   // false (match / collect): the data as uploaded only, one pass over it
  std::atomic<bool> probeOnly{false};
  bool tintHooks=false; // startup only; hooks are never installed by a live setting change
@@ -215,10 +220,27 @@ public:
  std::atomic<uint64_t> deviceCreates{0},queueSubmits{0};
  std::array<std::atomic<uint64_t>,2> tintDraws{},tintMisses{};
  std::atomic<uint64_t> skinDispatches{0};
- // Startup only. The wrappers and runtime may read the keys once installation succeeds.
- void setDrawHashes(const std::vector<uint32_t>& hashes){probes.clear();pcIndexBytes16.clear();pcIndexBytes32.clear();for(uint32_t hash:hashes){if(probes.size()==maxDrawHashes)break;probes.try_emplace(hash);
-  auto route=skinRoutes.find(hash);if(route!=skinRoutes.end()&&route->second.pcRule){pcIndexBytes16.insert(2ull*route->second.total);pcIndexBytes32.insert(4ull*route->second.total);}}}
- bool probing()const{return !probes.empty();}
+ void setDrawHashes(const std::vector<uint32_t>& hashes){
+  std::lock_guard<std::mutex> l(m);probes.clear();pcIndexBytes16.clear();pcIndexBytes32.clear();
+  for(uint32_t hash:hashes){if(probes.size()==maxDrawHashes)break;probes.try_emplace(hash);
+   auto route=skinRoutes.find(hash);if(route!=skinRoutes.end()&&route->second.pcRule){pcIndexBytes16.insert(2ull*route->second.total);pcIndexBytes32.insert(4ull*route->second.total);}}
+  if(!routesReady.load(std::memory_order_relaxed)){
+   for(auto& b:buffers){auto& uploads=b.second.matches;
+    for(auto& u:uploads){
+     size_t count=0;
+     for(size_t i=0;i<u.count;i++)if(auto p=probes.find(u.hashes[i].value);p!=probes.end()){
+      if(std::none_of(u.hashes.begin(),u.hashes.begin()+count,[&](const auto& h){return h.value==p->first;})){
+       ++p->second.uploads;u.hashes[count++]=u.hashes[i];
+      }
+     }
+     u.count=count;if(count)++st.drawProbeUploads;
+    }
+    uploads.erase(std::remove_if(uploads.begin(),uploads.end(),[](const auto& u){return !u.count;}),uploads.end());
+   }
+   routesReady.store(true,std::memory_order_release);
+  }
+ }
+ bool probing()const{return allSkins||!probes.empty();}
  void setPaimonReplacement(bool master,bool tint,const std::string& textureMod){
   if(tintHooks)tintOn.store(master&&(paimonTextureMod.empty()?tint:paimonTextureMod==textureMod),std::memory_order_relaxed);
  }
@@ -230,7 +252,7 @@ public:
  void noteSkinMiss(SkinMiss why){skinMisses[unsigned(why)].fetch_add(1,std::memory_order_relaxed);}
  void setSkinChoices(const SkinChoices& choices){std::atomic_store(&skinChoices,std::make_shared<const SkinChoices>(choices));}
  bool skinBackendReady()const{return enabled&&allSkins&&textureUpload.load(std::memory_order_relaxed)==1&&indexedDrawSeen.load(std::memory_order_relaxed);}
- bool ownsSkin(const std::string& name)const{return skinBackendReady()&&std::find(skinMods.begin(),skinMods.end(),name)!=skinMods.end();}
+ bool hasSkin(const std::string& name)const{return std::find(skinMods.begin(),skinMods.end(),name)!=skinMods.end();}
  void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc))&&!(skinnedModel&&(usage&0x20)&&skinSize(size)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;if(probing())b.generation=++bufferGeneration;buffers[buffer]=std::move(b);}
  void destroyed(uint64_t buffer){std::lock_guard<std::mutex> l(m);buffers.erase(buffer);}
  void bound(uint64_t buffer,uint64_t memory,uint64_t offset){std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end())return;b->second.memory=memory;b->second.memoryOffset=offset;b->second.bound=true;b->second.skinCrc=0;}
@@ -278,6 +300,7 @@ public:
   std::lock_guard<std::mutex> l(m);
   if(!st.indexedDraws)indexedDrawSeen.store(true,std::memory_order_relaxed);
   st.indexedDraws++;
+  if(!routesReady.load(std::memory_order_acquire))return -1;
   auto binding=drawBindings.find(command);if(binding==drawBindings.end())return -1;
   const auto& state=binding->second;
   auto buffer=buffers.find(state.buffer);if(buffer==buffers.end()||buffer->second.generation!=state.generation)return -1;
@@ -291,7 +314,8 @@ public:
    if(begin<upload.offset||begin+bytes>upload.offset+upload.bytes||(begin-upload.offset)%state.width)continue;
    for(size_t i=0;i<upload.count;i++){
     if(!(upload.hashes[i].widths&(state.width==2?1:2)))continue;
-    const auto hash=upload.hashes[i].value;auto& draws=probes.at(hash).draws;
+    const auto hash=upload.hashes[i].value;auto probe=probes.find(hash);if(probe==probes.end())continue;
+    auto& draws=probe->second.draws;
     if(skin&&allSkins){
      const auto relative=uint32_t((begin-upload.offset)/state.width);
      auto accept=[&](SkinHit& hit,unsigned profile,unsigned slot,bool& ambiguous){
