@@ -1006,7 +1006,11 @@ class AppState private constructor(private val context: Context) {
     })
 
     // ---------------------------------------------------------------- background work, errors
-    private val decoder = ModelConverter.TextureDecoder { NativeBridge.decodeTexture(it) }
+    private val decoder = object : ModelConverter.TextureDecoder {
+        override fun decode(image: ByteArray): ByteArray = NativeBridge.decodeTexture(image)
+        override fun decodeModel(image: ByteArray, linear: Boolean, colorSpace: Int): ByteArray =
+            NativeBridge.decodeModelTexture(image, linear, colorSpace)
+    }
     private fun <T> work(title: String, text: String, job: (StringBuilder) -> T, done: (T) -> Unit) {
         busy = text
         scope.launch {

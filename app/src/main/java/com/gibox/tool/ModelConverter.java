@@ -13,7 +13,11 @@ import java.util.regex.*;
  * the manifest) + conversion.log. The runtime adds learned.json and bonemap-<part>.tsv.
  */
 public final class ModelConverter {
-    public interface TextureDecoder { byte[] decode(byte[] image) throws Exception; }
+    public interface TextureDecoder {
+        byte[] decode(byte[] image) throws Exception;
+        default byte[] decodeModel(byte[] image, boolean linear, int colorSpace) throws Exception { return decode(image); }
+    }
+    private static final int DDS_COLOR_DEFAULT=0,DDS_COLOR_LINEAR=1,DDS_COLOR_SRGB=2;
     private static void check(boolean ok,String message) { if(!ok) throw new IllegalArgumentException(message); }
     private static String lower(String s) { return s.toLowerCase(Locale.ROOT); }
     private static String clean(String s) { int p=s.indexOf(';'); return (p<0?s:s.substring(0,p)).trim(); }
@@ -156,7 +160,10 @@ public final class ModelConverter {
             if(p<s.length()&&s.charAt(p)=='$'){p++;while(p<s.length()&&(Character.isLetterOrDigit(s.charAt(p))||s.charAt(p)=='_'))p++;String k=s.substring(start,p);check(vars.containsKey(k),"未知变量："+k);return vars.get(k);}
             while(p<s.length()&&Character.isDigit(s.charAt(p)))p++;check(p>start,"不支持的表达式："+s);return Long.parseLong(s.substring(start,p));}
     }
-    static final class Resource {File file;int stride;String format;Resource(File f,int s,String t){file=f;stride=s;format=t;} }
+    static final class Resource {
+        File file;int stride;String format;int colorSpace;
+        Resource(File f,int s,String t){file=f;stride=s;format=t;}
+    }
     static final class Draw {String part,hash="",issuer="";Map<String,String> bindings;int count,start;Draw(String p,Map<String,String>b,int c,int s){part=p;bindings=new LinkedHashMap<>(b);count=c;start=s;} }
     private static String[] kv(String l){int p=l.indexOf('=');return p<0?null:new String[]{lower(l.substring(0,p).trim()),l.substring(p+1).trim()};}
     /** "this" is 3DMigoto's texture the override's hash names (GIMI's FaceHeadDiffuse writes "this = Resource..."). */
@@ -220,7 +227,18 @@ public final class ModelConverter {
         }
     }
     private static Map<String,Resource> resources(Ini ini,File root,Map<String,Integer> vars)throws Exception {
-        Map<String,Resource> out=new HashMap<>();for(Section s:ini.sections.values())if(lower(s.name).startsWith("resource")){String file=null,format="";int stride=0;for(String l:ini.active(s,vars)){String[] a=kv(l);if(a==null)continue;if(a[0].equals("filename"))file=a[1];if(a[0].equals("stride"))stride=Integer.parseInt(a[1]);if(a[0].equals("format"))format=a[1];}if(file!=null)out.put(lower(s.name),new Resource(inside(root,file),stride,format));}return out;
+        Map<String,Resource> out=new HashMap<>();for(Section s:ini.sections.values())if(lower(s.name).startsWith("resource")){
+            String file=null,format="";int stride=0,color=DDS_COLOR_DEFAULT;
+            for(String l:ini.active(s,vars)){String[] a=kv(l);if(a==null)continue;
+                switch(a[0]){
+                    case "filename":file=a[1];break;
+                    case "stride":stride=Integer.parseInt(a[1]);break;
+                    case "format":format=a[1];break;
+                    case "color_space":color=a[1].equalsIgnoreCase("linear")?DDS_COLOR_LINEAR:a[1].equalsIgnoreCase("srgb")?DDS_COLOR_SRGB:DDS_COLOR_DEFAULT;break;
+                }
+            }
+            if(file!=null){Resource r=new Resource(inside(root,file),stride,format);r.colorSpace=color;out.put(lower(s.name),r);}
+        }return out;
     }
     private static Resource resource(Map<String,Resource> resources,String name){if(name==null)return null;String n=name.replaceFirst("(?i)^ref\\s+","").trim();Resource r=resources.get(lower(n));check(r!=null,"缺少资源定义："+name);return r;}
     private static String identity(Resource r){return r.file.getPath()+"|"+r.stride;}
@@ -316,7 +334,7 @@ public final class ModelConverter {
         for(Section s:ini.sections.values())if(lower(s.name).startsWith("textureoverride")){Evaluated e=new Evaluated(ini,s,vars,rs);String t=e.bindings.get("ps-t0");if(unbound(t))t=e.bindings.get("this");
             if(e.declaresDraw||!e.draws.isEmpty()||unbound(t))continue;boolean buffers=false;for(String k:e.bindings.keySet())buffers|=k.equals("ib")||k.matches("vb[0-9]+")||k.startsWith("vertex-stream:");
             if(buffers||!faceDiffuse(e.name)&&!faceDiffuse(t))continue;Resource r=resource(rs,t);
-            if(found!=null&&!found.file.equals(r.file))check(false,"脸部贴图有多个来源："+found.file.getName()+"、"+r.file.getName());found=r;}
+            if(found!=null&&!textureIdentity(found).equals(textureIdentity(r)))check(false,"脸部贴图有多个来源："+found.file.getName()+"、"+r.file.getName());found=r;}
         return found;}
     /** Named as a face diffuse, or binding one to ps-t0 itself or in a CommandList it runs. */
     private static boolean faceSection(Ini ini,Section s,Set<String> visited){if(faceDiffuse(s.name))return true;if(!visited.add(lower(s.name)))return false;
@@ -333,7 +351,7 @@ public final class ModelConverter {
             for(Map<String,Integer> a:assignments)for(int v:values){Map<String,Integer> b=new LinkedHashMap<>(a);b.put(k,v);more.add(b);}
             check(more.size()<=MAX_ASSIGNMENTS,"脸部贴图条件的取值组合过多");assignments=more;}
         for(int i=0;i<assignments.size();i++){Map<String,Integer> a=assignments.get(i);Resource f=faceTexture(ini,a,resources(ini,src,a));
-            if(i==0)face=f;else varies|=(face==null)!=(f==null)||face!=null&&!face.file.equals(f.file);}
+            if(i==0)face=f;else varies|=!textureIdentity(face).equals(textureIdentity(f));}
         if(varies){log.append("脸部贴图随款式或动画帧变化，暂不导入，脸部保持游戏原版\n");return null;}
         if(face!=null)log.append("脸部贴图：").append(face.file.getName()).append(" -> 游戏的 ").append(FACE_RENDERER).append(" 渲染器（只换贴图，不换脸部网格）\n");
         return face;}
@@ -648,13 +666,40 @@ public final class ModelConverter {
         float sum=0;for(int k=0;k<n;k++)sum+=tw[k];
         for(int k=0;k<4;k++){out.putFloat(4*k,k<n?tw[order[k]]/sum:0f);out.putInt(16+4*k,k<n?ti[order[k]]:0);}}
     private static byte[] uv(float u,float v,boolean flipV){check(Float.isFinite(u)&&Float.isFinite(v),"非法 UV");return buf(new byte[8]).putFloat(u).putFloat(flipV?1-v:v).array();}
-    /** A DDS/PNG texture as RGBA8, at most 1024 on a side, with rows ordered to match the mesh UVs. */
-    private static Map<String,Object> texture(File f,boolean flipRows,TextureDecoder decoder,BlobWriter blob,Map<File,Map<String,Object>> done)throws Exception {
-        Map<String,Object> known=done.get(f);if(known!=null)return known;
-        String ext=lower(f.getName());check(ext.endsWith(".dds")||ext.endsWith(".png"),"当前转换器支持 DDS / PNG 纹理："+f);byte[] raw=decoder.decode(read(f));check(raw.length>=8,"纹理解码返回值无效");ByteBuffer h=buf(raw);int w=h.getInt(0),y=h.getInt(4);check(w>0&&y>0&&w<=8192&&y<=8192&&raw.length==8+4L*w*y,"纹理解码尺寸无效");byte[] pixels=Arrays.copyOfRange(raw,8,raw.length);
+    /** RGBA8, most-detailed level first, with each level in the same row order as the mesh UVs. */
+    private static Map<String,Object> texture(Resource resource,boolean flipRows,boolean linear,TextureDecoder decoder,BlobWriter blob,Map<String,Map<String,Object>> done)throws Exception {
+        File f=resource.file;String key=textureIdentity(resource)+"|"+flipRows+"|"+linear;
+        Map<String,Object> known=done.get(key);if(known!=null)return known;
+        String ext=lower(f.getName());check(ext.endsWith(".dds")||ext.endsWith(".png"),"当前转换器支持 DDS / PNG 纹理："+f);
+        byte[] raw=decoder.decodeModel(read(f),linear,resource.colorSpace);check(raw.length>=8,"纹理解码返回值无效");
+        ByteBuffer h=buf(raw);int w=h.getInt(),y=h.getInt(),levels=1,color=resource.colorSpace,offset=8;
+        check(w>0&&y>0&&w<=8192&&y<=8192,"纹理解码尺寸无效");
+        boolean chain=raw.length!=8+4L*w*y;
+        if(chain){
+            check(raw.length>=16&&w<=1024&&y<=1024,"纹理 mipmap 头无效");
+            levels=h.getInt();color=h.getInt();offset=16;
+            check(levels==32-Integer.numberOfLeadingZeros(Math.max(w,y))&&color>=0&&color<=2,"纹理 mipmap 或色彩空间无效");
+            long bytes=offset;
+            for(int i=0,mw=w,mh=y;i<levels;i++,mw=Math.max(1,mw/2),mh=Math.max(1,mh/2))bytes+=4L*mw*mh;
+            check(raw.length==bytes,"纹理 mipmap 数据不完整");
+        }
+        byte[] pixels=Arrays.copyOfRange(raw,offset,raw.length);
         while(w>1024||y>1024){int nw=Math.max(1,w/2),nh=Math.max(1,y/2);byte[] n=new byte[nw*nh*4];for(int j=0;j<nh;j++)for(int i=0;i<nw;i++)for(int c=0;c<4;c++){int sum=0,count=0;for(int dy=0;dy<2&&j*2+dy<y;dy++)for(int dx=0;dx<2&&i*2+dx<w;dx++){sum+=pixels[((j*2+dy)*w+i*2+dx)*4+c]&255;count++;}n[(j*nw+i)*4+c]=(byte)(sum/count);}pixels=n;w=nw;y=nh;}
-        if(flipRows){byte[] rows=new byte[pixels.length];for(int j=0;j<y;j++)System.arraycopy(pixels,(y-1-j)*w*4,rows,j*w*4,w*4);pixels=rows;}
-        Map<String,Object> t=Json.of("width",w,"height",y,"data",blob.put(pixels));done.put(f,t);return t;
+        if(flipRows){
+            byte[] row=new byte[4*w];int first=0;
+            for(int i=0,mw=w,mh=y;i<levels;i++,mw=Math.max(1,mw/2),mh=Math.max(1,mh/2)){
+                int stride=mw*4;
+                for(int j=0;j<mh/2;j++){
+                    int top=first+j*stride,bottom=first+(mh-1-j)*stride;
+                    System.arraycopy(pixels,top,row,0,stride);System.arraycopy(pixels,bottom,pixels,top,stride);System.arraycopy(row,0,pixels,bottom,stride);
+                }
+                first+=stride*mh;
+            }
+        }
+        Map<String,Object> t=Json.of("width",w,"height",y,"data",blob.put(pixels));
+        if(levels>1)t.put("mips",levels);
+        if(color!=DDS_COLOR_DEFAULT)t.put("colorSpace",color==DDS_COLOR_LINEAR?"linear":"srgb");
+        done.put(key,t);return t;
     }
     /** Draws of one variable assignment, each resolved to its target renderer. */
     private static LinkedHashMap<Draw,Bones> resolve(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,Map<String,Resource> rs,StringBuilder log,String fallback)throws Exception {
@@ -753,6 +798,7 @@ public final class ModelConverter {
     private static boolean gimiSetTextures(String commandList){return lower(commandList).replace(" ","").endsWith("\\settextures")&&lower(commandList).contains("gimi");}
     private static boolean rigid(Bones b){return b.target!=null&&((Number)b.target.get("bones")).intValue()==0;}
     private static String path(Resource r){return r==null?"-":r.file.getPath();}
+    private static String textureIdentity(Resource r){return r==null?"-":path(r)+"|"+r.colorSpace;}
     /**
      * The renderer material slot of a draw: a part name ending in a capital letter picks it (BodyA = 0, BodyB = 1 …);
      * otherwise the part's place among the sections of its IB hash by match_first_index (on the PC the IB is split in
@@ -790,7 +836,7 @@ public final class ModelConverter {
         Map<String,Resource> rs=resources(ini,src,vars);LinkedHashMap<Draw,Bones> resolved=resolve(ini,src,boneRecords,mapping,vars,rs,null,fallback);
         StringBuilder s=new StringBuilder(!resolved.isEmpty()||geometryOverride(ini,vars,rs)?"replace\n":"original\n");
         for(Map.Entry<Draw,Bones> e:resolved.entrySet()){Draw d=e.getKey();Resource[] t=textures(d,rs);
-            s.append(e.getValue().name).append('|').append(d.part).append('#').append(slot(ini,d)).append('|').append(path(stream(rs,d.bindings,0))).append('|').append(path(rigid(e.getValue())?null:stream(rs,d.bindings,1))).append('|').append(path(stream(rs,d.bindings,2))).append('|').append(path(resource(rs,d.bindings.get("ib")))).append('|').append(d.start).append('|').append(d.count).append('|').append(path(t[0])).append(path(t[1])).append(path(t[2])).append('\n');}
+            s.append(e.getValue().name).append('|').append(d.part).append('#').append(slot(ini,d)).append('|').append(path(stream(rs,d.bindings,0))).append('|').append(path(rigid(e.getValue())?null:stream(rs,d.bindings,1))).append('|').append(path(stream(rs,d.bindings,2))).append('|').append(path(resource(rs,d.bindings.get("ib")))).append('|').append(d.start).append('|').append(d.count).append('|').append(textureIdentity(t[0])).append('|').append(textureIdentity(t[1])).append('|').append(textureIdentity(t[2])).append('\n');}
         return s.toString();}
     private static void collect(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,int combo,Build b,StringBuilder log,String fallback)throws Exception {
         Map<String,Resource> rs=resources(ini,src,vars);LinkedHashMap<Draw,Bones> targets=resolve(ini,src,boneRecords,mapping,vars,rs,combo==0?log:null,fallback);
@@ -823,7 +869,7 @@ public final class ModelConverter {
                 }
                 range=new int[]{start,count};g.ranges.put(rangeKey,range);
             }
-            ComboRows rows=g.combos.computeIfAbsent(combo,k->new ComboRows());String materialKey=path(tx[0])+"|"+path(tx[1])+"|"+path(tx[2])+"|"+flipV;
+            ComboRows rows=g.combos.computeIfAbsent(combo,k->new ComboRows());String materialKey=textureIdentity(tx[0])+"|"+textureIdentity(tx[1])+"|"+textureIdentity(tx[2])+"|"+flipV;
             if("8b268d05".equals(d.hash)&&!"nnfix".equals(d.bindings.get("texture-role:layout"))&&tx[0]!=null&&tx[1]!=null&&tx[2]!=null)
                 ini.compatibility.add("已按纳西妲 IB 8b268d05 识别贴图：ps-t0 为法线，ps-t1 为颜色，ps-t2 为光照遮罩（优先于文件名）");
             MaterialDef m=b.materials.get(materialKey);if(m==null){m=new MaterialDef();m.name="Material"+b.materials.size();m.diffuse=tx[0];m.light=tx[1];m.normal=tx[2];m.flipRows=flipV;b.materials.put(materialKey,m);}
@@ -878,14 +924,13 @@ public final class ModelConverter {
         return parts;
     }
     private static List<Object> emitMaterials(Build b,TextureDecoder decode,BlobWriter blob)throws Exception {
-        List<Object> materials=new ArrayList<>();Map<File,Map<String,Object>> flipped=new HashMap<>(),unflipped=new HashMap<>();
+        List<Object> materials=new ArrayList<>();Map<String,Map<String,Object>> textures=new HashMap<>();
         for(MaterialDef m:b.materials.values()){
             Map<String,Object> e=Json.of("name",m.name);boolean flipRows=m.flipRows;
-            Map<File,Map<String,Object>> textures=flipRows?flipped:unflipped;
             if(m.diffuse==null&&m.light==null&&m.normal==null)e.put("original",true);
-            if(m.diffuse!=null)e.put("main",texture(m.diffuse.file,flipRows,decode,blob,textures));
-            if(m.light!=null)e.put("lightmap",texture(m.light.file,flipRows,decode,blob,textures));
-            if(m.normal!=null)e.put("normalmap",texture(m.normal.file,flipRows,decode,blob,textures));
+            if(m.diffuse!=null)e.put("main",texture(m.diffuse,flipRows,false,decode,blob,textures));
+            if(m.light!=null)e.put("lightmap",texture(m.light,flipRows,true,decode,blob,textures));
+            if(m.normal!=null)e.put("normalmap",texture(m.normal,flipRows,true,decode,blob,textures));
             materials.add(e);
         }
         return materials;

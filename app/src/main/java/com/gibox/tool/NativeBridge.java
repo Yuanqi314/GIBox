@@ -13,6 +13,12 @@ public final class NativeBridge {
         if (!loaded) { System.loadLibrary("gibox"); loaded=true; }
         return decodeDds(image);
     }
+    static synchronized byte[] decodeModelTexture(byte[] image, boolean linear, int colorSpace) {
+        if (image.length < 4 || image[0] != 'D' || image[1] != 'D' || image[2] != 'S' || image[3] != ' ')
+            return decodeTexture(image);
+        if (!loaded) { System.loadLibrary("gibox"); loaded=true; }
+        return decodeModelDds(image, linear, colorSpace);
+    }
     static byte[] decodePng(byte[] source) {
         android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
         bounds.inJustDecodeBounds = true; android.graphics.BitmapFactory.decodeByteArray(source, 0, source.length, bounds);
@@ -51,4 +57,5 @@ public final class NativeBridge {
     private static native byte[] drawsUtf8(byte[] request);
     public static native void start(String packageName,String privateDir,byte[] synthesisIcon);
     private static native byte[] decodeDds(byte[] dds);
+    private static native byte[] decodeModelDds(byte[] dds, boolean linear, int colorSpace);
 }

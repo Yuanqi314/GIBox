@@ -39,7 +39,15 @@ struct Part {std::string name,group;unsigned material,bones;};
 struct Material {std::string name;unsigned slot;};
 struct Skin {Bytes data;std::set<unsigned> used;};
 struct Submesh {unsigned start,count;};
-struct Texture {unsigned w,h;Bytes pixels;};
+enum class TextureColor : unsigned {Role,Linear,Srgb};
+struct Texture {
+ unsigned w,h;Bytes pixels;unsigned mips=1;TextureColor color=TextureColor::Role;
+ bool linear(bool fallback)const{return color==TextureColor::Role?fallback:color==TextureColor::Linear;}
+};
+inline unsigned textureMipCount(unsigned w,unsigned h){unsigned n=0;for(auto side=std::max(w,h);side;side>>=1)++n;return n;}
+inline uint64_t textureBytes(unsigned w,unsigned h,unsigned mips){uint64_t bytes=0;
+ for(unsigned level=0;level<mips;level++){bytes+=4ull*w*h;w=std::max(w/2,1u);h=std::max(h/2,1u);}return bytes;
+}
 // Halved with a 2x2 box filter (edge pixels averaged with what exists) until neither side exceeds maxSide: exactly what
 // the converter and the texture-only import do in Java (ModelConverter.texture, TextureMod, 1024). Done here, in native
 // memory, a 4096x8192 texture never reaches the App's Java heap as 128 MiB of RGBA.
@@ -52,7 +60,14 @@ inline Texture shrinkTexture(Texture t,unsigned maxSide){
  return t;}
 // Rows in the other order. model.bin keeps textures with rows bottom to top, for the converter's meshes (whose UVs it
 // flips, 1 - v); a texture put on one of the game's own meshes (its UVs untouched) needs the PC rows back.
-inline void flipRows(Texture& t){size_t row=size_t(t.w)*4;if(!row||t.pixels.size()!=row*t.h)return;for(unsigned i=0,j=t.h?t.h-1:0;i<j;i++,j--)std::swap_ranges(t.pixels.begin()+long(i*row),t.pixels.begin()+long((i+1)*row),t.pixels.begin()+long(j*row));}
+inline void flipRows(Texture& t){if(!t.w||!t.h||t.pixels.size()!=textureBytes(t.w,t.h,t.mips))return;
+ size_t offset=0;unsigned w=t.w,h=t.h;
+ for(unsigned level=0;level<t.mips;level++){
+  const size_t row=size_t(w)*4;
+  for(unsigned i=0;i<h/2;i++)std::swap_ranges(t.pixels.data()+offset+i*row,t.pixels.data()+offset+(i+1)*row,t.pixels.data()+offset+(h-1-i)*row);
+  offset+=row*h;w=std::max(w/2,1u);h=std::max(h/2,1u);
+ }
+}
 // ---------------------------------------------------------------- bones
 // Source bones (the model's skeleton) to the bones of the renderer it goes on. Each bone the weights use is matched by
 //  1. its exact name, when that name is on one target bone;
@@ -100,6 +115,7 @@ inline void remap(Skin& s,const std::vector<int>& map){
   float sum=0;for(int k=0;k<n;k++)sum+=slot[k].first;
   for(int j=0;j<4;j++){float w=j<n&&sum>0?slot[j].first/sum:0.f;std::memcpy(v+4*j,&w,4);put32(v+16+4*j,j<n?slot[j].second:0);}}}
 Texture decodeDds(const Bytes& b);
+Texture decodeModelDds(const Bytes& b,bool roleLinear,TextureColor overrideColor=TextureColor::Role);
 
 // Identity of an original Mesh asset, readable without CPU vertex data:
 // asset name, vertex count (shared+0x74), submesh count (shared+0xc0), bindpose count (shared+0xe0).

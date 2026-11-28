@@ -1643,13 +1643,27 @@ struct Runtime::Impl {
    c.v3=cls(abi::getPositions,12);c.v2=cls(abi::getUV,8);c.i32=cls(abi::getTriangles,4);c.c32=cls(abi::getColors,4);c.v4=cls(abi::getTangents,16);}
   catch(...){freeOwned(tmp);throw;}arrayClasses=c;log("array-classes","取自可读网格 "+name(mesh));freeOwned(tmp);}
  void freeOwned(Owned& o){for(auto i=o.objects.rbegin();i!=o.objects.rend();++i)if(alive(*i))e.action(abi::destroy,*i);for(auto h:o.handles)e.call<void>(abi::unpin,h);o.objects.clear();o.handles.clear();}
+ bool applyRawMipChain(Ptr texture){
+  if(e.resolver)return false;
+  // Apply(bool,bool), Apply(bool) and Apply() share a direct branch target in the 7.2 CN ELF.
+  // Require all three wrappers to have that shape before calling the overload on another supported build.
+  const Ptr entry=e.base+abi::at(abi::textureApply);
+  const auto code=load<std::array<uint32_t,6>>(entry-12);
+  constexpr uint32_t branch=0x14000000u,imm=0x03ffffffu;
+  if(code[3]!=0x52800021u||code[4]!=0x2a1f03e2u||code[1]!=code[4]||(code[5]&~imm)!=branch||
+     code[0]!=(branch|((code[5]+5)&imm))||code[2]!=(branch|((code[5]+3)&imm)))return false;
+  reinterpret_cast<void(*)(Ptr,bool,bool,Ptr)>(entry-12)(texture,false,false,0);
+  return true;
+ }
  // keep: HideFlags.DontUnloadUnusedAsset, so the game's unused-asset unload (a scene change: entering co-op, a domain)
  // does not destroy a texture made ahead of use that no material holds yet; it is still destroyed by freeOwned. The
  // flag read back says whether it took (a texture-only mod's store counts them for its texture-ready line).
  Ptr makeTexture(Owned& o,const Texture& t,bool linear,bool* kept=nullptr){Ptr descriptor=e.call<Ptr>(abi::textureType);require(descriptor!=0,"缺少贴图类型");
   // objectNew only allocates the managed shell; its native texture (+0x10) exists once the constructor (textureInit) has run.
   Ptr x=e.call<Ptr>(abi::objectNew,load<Ptr>(descriptor));require(x!=0,"贴图分配失败");o.objects.push_back(x);pin(o,x);
-  e.call<void>(abi::textureInit,x,int(t.w),int(t.h),4,0,linear?1:0,Ptr(0));require(alive(x),"贴图初始化失败");e.call<void>(abi::texturePixels,x,reinterpret_cast<Ptr>(t.pixels.data()),int(t.pixels.size()),Ptr(0));e.action(abi::textureApply,x);
+  e.call<void>(abi::textureInit,x,int(t.w),int(t.h),4,t.mips>1?1:0,t.linear(linear)?1:0,Ptr(0));require(alive(x),"贴图初始化失败");
+  e.call<void>(abi::texturePixels,x,reinterpret_cast<Ptr>(t.pixels.data()),int(t.pixels.size()),Ptr(0));
+  if(t.mips==1||!applyRawMipChain(x))e.action(abi::textureApply,x);
   keep(x);if(kept)*kept=(e.call<int>(abi::getHideFlags,x,Ptr(0))&32)!=0;
   return x;}
  void extraTexture(Ptr mat,Ptr tx,std::initializer_list<const char*> properties){if(auto* prop=firstProperty(mat,properties))e.call<void>(abi::setTexture,mat,managedName(prop),tx,Ptr(0));}
@@ -2154,7 +2168,7 @@ struct Runtime::Impl {
    // A swap's texture goes on the game's own mesh, whose UVs the converter did not flip: its rows go back to PC order.
    bool swap=false;for(auto& w:s.swaps)swap|=w.material==n;
    if(!t.original){require(mf.loaded(),"缺少贴图数据："+n);if(mf.main){if(swap)flipRows(*mf.main);t.main=makeTexture(s,*mf.main,false);}if(mf.light)t.light=makeTexture(s,*mf.light,true);if(mf.normal)t.normal=makeTexture(s,*mf.normal,true);
-    for(auto* x:{mf.main.get(),mf.light.get(),mf.normal.get()}){if(x)s.bytes+=uint64_t(x->w)*x->h*4;}mf.main.reset();mf.light.reset();mf.normal.reset();}
+    for(auto* x:{mf.main.get(),mf.light.get(),mf.normal.get()}){if(x)s.bytes+=x->pixels.size();}mf.main.reset();mf.light.reset();mf.normal.reset();}
    s.textures[n]=t;}
   return true;}
  void requestTextures(Set& s,const std::set<std::string>& names){auto key=s.path+"|"+s.generation;{std::lock_guard<std::mutex> l(sm);if(textureInflight.count(key))return;textureInflight.insert(key);}

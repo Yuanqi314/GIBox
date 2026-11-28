@@ -307,26 +307,31 @@ bool stagePaimon(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u){
  const std::vector<std::shared_ptr<ms::Texture>> lookup=T().allSkins?sharedPixels:std::vector<std::shared_ptr<ms::Texture>>(paimonPixels.begin(),paimonPixels.end());
  if(T().allSkins&&lookup.empty()){u.images.clear();u.usedFamily=family;u.queued=true;return true;}
  if(lookup.empty()||std::any_of(lookup.begin(),lookup.end(),[](const auto& p){return !p;}))return false;
- u.images.resize(lookup.size());VkDeviceSize size=0;std::vector<VkBufferImageCopy> regions(lookup.size());
+ u.images.resize(lookup.size());VkDeviceSize size=0;std::vector<std::vector<VkBufferImageCopy>> regions(lookup.size());
  for(size_t i=0;i<u.images.size();i++){
   const auto& p=*lookup[i];auto& x=u.images[i];
-  const auto format=T().allSkins&&i<sharedLinear.size()&&sharedLinear[i]?VK_FORMAT_R8G8B8A8_UNORM:VK_FORMAT_R8G8B8A8_SRGB;
-  const VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,nullptr,0,VK_IMAGE_TYPE_2D,format,{p.w,p.h,1},1,1,
+  if(!p.w||!p.h||!p.mips||p.mips>ms::textureMipCount(p.w,p.h)||p.pixels.size()!=ms::textureBytes(p.w,p.h,p.mips))return false;
+  const bool linear=p.linear(T().allSkins&&i<sharedLinear.size()&&sharedLinear[i]);
+  const auto format=linear?VK_FORMAT_R8G8B8A8_UNORM:VK_FORMAT_R8G8B8A8_SRGB;
+  const VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,nullptr,0,VK_IMAGE_TYPE_2D,format,{p.w,p.h,1},p.mips,1,
    VK_SAMPLE_COUNT_1_BIT,VK_IMAGE_TILING_OPTIMAL,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_SHARING_MODE_EXCLUSIVE,0,nullptr,VK_IMAGE_LAYOUT_UNDEFINED};
   if(upCreateImage.load()(d,&ci,nullptr,&x.image)!=VK_SUCCESS){x.image={};return false;}
   VkMemoryRequirements req{};upGetImageMemoryRequirements.load()(d,x.image,&req);
   if(!uploadMemory(d,u,req,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,x.memory)||upBindImageMemory.load()(d,x.image,x.memory,0)!=VK_SUCCESS)return false;
-  const VkImageViewCreateInfo v{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,nullptr,0,x.image,VK_IMAGE_VIEW_TYPE_2D,ci.format,{}, {VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
+  const VkImageViewCreateInfo v{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,nullptr,0,x.image,VK_IMAGE_VIEW_TYPE_2D,ci.format,{}, {VK_IMAGE_ASPECT_COLOR_BIT,0,p.mips,0,1}};
   if(tintCreateImageView.load()(d,&v,nullptr,&x.view)!=VK_SUCCESS){x.view={};return false;}
-  regions[i].bufferOffset=size;regions[i].imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};regions[i].imageExtent=ci.extent;
-  size+=p.pixels.size();
+  unsigned w=p.w,h=p.h;
+  for(unsigned level=0;level<p.mips;level++){
+   VkBufferImageCopy copy{};copy.bufferOffset=size;copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level,0,1};copy.imageExtent={w,h,1};
+   regions[i].push_back(copy);size+=4ull*w*h;w=std::max(w/2,1u);h=std::max(h/2,1u);
+  }
  }
  const ::VkBufferCreateInfo b{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,nullptr,0,size,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_SHARING_MODE_EXCLUSIVE,0,nullptr};
  if(upCreateBuffer.load()(d,&b,nullptr,&u.staging)!=VK_SUCCESS){u.staging={};return false;}
  VkMemoryRequirements req{};upGetBufferMemoryRequirements.load()(d,u.staging,&req);
  if(!uploadMemory(d,u,req,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,u.stagingMemory)||upBindBufferMemory.load()(d,u.staging,u.stagingMemory,0)!=VK_SUCCESS)return false;
  void* mapped=nullptr;if(upMapMemory.load()(d,u.stagingMemory,0,size,0,&mapped)!=VK_SUCCESS)return false;
- for(size_t i=0;i<regions.size();i++)std::memcpy(static_cast<char*>(mapped)+regions[i].bufferOffset,lookup[i]->pixels.data(),lookup[i]->pixels.size());
+ for(size_t i=0;i<regions.size();i++)std::memcpy(static_cast<char*>(mapped)+regions[i].front().bufferOffset,lookup[i]->pixels.data(),lookup[i]->pixels.size());
  upUnmapMemory.load()(d,u.stagingMemory);
  const VkCommandPoolCreateInfo pc{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,nullptr,VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,family};
  if(upCreateCommandPool.load()(d,&pc,nullptr,&u.pool)!=VK_SUCCESS){u.pool={};return false;}
@@ -336,11 +341,11 @@ bool stagePaimon(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u){
  if(upBeginCommandBuffer.load()(cmd,&bc)!=VK_SUCCESS)return false;
  std::vector<VkImageMemoryBarrier> barriers(regions.size());
  for(size_t i=0;i<barriers.size();i++)barriers[i]={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,nullptr,0,VK_ACCESS_TRANSFER_WRITE_BIT,VK_IMAGE_LAYOUT_UNDEFINED,
-  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_QUEUE_FAMILY_IGNORED,VK_QUEUE_FAMILY_IGNORED,u.images[i].image,{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
+  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_QUEUE_FAMILY_IGNORED,VK_QUEUE_FAMILY_IGNORED,u.images[i].image,{VK_IMAGE_ASPECT_COLOR_BIT,0,lookup[i]->mips,0,1}};
  auto barrier=upCmdPipelineBarrier.load();
  barrier(cmd,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,uint32_t(barriers.size()),barriers.data());
  for(size_t i=0;i<barriers.size();i++){
-  upCmdCopyBufferToImage.load()(cmd,u.staging,u.images[i].image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&regions[i]);
+  upCmdCopyBufferToImage.load()(cmd,u.staging,u.images[i].image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,uint32_t(regions[i].size()),regions[i].data());
   auto& x=barriers[i];x.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;x.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
   x.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;x.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
  }
@@ -1282,9 +1287,10 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
    SkinTextureSlots slotsForDraw{~0u,~0u,~0u};
    for(size_t role=0;role<std::size(refs);role++){
     const auto& ref=refs[role];if(!ref.present())continue;
-    auto entry=images.try_emplace(std::make_pair(ref.off,role!=0),unsigned(sharedPixels.size()+images.size()));
+    const bool isLinear=ref.linear(role!=0);
+    auto entry=images.try_emplace(std::make_pair(ref.off,isLinear),unsigned(sharedPixels.size()+images.size()));
     slotsForDraw[role]=entry.first->second;if(!entry.second)continue;
-    linear.push_back(role!=0);bytes+=size_t(ref.len);
+    linear.push_back(isLinear);bytes+=size_t(ref.len);
     MaterialFile f;f.original=false;f.mainRef=ref;
     const auto key=std::to_string(entry.first->second-sharedPixels.size());textures.emplace(key,f);names.insert(key);
    }

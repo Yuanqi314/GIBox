@@ -190,7 +190,10 @@ struct PartFile {Part spec;Geometry geo;Bytes weights;std::set<unsigned> used;st
  std::vector<std::string> legacyBoneNames;std::string legacyBoneError;};
 // Where a texture sits in model.bin (checked against the file when the manifest is read); its pixels are read only for
 // the materials an assignment draws (readTextures), so a model with many variants does not hold every texture at once.
-struct TexRef {unsigned w=0,h=0;uint64_t off=0,len=0;bool present()const{return len>0;}};
+struct TexRef {unsigned w=0,h=0;uint64_t off=0,len=0;unsigned mips=1;TextureColor color=TextureColor::Role;
+ bool present()const{return len>0;}bool linear(bool fallback)const{return color==TextureColor::Role?fallback:color==TextureColor::Linear;}
+ Texture decoded(Bytes data)const{return {w,h,std::move(data),mips,color};}
+};
 struct MaterialFile {bool original=true;std::shared_ptr<Texture> main,light,normal;TexRef mainRef,lightRef,normalRef;
  bool loaded()const{return original||((!mainRef.present()||main)&&(!lightRef.present()||light)&&(!normalRef.present()||normal));}};
 // A texture swap (model.json "textures", optional): the main texture of the character's renderer of that name becomes the
@@ -287,11 +290,16 @@ inline void finite(const Bytes& b,const std::string& what){
 }
 inline TexRef textureRef(const Json& t,uint64_t size,const std::string& what){
  auto w=unsigned(juint(t,"width",1,model::maxTexture)),h=unsigned(juint(t,"height",1,model::maxTexture));const auto& v=jfield(t,"data");
+ const auto full=textureMipCount(w,h);
+ const auto mips=t.at("mips").type==Json::Null?1u:unsigned(juint(t,"mips",1,full));
+ require(mips==1||mips==full,what+"：mipmap 链不完整");
+ auto color=TextureColor::Role;
+ if(t.at("colorSpace").type!=Json::Null){auto mode=jstr(t,"colorSpace",8);require(mode=="linear"||mode=="srgb",what+"：色彩空间无效");color=mode=="linear"?TextureColor::Linear:TextureColor::Srgb;}
  require(v.type==Json::Array&&v.array.size()==2,"数据视图无效："+what);auto off=jnum(v.array[0],0,size,what+" 偏移"),len=jnum(v.array[1],0,size,what+" 长度");
- require(off%16==0,what+"：未按 16 字节对齐");require(len==4ull*w*h,what+"：长度不符");require(off+len<=size,what+"：超出 model.bin 范围");return {w,h,off,len};}
+ require(off%16==0,what+"：未按 16 字节对齐");require(len==textureBytes(w,h,mips),what+"：长度不符");require(off+len<=size,what+"：超出 model.bin 范围");return {w,h,off,len,mips,color};}
 inline std::shared_ptr<Texture> texture(const Json& t,Blob& blob,const std::string& what){
- auto w=unsigned(juint(t,"width",1,model::maxTexture)),h=unsigned(juint(t,"height",1,model::maxTexture));
- return std::make_shared<Texture>(Texture{w,h,view(jfield(t,"data"),blob,4ull*w*h,what)});}
+ const auto ref=textureRef(t,blob.size(),what);
+ return std::make_shared<Texture>(ref.decoded(blob.read(ref.off,ref.len)));}
 }
 
 /** Reads and checks a model folder. Nothing partially valid is returned: any problem throws with what and where. */
@@ -316,9 +324,11 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allT
    if(mt.at("normalmap").type!=Json::Null){f.normalRef=detail::textureRef(mt.at("normalmap"),size,name+".normalmap");}
    require(f.mainRef.present()||f.lightRef.present()||f.normalRef.present(),name+"：没有贴图数据");
    if(out->diffuseOnly){f.lightRef={};f.normalRef={};f.original=!f.mainRef.present();}
-   if(allTextures){if(f.mainRef.present())f.main=std::make_shared<Texture>(Texture{f.mainRef.w,f.mainRef.h,blob.read(f.mainRef.off,f.mainRef.len)});
-    if(f.lightRef.present())f.light=std::make_shared<Texture>(Texture{f.lightRef.w,f.lightRef.h,blob.read(f.lightRef.off,f.lightRef.len)});
-    if(f.normalRef.present())f.normal=std::make_shared<Texture>(Texture{f.normalRef.w,f.normalRef.h,blob.read(f.normalRef.off,f.normalRef.len)});}}
+   if(allTextures){
+    auto get=[&](const TexRef& ref){return std::make_shared<Texture>(ref.decoded(blob.read(ref.off,ref.len)));};
+    if(f.mainRef.present())f.main=get(f.mainRef);
+    if(f.lightRef.present())f.light=get(f.lightRef);
+    if(f.normalRef.present())f.normal=get(f.normalRef);}}
   out->materials[name]=f;}
  if(m.at("textures").type!=Json::Null)for(auto& t:jarr(m,"textures",1,8)){TextureSwap x{jstr(t,"renderer",64),jstr(t,"material",64)};auto it=out->materials.find(x.material);
   require(safeName(x.renderer),"贴图替换的渲染器名称无效："+x.renderer);require(it!=out->materials.end()&&it->second.mainRef.present(),"贴图替换的材质无效："+x.material);
@@ -379,7 +389,7 @@ inline void readTextures(const std::string& dir,const std::string& generation,ui
  bool any=false;for(auto& n:names){auto it=materials.find(n);if(it!=materials.end()&&!it->second.loaded())any=true;}if(!any)return;
  auto m=JsonParser(manifestText(dir)).parse();require(jstr(m,"generation",64)==generation,"model.json 已变化：请重新转换或重新加载");
  std::ifstream f(dir+"/model.bin",std::ios::binary|std::ios::ate);require(bool(f),"无法读取："+dir+"/model.bin");auto end=f.tellg();require(end>=0&&uint64_t(end)==blobSize,"model.bin 已变化：请重新转换或重新加载");
- auto get=[&](const TexRef& r){Bytes b(size_t(r.len),0);f.seekg(std::streamoff(r.off));f.read(reinterpret_cast<char*>(b.data()),std::streamsize(r.len));require(bool(f),"读取不完整：model.bin");return std::make_shared<Texture>(Texture{r.w,r.h,std::move(b)});};
+ auto get=[&](const TexRef& r){Bytes b(size_t(r.len),0);f.seekg(std::streamoff(r.off));f.read(reinterpret_cast<char*>(b.data()),std::streamsize(r.len));require(bool(f),"读取不完整：model.bin");return std::make_shared<Texture>(r.decoded(std::move(b)));};
  for(auto& n:names){auto it=materials.find(n);if(it==materials.end()||it->second.loaded())continue;auto& mf=it->second;
   if(mf.mainRef.present()){mf.main=get(mf.mainRef);}if(mf.lightRef.present()){mf.light=get(mf.lightRef);}if(mf.normalRef.present()){mf.normal=get(mf.normalRef);}}}
 // The materials an assignment draws, over all parts.

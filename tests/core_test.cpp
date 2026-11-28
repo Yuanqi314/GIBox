@@ -149,6 +149,22 @@ int main(int argc,char**argv){
  auto j=JsonParser("{\"enabled\":true,\"selected\":[\"\\u6a21\\u578b\",\"\\ud83d\\ude00\"],\"cycle\":2}").parse();assert(j.at("selected").array[0].string=="模型");assert(j.at("cycle").number==2);rejects([]{JsonParser("{\"a\":1,\"a\":2}").parse();});rejects([]{JsonParser("[01]").parse();});rejects([]{JsonParser("\"\\ud800\"").parse();});
  Bytes note(32);put32(note.data(),4);put32(note.data()+4,16);put32(note.data()+8,3);put32(note.data()+12,0x00554e47);for(int i=0;i<16;i++)note[16+i]=i;Elf64_Phdr ph{};ph.p_type=PT_NOTE;ph.p_memsz=note.size();auto id=loadedBuildId(reinterpret_cast<Ptr>(note.data()),&ph,1,sizeof(ph));assert(id=="000102030405060708090a0b0c0d0e0f"&&id!=abi::buildId);ph.p_memsz=16;rejects([&]{loadedBuildId(reinterpret_cast<Ptr>(note.data()),&ph,1,sizeof(ph));});
  Bytes dds(136);put32(dds.data(),0x20534444);put32(dds.data()+4,124);put32(dds.data()+12,3);put32(dds.data()+16,3);put32(dds.data()+76,32);put32(dds.data()+80,4);put32(dds.data()+84,0x31545844);dds[128]=0;dds[129]=0xf8;auto tex=decodeDds(dds);assert(tex.w==3&&tex.h==3&&tex.pixels.size()==36&&tex.pixels[0]==255&&tex.pixels[3]==255);dds.pop_back();rejects([&]{decodeDds(dds);});
+ {Bytes source(148);auto set=[&](size_t at,uint32_t value){put32(source.data()+at,value);};
+  set(0,0x20534444);set(4,124);set(12,2);set(16,2);set(28,1);set(76,32);set(80,4);set(84,0x30315844);
+  set(128,29);set(132,3);set(140,1);
+  const Bytes base{0,0,0,0,255,255,255,0,0,0,0,255,255,255,255,255};
+  source.insert(source.end(),base.begin(),base.end());
+  auto srgb=decodeModelDds(source,true);assert(srgb.color==TextureColor::Srgb&&!srgb.linear(true)&&srgb.mips==2);
+  assert(std::equal(base.begin(),base.end(),srgb.pixels.begin())&&Bytes(srgb.pixels.begin()+16,srgb.pixels.end())==Bytes({188,188,188,128}));
+  auto forced=decodeModelDds(source,false,TextureColor::Linear);assert(forced.linear(false)&&forced.pixels[16]==128&&forced.pixels[19]==128);
+  set(128,28);auto linear=decodeModelDds(source,false);assert(linear.linear(false)&&Bytes(linear.pixels.begin()+16,linear.pixels.end())==Bytes({128,128,128,128}));
+  set(28,2);source.insert(source.end(),{6,18,47,23});auto authored=decodeModelDds(source,false);
+  assert(Bytes(authored.pixels.begin()+16,authored.pixels.end())==Bytes({6,18,47,23}));
+  flipRows(authored);assert(authored.pixels[3]==255&&authored.pixels[11]==0&&authored.pixels.back()==23);
+  auto ref=detail::textureRef(JsonParser(R"({"width":2,"height":2,"mips":2,"colorSpace":"linear","data":[0,20]})").parse(),20,"mip");
+  assert(ref.mips==2&&ref.linear(false)&&ref.decoded(authored.pixels).mips==2);
+  source.pop_back();rejects([&]{decodeModelDds(source,false);});
+ }
  // The App's DDS decode returns at most 1024 a side, halved as ModelConverter.texture / TextureMod halve in Java: 2x2
  // box average, an odd last row or column dropped, the halving repeated while either side is over.
  {Texture big{5,3,Bytes(5*3*4)};for(size_t i=0;i<big.pixels.size();i++)big.pixels[i]=uint8_t(i*7);auto s1=shrinkTexture(big,2);
