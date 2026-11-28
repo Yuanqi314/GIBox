@@ -592,6 +592,7 @@ public final class ModelConverter {
     /** One renderer: union of every combination's vertices and index ranges, plus per-combination submeshes. */
     static final class Group {Bones bones;String name;PackedVertices vertices=new PackedVertices();IntList indices=new IntList();Map<String,int[]> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();List<Object> draws;
         final Map<String,Integer> sourceSlots=new HashMap<>(), sectionSlots=new HashMap<>();final List<Object> sourceDraws=new ArrayList<>();
+        Map<String,Object> sourceSkin;boolean ambiguousSkin;
         final ExtraBoneFallback extraBones=new ExtraBoneFallback();Group(Bones b,String n){bones=b;name=n;} }
     static final class MaterialDef {String name;Resource diffuse,light,normal;boolean flipRows=true;}
     static final class Build {boolean animationBoneFallback=false,indexedVulkan=false;final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final BufferCache cache=new BufferCache();}
@@ -822,7 +823,7 @@ public final class ModelConverter {
             if(a[0].equals("match_first_index"))first=Long.parseLong(a[1].trim());
             if(a[0].equals("match_index_count"))count=Long.parseLong(a[1].trim());
             if(a[0].equals("match_vulkan"))gpu=lower(a[1].trim());
-            if(a[0].startsWith("match_")&&!a[0].equals("match_first_index")&&!a[0].equals("match_index_count")&&!a[0].equals("match_priority")&&!a[0].equals("match_vulkan"))return -1;}}
+            if(a[0].startsWith("match_")&&!a[0].equals("match_first_index")&&!a[0].equals("match_index_count")&&!a[0].equals("match_priority")&&!a[0].equals("match_vulkan")&&!a[0].equals("match_vulkan_skin"))return -1;}}
         catch(NumberFormatException e){return -1;}
         if((first!=null&&(first<0||first>0xffffffffL))||(count!=null&&(count<=0||count>0xffffffffL)))return -1;
         if(gpu!=null){
@@ -835,6 +836,26 @@ public final class ModelConverter {
         if(first!=null)rule.put("first",first);if(count!=null)rule.put("count",count);
         g.sourceSlots.put(key,slot);g.sourceDraws.add(rule);return slot;
     }
+    private static void recordSourceSkin(Ini ini,Group group,Draw draw,List<Evaluated> providers,Map<String,Resource> resources,Resource position,Resource blend){
+        if(group.ambiguousSkin)return;
+        Set<String> positions=new HashSet<>(),blends=new HashSet<>();
+        for(Evaluated provider:providers){
+            String pos=provider.bindings.get(streamKey(0)),weight=provider.bindings.get(streamKey(1));
+            if(!unbound(pos)&&identity(position).equals(identity(resource(resources,pos))))positions.add(provider.hash);
+            if(!unbound(weight)&&identity(blend).equals(identity(resource(resources,weight))))blends.add(provider.hash);
+        }
+        Map<String,Object> evidence=new LinkedHashMap<>();
+        if(positions.size()==1&&blends.size()==1){
+            evidence.put("position",positions.iterator().next());evidence.put("blend",blends.iterator().next());
+        }
+        Section section=ini.sections.get("textureoverride"+lower(draw.part));
+        if(section!=null)for(String line:section.lines){
+            String[] a=kv(line);
+            if(a!=null&&a[0].equals("match_vulkan_skin")&&!a[1].isEmpty()&&a[1].length()<=512)evidence.put("vulkan",lower(a[1]));
+        }
+        if(group.sourceSkin==null)group.sourceSkin=evidence;
+        else if(!group.sourceSkin.equals(evidence))group.ambiguousSkin=true;
+    }
     /** What a combination draws, without reading buffers: used to find the variables that actually change the model. */
     private static String signature(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,String fallback)throws Exception{
         Map<String,Resource> rs=resources(ini,src,vars);LinkedHashMap<Draw,Bones> resolved=resolve(ini,src,boneRecords,mapping,vars,rs,null,fallback);
@@ -844,10 +865,19 @@ public final class ModelConverter {
         return s.toString();}
     private static void collect(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,int combo,Build b,StringBuilder log,String fallback)throws Exception {
         Map<String,Resource> rs=resources(ini,src,vars);LinkedHashMap<Draw,Bones> targets=resolve(ini,src,boneRecords,mapping,vars,rs,combo==0?log:null,fallback);
+        List<Evaluated> skinProviders=new ArrayList<>();
+        if(b.indexedVulkan)for(Section section:ini.sections.values()){
+            if(!lower(section.name).startsWith("textureoverride"))continue;
+            try{
+                Evaluated provider=new Evaluated(ini,section,vars,rs);
+                if(!provider.declaresDraw&&!provider.bindings.containsKey("ib")&&provider.hash.matches("[0-9a-f]{8}"))skinProviders.add(provider);
+            }catch(IllegalArgumentException ignored){}
+        }
         for(Map.Entry<Draw,Bones> entry:targets.entrySet()){Draw d=entry.getKey();Bones target=entry.getValue();Group g=b.groups.computeIfAbsent(lower(target.name),k->new Group(target,"Part"+b.groups.size()));
             boolean rigid=rigid(target);int sourceSlot=sourceDraw(ini,g,d);
             int boneLimit=b.indexedVulkan&&sourceSlot>=0&&!rigid?512:target.count;
             Resource pos=stream(rs,d.bindings,0),blend=rigid?new Resource(pos.file,32,""):stream(rs,d.bindings,1),tex=stream(rs,d.bindings,2),indices=resource(rs,d.bindings.get("ib"));check(indices!=null,"缺少索引流");
+            if(b.indexedVulkan&&sourceSlot>=0&&!rigid)recordSourceSkin(ini,g,d,skinProviders,rs,pos,blend);
             if(combo==0)log.append(d.part).append(": Position=").append(pos.file.getName()).append(", Blend=").append(blend.file.getName()).append(", Texcoord=").append(tex.file.getName()).append('\n');
             byte[] p=b.cache.get(pos.file),bl=rigid?null:b.cache.get(blend.file),t=b.cache.get(tex.file),ix=b.cache.get(indices.file);if(p==null){p=read(pos.file);b.cache.put(pos.file,p);}if(rigid){check(pos.stride>=40||pos.stride==28,"静态武器 Position 顶点布局尚不支持：stride="+pos.stride);bl=new byte[p.length/pos.stride*32];ByteBuffer weights=buf(bl);for(int v=0;v<bl.length;v+=32)weights.putFloat(v,1f);}else if(bl==null){bl=read(blend.file);b.cache.put(blend.file,bl);}if(t==null){t=read(tex.file);b.cache.put(tex.file,t);}if(ix==null){ix=read(indices.file);b.cache.put(indices.file,ix);}
             int stride=lower(indices.format).contains("r16_uint")?2:lower(indices.format).contains("r32_uint")?4:indices.stride;check(stride==2||stride==4,"索引格式必须为 R16_UINT 或 R32_UINT");check(ix.length%stride==0,"索引流长度");int count=d.count==-1?ix.length/stride-d.start:d.count;check(count>0&&count%3==0&&(long)d.start+count<=ix.length/stride,"drawindexed 范围");
@@ -922,6 +952,7 @@ public final class ModelConverter {
                 if(!indexed){Map<String,Object> sk=Json.of("bones",g.bones.names,"bindposes",blob.put(g.bones.binds));if(g.bones.parents!=null)sk.put("parents",new ArrayList<Object>(g.bones.parents));part.put("skeleton",sk);}
                 if(g.bones.target!=null&&(!indexed||g.bones.synthetic))part.put("target",g.bones.target);
                 if(!g.sourceDraws.isEmpty())part.put("sourceDraws",new ArrayList<>(g.sourceDraws));
+                if(!g.ambiguousSkin&&g.sourceSkin!=null&&!g.sourceSkin.isEmpty())part.put("sourceSkin",g.sourceSkin);
                 // A part not drawn at all with the initial values (only possible after falling back to them) shows nothing.
                 part.put("draws",g.draws!=null?g.draws:Collections.singletonList(Json.of("start",0,"count",0,"material",b.materials.values().iterator().next().name,"slot",0)));parts.add(part);
             }

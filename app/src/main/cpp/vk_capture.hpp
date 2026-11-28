@@ -90,6 +90,10 @@ inline void hashVariants(uint32_t data,size_t n,uint8_t format,std::vector<Hash>
  const uint32_t kinds[3][2]={{0,0x2},{0,0x8A},{1,0x2}};   // Usage, BindFlags
  for(uint8_t k=0;k<3;k++){D3D11BufferDesc d;d.byteWidth=uint32_t(n);d.usage=kinds[k][0];d.bindFlags=kinds[k][1];out.push_back({crc32c(data,&d,sizeof d),uint8_t(format*4+k+1)});}}
 inline void hashFormat(const uint8_t* p,size_t n,uint8_t format,std::vector<Hash>& out){hashVariants(crc32c(0,p,n),n,format,out);}
+inline uint32_t pcVertexHash(uint32_t data,uint32_t bytes){
+ D3D11BufferDesc desc;desc.byteWidth=bytes;desc.bindFlags=0x1; // DEFAULT + VERTEX_BUFFER, verified for both GIMI skin streams
+ return crc32c(data,&desc,sizeof(desc));
+}
 template<class From,class To>
 inline void indexWidthHashes(const uint8_t* p,size_t n,uint8_t format,std::vector<Hash>& out){
  std::array<To,1024> converted;uint32_t crc=0;const size_t count=n/sizeof(From);
@@ -152,6 +156,13 @@ struct Registration {
 };
 struct ResourceSample {ResourceMatch identity;bool compute=false;uint64_t pass=0;uint32_t first=0,count=0;};
 struct ResourceBinding {ResourceKind kind;uint64_t handle=0,offset=0,size=~0ull,generation=0;};
+struct SkinInputIdentity {
+ uint64_t generation=0,revision=0,bytes=0;
+ std::optional<uint32_t> hash;
+ bool operator==(const SkinInputIdentity& rhs)const{
+  return generation==rhs.generation&&revision==rhs.revision&&bytes==rhs.bytes&&hash==rhs.hash;
+ }
+};
 struct ImageCopy {uint64_t offset;uint32_t rowLength,mip,layer,width,height;bool whole;};
 inline std::string resourceSlotName(const ResourceSlot& s){
  switch(s.kind){
@@ -246,7 +257,7 @@ class Tracker : public Registration {
  struct Upload {uint64_t seq,offset,bytes;std::array<UploadHash,12> hashes{};size_t count=0;};
  struct Probe {uint64_t uploads=0;size_t reported=0;std::vector<Draw> draws;};
  struct ResourceSpan {uint64_t offset,size;uint32_t hash;};
- struct Buffer {uint64_t size=0,memory=0,memoryOffset=0,generation=0;uint32_t usage=0,skinCrc=0;bool bound=false,captured=false;
+ struct Buffer {uint64_t size=0,memory=0,memoryOffset=0,generation=0,skinRevision=0;uint32_t usage=0,skinCrc=0;bool bound=false,captured=false;
   std::vector<Upload> matches;std::vector<ResourceSpan> signatures;};
  struct Mapping {const uint8_t* base=nullptr;uint64_t offset=0,size=0;};
  struct IndexBinding {uint64_t buffer,generation,offset;uint32_t width;};
@@ -296,6 +307,9 @@ class Tracker : public Registration {
   if(w.hash){if(a.size()>=16)a.erase(a.begin());a.push_back({w.offset,w.size,*w.hash});}
  }
  void saveWrite(uintptr_t command,const PendingWrite& w){
+  if(!w.image){
+   if(auto found=buffers.find(w.handle);found!=buffers.end()&&found->second.generation==w.generation){++found->second.skinRevision;}
+  }
   if(!command){remember(w);return;}
   auto& writes=pending[command];
   if(writes.size()<maxResourceWrites)writes.push_back(w);
@@ -458,8 +472,41 @@ public:
   }
   return true;
  }
+ bool computeMatches(uintptr_t command,const std::vector<ResourceMatch>& terms,
+                     std::optional<uint32_t> position,std::optional<uint32_t> blend){
+  std::lock_guard<std::mutex> lock(m);
+  return std::all_of(terms.begin(),terms.end(),[&](const auto& term){
+   const auto& slot=term.slot;
+   if(slot.kind==ResourceKind::Storage&&slot.set==0&&!slot.element){
+    if(slot.binding==0)return position==term.hash;
+    if(slot.binding==1)return blend==term.hash;
+   }
+   return resourceHash(command,true,slot)==term.hash;
+  });
+ }
  std::optional<uint32_t> liveStorage(uintptr_t command,uint64_t handle,uint64_t bytes){
   std::lock_guard<std::mutex> lock(m);return bufferResource(command,{ResourceKind::Storage,handle,0,bytes});
+ }
+ SkinInputIdentity skinInput(uintptr_t command,uint64_t handle,uint64_t bytes,bool hash){
+  std::lock_guard<std::mutex> lock(m);
+  const auto found=buffers.find(handle);
+  if(found==buffers.end()||pendingOverflow.count(command)||!found->second.bound||bytes>found->second.size)return {};
+  const auto& input=found->second;
+  // Persist identity for uploaded resources. A host mapping can be modified without a recorded Vulkan write.
+  const auto address=host(input,0,bytes);
+  const auto raw=(hash||address)?bufferResource(command,{ResourceKind::Vertex,handle,0,bytes},true):std::nullopt;
+  return {input.generation,input.skinRevision,bytes,raw};
+ }
+ bool equalMappedBuffer(uintptr_t command,uint64_t handle,const void* bytes,size_t length){
+  std::lock_guard<std::mutex> lock(m);
+  const auto found=buffers.find(handle);
+  if(found==buffers.end()||length>found->second.size||pendingOverflow.count(command))return false;
+  const auto writes=pending.find(command);
+  if(writes!=pending.end()&&std::any_of(writes->second.begin(),writes->second.end(),[&](const auto& write){
+   return !write.image&&write.handle==handle&&write.offset<length;
+  }))return false;
+  const auto* address=host(found->second,0,length);
+  return address&&!std::memcmp(address,bytes,length);
  }
  void queueSkinKeys(std::vector<SkinKey> keys){
   std::lock_guard<std::mutex> lock(m);
@@ -519,6 +566,7 @@ public:
  std::atomic<uint64_t> deviceCreates{0},queueSubmits{0};
  std::atomic<uint64_t> gpuTextureBytes{0},gpuGeometryBytes{0},gpuEvictions{0},gpuDescriptorSets{0};
  std::atomic<uint64_t> computeDispatches{0},skinKernelDispatches{0},skinOutputCaptures{0};
+ std::atomic<uint64_t> earlySkinMatches{0},nativeSkinReused{0};
  std::array<std::atomic<uint64_t>,2> tintDraws{},tintMisses{};
  std::atomic<uint64_t> skinDispatches{0};
 private:
@@ -632,7 +680,7 @@ public:
  }
  void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc))&&!(gpuBuffersEnabled()&&(usage&resourceUsages))&&!(skinnedModel&&(usage&0x20)&&skinSize(size)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;if(probing())b.generation=++bufferGeneration;buffers[buffer]=std::move(b);}
  void destroyed(uint64_t buffer){std::lock_guard<std::mutex> l(m);buffers.erase(buffer);}
- void bound(uint64_t buffer,uint64_t memory,uint64_t offset){std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end())return;b->second.memory=memory;b->second.memoryOffset=offset;b->second.bound=true;b->second.skinCrc=0;b->second.signatures.clear();}
+ void bound(uint64_t buffer,uint64_t memory,uint64_t offset){std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end())return;b->second.memory=memory;b->second.memoryOffset=offset;b->second.bound=true;b->second.skinCrc=0;++b->second.skinRevision;b->second.signatures.clear();}
  void mapped(uint64_t memory,uint64_t offset,uint64_t size,const void* p){std::lock_guard<std::mutex> l(m);maps[memory]={static_cast<const uint8_t*>(p),offset,size};}
  void unmapped(uint64_t memory){std::lock_guard<std::mutex> l(m);maps.erase(memory);}
  // A copy into an index buffer: each region's source bytes, as written into the staging memory before the copy.
@@ -679,7 +727,11 @@ public:
   if(p!=pending.end()&&primary!=secondary)for(const auto& w:p->second)saveWrite(primary,w);
  }
  void submitted(uintptr_t command){std::lock_guard<std::mutex> l(m);
-  if(pendingOverflow.count(command)){for(auto& b:buffers)b.second.signatures.clear();for(auto& i:images)i.second.hashes.clear();return;}
+ if(pendingOverflow.count(command)){
+  for(auto& b:buffers){b.second.signatures.clear();++b.second.skinRevision;}
+  for(auto& i:images){i.second.hashes.clear();}
+  return;
+ }
   auto p=pending.find(command);if(p==pending.end())return;
   for(const auto& w:p->second)remember(w);}
  void updated(uintptr_t command,uint64_t dst,uint64_t offset,uint64_t size,const void* data){

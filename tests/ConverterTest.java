@@ -169,7 +169,12 @@ public final class ConverterTest {
   put(src,"mod.ini",nested);outputs.addAll(ModelConverter.convert(src,bones,new File(root,"nested"),10000107,"",false,dds->rgba,new StringBuilder()));
   // Official GIMI shape: a hash-level auto draw and per-part IB resources.
   String resourceDefs=ini.substring(ini.indexOf("[ResourcePosition]"));
-  String inherited="[TextureOverrideHeroPosition]\nvb0 = ResourcePosition\n[TextureOverrideHeroBlend]\nvb1 = ResourceBlend\n[TextureOverrideHeroTexcoord]\nvb1 = ResourceTexcoord\n[TextureOverrideHeroIB]\nhash = aabbccdd\nhandling = skip\ndrawindexed = auto\n[TextureOverrideHeroBodyA]\nhash = aabbccdd\nmatch_first_index = 9000\nmatch_index_count = 1200\nib = ResourceIndex\nps-t0 = ResourceDiffuse\n"+resourceDefs;
+  String inherited="[TextureOverrideHeroPosition]\nhash = 1f7f0600\nvb0 = ResourcePosition\n"
+    +"[TextureOverrideHeroBlend]\nhash = e70695e0\nvb1 = ResourceBlend\nhandling = skip\ndraw = 3, 0\n"
+    +"[TextureOverrideHeroTexcoord]\nvb1 = ResourceTexcoord\n"
+    +"[TextureOverrideHeroIB]\nhash = aabbccdd\nhandling = skip\ndrawindexed = auto\n"
+    +"[TextureOverrideHeroBodyA]\nhash = aabbccdd\nmatch_first_index = 9000\nmatch_index_count = 1200\n"
+    +"match_vulkan_skin = sb0.0:72b1a301,sb0.1:21911ac3\nib = ResourceIndex\nps-t0 = ResourceDiffuse\n"+resourceDefs;
   put(src,"mod.ini",inherited);File inheritedOut=new File(root,"inherited");outputs.addAll(ModelConverter.convert(src,bones,inheritedOut,10000107,"",false,dds->rgba,new StringBuilder()));
   ok(Fixtures.number(Fixtures.part(inheritedOut,0),"indices")==6,"auto uses all split IB indices, not match_first_index offset");
   List<Object> source=Json.arr(Fixtures.part(inheritedOut,0).get("sourceDraws"),"sourceDraws",1,1);
@@ -177,11 +182,16 @@ public final class ConverterTest {
   ok(source.size()==1&&"aabbccdd".equals(original.get("ib"))&&Fixtures.number(original,"slot")==0&&
      Fixtures.number(original,"first")==9000&&Fixtures.number(original,"count")==1200,"preserve the original INI draw conditions: "+source);
   File iniOnly=new File(root,"indexed_ini");
-  ModelConverter.convert(src,null,iniOnly,10000107,new ModelConverter.Options(),dds->rgba,new StringBuilder());
+  ModelConverter.Options vulkan=new ModelConverter.Options();
+  vulkan.indexedVulkan=true;
+  ModelConverter.convert(src,null,iniOnly,10000107,vulkan,dds->rgba,new StringBuilder());
   Map<String,Object> indexed=Fixtures.part(iniOnly,0);
   ok(!indexed.containsKey("skeleton")&&!indexed.containsKey("target")&&indexed.get("sourceDraws").equals(source)&&
      Fixtures.number(Json.obj(Fixtures.draws(iniOnly,0,new HashMap<>()).get(0),"draw"),"sourceSlot")==0,
      "export INI rules and the MOD's own palette with no skeleton or mesh database");
+  Map<String,Object> skin=Json.obj(indexed.get("sourceSkin"),"source skin");
+  ok("1f7f0600".equals(skin.get("position"))&&"e70695e0".equals(skin.get("blend"))&&
+     "sb0.0:72b1a301,sb0.1:21911ac3".equals(skin.get("vulkan")),"preserve GIMI stream hashes and the verified Vulkan signature");
   // Shenhe Frost Flower: the default $vision=1 has no active geometry override. Enumerate the enabled state before
   // rejecting the mod, preserve its initial switch, and distinguish original-model mode from an intentional hide.
   {File guarded=new File(root,"guarded");guarded.mkdirs();for(String f:new String[]{"Position.buf","Blend.buf","Texcoord.buf","Index.buf","Diffuse.dds"})Files.copy(new File(src,f).toPath(),new File(guarded,f).toPath());

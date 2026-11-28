@@ -211,7 +211,7 @@ static void tintTrial(){
  upCmdDispatch=+[](VkCommandBuffer,uint32_t x,uint32_t y,uint32_t z){assert(x==1&&y==1&&z==1);++dispatches;};
  tintCmdBindDescriptorSets=+[](VkCommandBuffer,VkPipelineBindPoint,VkPipelineLayout,uint32_t,uint32_t,const VkDescriptorSet*,uint32_t,const uint32_t*){};
  profile.mesh->vertices=30;
- sharedSkinDispatch(d,c,state,dev,job,(seen.vertices+63)/64);
+ sharedSkinDispatch(d,c,state,dev,job,{},(seen.vertices+63)/64,[]{});
  assert(dispatches==1&&skin.sharedOutput.at({output,1}).revision==skin.seenOutputs.at(output).revision);
  T().iniSkinRules[ms::vkcap::paimonBodyHash]={{1,0,0,26226}};
  upCmdBindVertexBuffers=+[](VkCommandBuffer,uint32_t,uint32_t n,const VkBuffer* buffers,const VkDeviceSize*){
@@ -221,7 +221,7 @@ static void tintTrial(){
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
  assert((call==std::vector<uintptr_t>{204,2000,14,23,101,200})&&dispatches==1);
  auto shortJob=job;shortJob[2].range=20*64;
- sharedSkinDispatch(d,c,state,dev,shortJob,(seen.vertices+63)/64);
+ sharedSkinDispatch(d,c,state,dev,shortJob,{},(seen.vertices+63)/64,[]{});
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
  assert((call==std::vector<uintptr_t>{26226})&&dispatches==1);
  profile.rigid=true;skin.drawLayouts[p].bindings=3;state.vertex[0]=fake<VkBuffer>(800);
@@ -232,7 +232,7 @@ static void tintTrial(){
  assert((call==std::vector<uintptr_t>{801,2000,14,23,101,800})&&dispatches==1);
  // An original depth or material pass without a supported texture descriptor can still use the skinned streams.
  profile.rigid=false;skin.drawLayouts[p].bindings=5;state.vertex[0]=output;state.set={};dev.pipelines.erase(p);
- sharedSkinDispatch(d,c,state,dev,job,(seen.vertices+63)/64);
+ sharedSkinDispatch(d,c,state,dev,job,{},(seen.vertices+63)/64,[]{});
  upCmdBindVertexBuffers=+[](VkCommandBuffer,uint32_t first,uint32_t n,const VkBuffer* buffers,const VkDeviceSize*){
   assert(n==1&&(first==0||first==2));call.push_back(reinterpret_cast<uintptr_t>(buffers[0]));};
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
@@ -256,7 +256,8 @@ static void tintTrial(){
  // A texture absent from the upload requests only the sampled role and leaves the game draw intact.
  sharedImages.resize(2);auto lightView=dev.upload.images[1].view;dev.upload.images[1].view={};
  warmSkinImages(dev,{1},true);
- assert((dev.upload.warm==std::set<unsigned>{0,1}));
+ assert(dev.upload.warm==std::set<unsigned>{1});
+ assert((dev.upload.protectedWarm==std::set<unsigned>{0,1}));
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
  assert((call==std::vector<uintptr_t>{26226})&&dev.upload.requested==std::set<unsigned>{1});
  dev.upload.images[1].view=lightView;dev.upload.requested.clear();dev.upload.warm.clear();sharedImages.clear();
@@ -489,7 +490,13 @@ static void registryReloadTrial(){
  ms::vkhook::stageVulkanRegistry(shared,selected,{});
  assert(ms::vkhook::publishVulkanRegistry(true,false,selected,{},"original",[](const auto&){return false;}).empty());
  assert(tracker.registryVersion==version&&sharedImages.back().file->generation=="first");
+ const auto pending=std::atomic_load(&stagedCatalog);
+ assert(pending&&pending->replaceTextures.count(69));
+ tracker.textureUpload=1;
+ assert(ms::vkhook::publishVulkanRegistry(true,false,selected,{},"original",restore).empty());
+ pending->gpuPrepared=true;
  assert(!ms::vkhook::publishVulkanRegistry(true,false,selected,{},"original",restore).empty());
+ tracker.textureUpload=0;
  assert(tracker.registryVersion==version+1&&sharedImages.front().file==unchanged&&sharedImages.back().file->generation=="second-version");
  std::filesystem::remove_all(shared+"/models/"+selected.back());
  ms::vkhook::stageVulkanRegistry(shared,selected,{});
@@ -517,6 +524,7 @@ static void gpuLifetimeTrial(){
  dev.pool=fake<VkDescriptorPool>(8009);dev.allocated=1;dev.clones[descriptor]={{held},1,20};
  state.commands[parent]={device,TintCmd{}};state.commands[child]={device,TintCmd{}};
  state.commands[child].second.gpuSets.insert(descriptor);state.commands[child].second.skinCatalogs.insert(8);
+ state.commands[child].second.gpuBuffers.insert(fake<VkBuffer>(8011));
  trackExecutedResources(parent,1,&child);
  tintBegin(child);
  const auto& pinsOfParent=state.commands[parent].second;
@@ -527,8 +535,9 @@ static void gpuLifetimeTrial(){
  tintDestroyImage=+[](VkDevice,VkImage,const VkAllocationCallbacks*){};
  tintFreeDescriptorSets=+[](VkDevice,VkDescriptorPool,uint32_t n,const VkDescriptorSet*){freed+=n;return VK_SUCCESS;};
  upDestroyBuffer=+[](VkDevice,VkBuffer,const VkAllocationCallbacks*){++destroyedBuffers;};
- dev.retiredSkins[8].retired.push_back({fake<VkBuffer>(8011),{},32,32});
+ dev.skin.retired.push_back({fake<VkBuffer>(8011),{},32,32});
  const CommandPins referenced{pinsOfParent.gpuSets,pinsOfParent.gpuBuffers,pinsOfParent.skinCatalogs};
+ upload.protectedWarm.insert(0);upload.clock=400;
  upload.fence=fake<VkFence>(8012);
  evictImages(device,dev,referenced,64,128);assert(destroyedViews.empty());
  upload.fence={};
@@ -537,10 +546,78 @@ static void gpuLifetimeTrial(){
  assert((destroyedViews==std::vector<VkImageView>{idle})&&!destroyedBuffers&&upload.imageBytes==64&&!upload.images[1].view);
  tintBegin(parent);
  collectGpuResources(device,dev,{});
+ evictImages(device,dev,{},0,128,true);assert(upload.images[0].view==held);
  evictImages(device,dev,{},64,64);
  assert((destroyedViews==std::vector<VkImageView>{idle,held})&&freed==1&&destroyedBuffers==1&&upload.imageBytes==0);
  state.commands.erase(parent);state.commands.erase(child);state.devices.erase(device);
  std::cout<<"Vulkan lifetimes: PASS (upload fence, secondary command pins, LRU, clone and geometry retirement)\n";
+}
+static void earlySkinTrial(){
+ using namespace ms::vkcap;
+ auto& tracker=T();tracker.hotReload=true;tracker.skinnedModel=true;tracker.allSkins=true;
+ const auto device=fake<VkDevice>(9000);
+ const auto command=fake<VkCommandBuffer>(9001);
+ const auto position=fake<VkBuffer>(9002),blend=fake<VkBuffer>(9003),palette=fake<VkBuffer>(9004),
+            output=fake<VkBuffer>(9005),count=fake<VkBuffer>(9006);
+ std::array<uint8_t,40> pos{};std::array<uint8_t,32> weights{};const unsigned vertices=1;
+ pos.front()=25;weights.front()=41;
+ auto mapped=[&](VkBuffer buffer,uint64_t memory,const void* data,size_t size){
+  tracker.created(gpuHandle(buffer),size,0x20);tracker.bound(gpuHandle(buffer),memory,0);
+  tracker.mapped(memory,0,size,data);
+ };
+ mapped(position,9010,pos.data(),pos.size());mapped(blend,9011,weights.data(),weights.size());mapped(count,9012,&vertices,sizeof(vertices));
+ const auto posHash=pcVertexHash(crc32c(0,pos.data(),pos.size()),pos.size()),blendHash=pcVertexHash(crc32c(0,weights.data(),weights.size()),weights.size());
+ assert(pcVertexHash(0x72b1a301u,335880)==0x1f7f0600u&&pcVertexHash(0x21911ac3u,268704)==0xe70695e0u);
+ sharedSkins={SharedSkin{},SharedSkin{}};
+ sharedSkins[0].resourceVersion=90;
+ auto& skin=sharedSkins[1];skin.resourceVersion=91;skin.iniDraws.resize(1);
+ skin.mesh->vertices=1;skin.mesh->requiredBones=1;
+ skin.mesh->rest.assign(pos.begin(),pos.end());skin.mesh->weights.assign(weights.begin(),weights.end());
+ pcSkinProfiles.clear();pcSkinProfiles[{posHash,blendHash}]={1};
+ tracker.skinMods={"Unused","Model"};
+ tracker.setSkinReplacement(true,true,{"Model"});
+ const auto early=tracker.earlySkinMatches.load(),reused=tracker.nativeSkinReused.load(),extra=tracker.skinDispatches.load();
+ TintCmd recording;TintDevice dev;dev.skinVersion=tracker.skinVersion;
+ dev.skin.profiles.resize(2);
+ dev.skin.profiles[0].resourceVersion=90;dev.skin.profiles[1].resourceVersion=91;
+ dev.skin.profiles[0].input[0]={fake<VkBuffer>(9029),{},40,40};
+ auto& gpu=dev.skin.profiles[1];gpu.ready=true;gpu.input[0]={fake<VkBuffer>(9030),{},40,40};
+ const std::array<VkDescriptorBufferInfo,4> originals{{{position,0,40},{blend,0,32},{palette,0,64},{output,0,40}}};
+ const VkDescriptorBufferInfo uniform{count,0,4};
+ unsigned native=0;
+ auto dispatch=[&]{++native;};
+ sharedSkinDispatch(device,command,recording,dev,originals,uniform,1,dispatch);
+ assert(native==1&&tracker.earlySkinMatches==early+1&&tracker.nativeSkinReused==reused+1&&tracker.skinDispatches==extra);
+ assert(recording.sharedProduced.count({output,91})&&dev.skin.sharedOutput.at({output,91}).nativeOutput);
+
+ // Reordering the catalog and adding an unrelated model preserves the live pose and GPU handles.
+ auto keep=skin;auto added=SharedSkin{};added.resourceVersion=92;
+ sharedSkins={keep,added};tracker.skinMods={"Model","New"};
+ tracker.setSkinReplacement(true,true,{"Model","New"});
+ synchronizeSkinProfiles(dev);
+ assert(dev.skin.profiles.front().input[0].buffer==fake<VkBuffer>(9030)&&dev.skin.retired.size()==1);
+ assert(dev.skin.sourceProfiles.at({position,blend})==Profiles{0}&&dev.skin.sharedOutput.count({output,91}));
+ pcSkinProfiles[{posHash,blendHash}]={0};
+
+ // A changed input that no longer matches the INI pair invalidates the learned association.
+ pos.front()=26;
+ sharedSkinDispatch(device,command,recording,dev,originals,uniform,1,dispatch);
+ assert(native==2&&tracker.nativeSkinReused==reused+1&&dev.skin.sourceProfiles.empty()&&recording.sharedProduced.empty());
+
+ // A different MOD stream still gets its own Dispatch and leaves the game's output intact.
+ pos.front()=25;
+ sharedSkins[0].mesh->rest[0]=99;
+ dev.skin.sharedOutput.at({output,91}).buffer={fake<VkBuffer>(9033),{},40,40};
+ dev.skin.pool=fake<VkDescriptorPool>(9034);dev.skin.storage=fake<VkDescriptorSetLayout>(9035);dev.skin.uniform=fake<VkDescriptorSetLayout>(9036);
+ dev.skin.profiles[0].count=fake<VkDescriptorSet>(9037);
+ dev.skin.sharedRemaps[{output,palette,91}]=fake<VkDescriptorSet>(9038);
+ static unsigned modDispatches=0;
+ upCmdDispatch=+[](VkCommandBuffer,uint32_t x,uint32_t y,uint32_t z){assert(x==1&&y==1&&z==1);++modDispatches;};
+ upCmdPipelineBarrier=+[](VkCommandBuffer,VkPipelineStageFlags,VkPipelineStageFlags,VkDependencyFlags,uint32_t,const VkMemoryBarrier*,uint32_t,const VkBufferMemoryBarrier*,uint32_t,const VkImageMemoryBarrier*){};
+ tintCmdBindDescriptorSets=+[](VkCommandBuffer,VkPipelineBindPoint,VkPipelineLayout,uint32_t,uint32_t,const VkDescriptorSet*,uint32_t,const uint32_t*){};
+ sharedSkinDispatch(device,command,recording,dev,originals,uniform,1,[&]{assert(modDispatches==0);++native;});
+ assert(native==3&&modDispatches==1&&tracker.skinDispatches==extra+1&&!dev.skin.sharedOutput.at({output,91}).nativeOutput);
+ std::cout<<"Vulkan pre-dispatch skinning: PASS (GIMI hashes, verified reuse, distinct-input fallback, identity invalidation, incremental catalog)\n";
 }
 #endif
 int main(){
@@ -567,5 +644,6 @@ int main(){
  ordinaryTextureTrial();
  registryReloadTrial();
  gpuLifetimeTrial();
+ earlySkinTrial();
 #endif
 }

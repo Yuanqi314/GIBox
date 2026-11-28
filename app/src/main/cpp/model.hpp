@@ -103,7 +103,8 @@ struct FrameLoop {AnimationSpec spec;float counter=0;size_t current=0,step=0;uin
 
 // ---------------------------------------------------------------- manifest summary (what the runtime scans every second)
 struct SourceDraw {std::string ib;unsigned slot=0;int64_t first=-1,count=-1;std::string gpu{},logicIb{};};
-struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false,indexedBones=false;Fingerprint target;std::vector<SourceDraw> sourceDraws{};};
+struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false,indexedBones=false;Fingerprint target;std::vector<SourceDraw> sourceDraws{};
+ std::string sourcePosition{},sourceBlend{},sourceSkinVulkan{};};
 // outfit (model.json character.outfit, 0.7.94): the prefab of the outfit (original look or skin) the model was converted for,
 // as the runtime reads it from a renderer ("avatar_lady_pole_shenhecostumedai"); "" for a model made before outfits.
 struct SceneTarget {Fingerprint target;std::vector<std::string> owners;uint32_t bindposeCrc=0;};
@@ -135,6 +136,17 @@ inline ModelSummary summaryOf(const Json& m){checkFormat(m);ModelSummary s;s.ani
    if(x.at("first").type!=Json::Null)d.first=int64_t(juint(x,"first",0,0xffffffffu));
    if(x.at("count").type!=Json::Null)d.count=int64_t(juint(x,"count",1,0xffffffffu));
    ps.sourceDraws.push_back(std::move(d));}
+  const auto& skin=p.at("sourceSkin");
+  if(skin.type!=Json::Null){
+   require(skin.type==Json::Object,"原版蒙皮资源应为对象");
+   if(skin.at("position").type!=Json::Null||skin.at("blend").type!=Json::Null){
+    ps.sourcePosition=jstr(skin,"position",8);ps.sourceBlend=jstr(skin,"blend",8);
+    for(const auto& hash:{ps.sourcePosition,ps.sourceBlend}){
+     require(hash.size()==8&&hash.find_first_not_of("0123456789abcdef")==hash.npos,"原版蒙皮资源哈希无效");
+    }
+   }
+   if(skin.at("vulkan").type!=Json::Null){ps.sourceSkinVulkan=jstr(skin,"vulkan",512);}
+  }
   s.parts.push_back(std::move(ps));}
  if(s.id==1){for(const auto& p:s.parts){
   if(iniScene){require(!s.animated&&p.indexedBones&&!p.hasTarget&&!p.sourceDraws.empty(),"Vulkan 场景部件须有 INI 绘制记录和原始骨骼索引");continue;}

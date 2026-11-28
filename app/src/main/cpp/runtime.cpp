@@ -1258,6 +1258,8 @@ struct Runtime::Impl {
      "，已识别蒙皮管线 "+std::to_string(capture.skinKernelDispatches.load(std::memory_order_relaxed))+
      "，已识别原版输出 "+std::to_string(capture.skinOutputCaptures.load(std::memory_order_relaxed))+
      "，已匹配原版蒙皮 "+std::to_string(capture.originalSkinJobs.load(std::memory_order_relaxed))+
+     "，Dispatch 前识别 "+std::to_string(capture.earlySkinMatches.load(std::memory_order_relaxed))+
+     "，单次原版蒙皮复用 "+std::to_string(capture.nativeSkinReused.load(std::memory_order_relaxed))+
      "，MOD 蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed))+"，换绑 "+std::to_string(capture.sharedDraws.load(std::memory_order_relaxed))+
      "，光照贴图换绑 "+std::to_string(capture.lightMapDraws.load(std::memory_order_relaxed))+"，法线贴图换绑 "+std::to_string(capture.normalMapDraws.load(std::memory_order_relaxed))+
      "，保持原样 "+std::to_string(capture.sharedMisses.load(std::memory_order_relaxed))+models);
