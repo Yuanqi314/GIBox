@@ -1,6 +1,8 @@
 // Index-buffer hashes as 3DMigoto computes them (vk_capture.hpp) and the tracker that finds index bytes in mapped memory.
 #include "vk_capture.hpp"
 #include <cassert>
+#include <array>
+#include <cstdio>
 #include <iostream>
 using namespace ms::vkcap;
 int main(){
@@ -161,4 +163,44 @@ int main(){
   SkinHit ambiguous;probe.drawIndexed(1,3,1,0,0,0,&ambiguous);
   assert(!ambiguous&&probe.skinMisses[unsigned(SkinMiss::Ambiguous)]==1);
  }
- std::cout<<"Vulkan index-buffer hashes and draw probe: PASS (hash variants, staging and mapped buffers, targeted draws and offsets, overwrite and command buffer reuse)\n";}
+ {Tracker gpu;gpu.allSkins=true;gpu.inspectResources=true;gpu.probeOnly=true;gpu.skinMods={"GPU"};gpu.setSkinReplacement(true,true,{"GPU"});
+  const std::array<uint8_t,64> stagingBytes=[](){std::array<uint8_t,64> b{};for(unsigned i=0;i<b.size();i++)b[i]=uint8_t(i+19);return b;}();
+  const auto hash=[&](size_t off,size_t n){return crc32c(0,stagingBytes.data()+off,n);};
+  const auto texture=crc32c(hash(24,8),stagingBytes.data()+36,8);
+  auto hex=[](uint32_t value){char s[9];std::snprintf(s,sizeof s,"%08x",value);return std::string(s);};
+  const auto rules=resourceMatches("vb0:"+hex(hash(6,8))+",ps:"+hex(hash(52,8))+",tex0.0:"+hex(texture)+
+    ",cb0.1:"+hex(hash(8,4))+",sb0.2.1:"+hex(hash(14,8))+",ib:"+hex(hash(0,6)));
+  assert(rules&&rules->size()==6&&!resourceMatches("vb0:ffffffff,vb0:12345678")&&!resourceMatches("vb32:12345678")&&
+   !resourceMatches("tex0.1:12345678,")&&!resourceMatches("sb2.9.1024:12345678"));
+  gpu.resourceRules.push_back({{0,3,0,3},*rules});
+  gpu.created(1,64,1);gpu.bound(1,11,0);gpu.mapped(11,0,64,stagingBytes.data());
+  gpu.created(2,6,0x40);gpu.bound(2,12,0);gpu.created(3,8,0x80);gpu.bound(3,13,0);
+  gpu.created(4,16,0x10);gpu.bound(4,11,0);gpu.created(5,8,0x20);gpu.bound(5,15,0);
+  const Copy index{0,0,6},vertex{6,0,8},storage{14,0,8};
+  gpu.copied(1,2,&index,1,7);gpu.copied(1,3,&vertex,1,7);gpu.copied(1,5,&storage,1,7);
+  gpu.imageCreated(20,2,2,1,1,1,1,4);gpu.imageView(21,20,0,0);
+  gpu.copiedImage(7,1,20,{24,3,0,0,2,2,true});
+  gpu.shaderCreated(30,stagingBytes.data()+52,8);gpu.pipelineCreated(31,40,{{16,30}});gpu.pipelineCreated(32,40,{{32,30}});gpu.shaderDestroyed(30);
+  gpu.descriptorLayout(41,{{1,0}},{{0,1},{1,1},{2,2}});gpu.descriptorAllocated(42,43,41);gpu.descriptorLayoutDestroyed(41);
+  gpu.descriptorWrite(42,0,0,{ResourceKind::Texture,21});gpu.descriptorWrite(42,1,0,{ResourceKind::Constant,4,4,4});
+  gpu.descriptorWrite(42,2,1,{ResourceKind::Storage,5,0,8});
+  const uint64_t sets[]={42};const uint32_t offset=4,wrong=0;
+  auto bind=[&](uintptr_t c,uint32_t dynamicOffset){gpu.indexBound(2,0,c,0);gpu.bindVertex(c,0,3,0);gpu.bindPipeline(c,false,31);
+   gpu.bindDescriptors(c,false,40,0,sets,1,&dynamicOffset,1);};
+  auto matched=[&](uintptr_t c){SkinHit hit;gpu.drawIndexed(c,3,1,0,0,0,&hit);return hit;};
+  bind(7,offset);bind(8,offset);assert(matched(7).slot==3&&!matched(8));
+  auto identities=gpu.takeResourceSamples();assert(identities.size()==6);
+  gpu.submitted(7);assert(matched(8).slot==3);
+  gpu.bindDescriptors(8,false,40,0,sets,1,&wrong,1);assert(!matched(8));bind(8,offset);
+  gpu.imageChanged(8,20,0,1,0,1);assert(!matched(8));
+  gpu.beginCommands(8);bind(8,offset);assert(matched(8).slot==3); // discarded writes never reached the resource table
+  gpu.updated(9,3,0,4,stagingBytes.data());gpu.submitted(9);assert(!matched(8));
+  gpu.copied(1,3,&vertex,1,10);gpu.submitted(10);assert(matched(8).slot==3);
+  gpu.bindPipeline(8,true,32);gpu.bindDescriptors(8,true,40,0,sets,1,&offset,1);gpu.observeResources(8,true);
+  auto dispatch=gpu.takeResourceSamples();assert(std::any_of(dispatch.begin(),dispatch.end(),[](auto& s){return s.compute&&s.identity.slot.kind==ResourceKind::Storage;}));
+  gpu.imageDestroyed(20);gpu.imageCreated(20,2,2,1,1,1,1,4);gpu.imageView(21,20,0,0);
+  gpu.copiedImage(0,1,20,{24,3,0,0,2,2,true});assert(!matched(8));
+  gpu.descriptorWrite(42,0,0,{ResourceKind::Texture,21});assert(matched(8).slot==3);
+  gpu.descriptorPoolReset(43);assert(!matched(8));
+ }
+ std::cout<<"Vulkan resource and draw tracking: PASS (PC IB aliases, all six Vulkan resource kinds, dynamic offsets, submissions, and lifetime)\n";}

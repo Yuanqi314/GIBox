@@ -146,6 +146,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv*
      return !name.empty()&&name!="."&&name!=".."&&name.find_first_of("/\\")==name.npos&&access((models+name+"/model.json").c_str(),R_OK)==0;
     });
     tracker.allForms=mode==ms::vkcap::Mode::Full;tracker.probeOnly=mode==ms::vkcap::Mode::Off;
+    tracker.inspectResources=mode>=ms::vkcap::Mode::Collect;
     if(sharedSkins){
      tracker.allSkins=true;tracker.skinnedModel=true;tracker.tintHooks=true;
      tracker.routesReady.store(false,std::memory_order_relaxed);

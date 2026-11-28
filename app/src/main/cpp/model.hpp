@@ -102,7 +102,7 @@ struct FrameLoop {AnimationSpec spec;float counter=0;size_t current=0,step=0;uin
   for(uint32_t n=0;n<elapsed;n++){if(std::fmod(counter,spec.period)==0){int value=spec.frames[current].value;value=value<spec.last?value+spec.step:spec.first;size_t next=spec.index(value);changed|=next!=current;current=next;advances++;}counter+=spec.counterStep;require(std::isfinite(counter),"动画计数器溢出");}return changed;}};
 
 // ---------------------------------------------------------------- manifest summary (what the runtime scans every second)
-struct SourceDraw {std::string ib;unsigned slot=0;int64_t first=-1,count=-1;};
+struct SourceDraw {std::string ib;unsigned slot=0;int64_t first=-1,count=-1;std::string gpu{};};
 struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false,indexedBones=false;Fingerprint target;std::vector<SourceDraw> sourceDraws{};};
 // outfit (model.json character.outfit, 0.7.94): the prefab of the outfit (original look or skin) the model was converted for,
 // as the runtime reads it from a renderer ("avatar_lady_pole_shenhecostumedai"); "" for a model made before outfits.
@@ -126,7 +126,10 @@ inline ModelSummary summaryOf(const Json& m){checkFormat(m);ModelSummary s;s.ani
  for(auto& p:jarr(m,"parts",1,model::maxParts)){PartSummary ps;ps.name=jstr(p,"name",64);require(safeName(ps.name)&&seen.insert(ps.name).second,"部件名称无效或重复："+ps.name);ps.renderer=jstr(p,"renderer",256);
   ps.bones=unsigned(juint(p,"bones",1,model::maxBones));ps.indexedBones=p.at("skeleton").type==Json::Null;if(p.at("target").type!=Json::Null){ps.target=fingerprintOf(p.at("target"));require(ps.target.bones>0||s.id==1,"静态目标仅用于场景模型");ps.hasTarget=true;}
   if(p.at("sourceDraws").type!=Json::Null)for(const auto& x:jarr(p,"sourceDraws",0,256)){
-   SourceDraw d;d.ib=jstr(x,"ib",8);require(d.ib.size()==8&&d.ib.find_first_not_of("0123456789abcdef")==d.ib.npos,"原绘制索引哈希无效");
+   SourceDraw d;
+   if(x.at("gpu").type!=Json::Null){d.gpu=jstr(x,"gpu",512);require(!d.gpu.empty(),"Vulkan 资源匹配规则为空");}
+   if(x.at("ib").type!=Json::Null){d.ib=jstr(x,"ib",8);require(d.ib.size()==8&&d.ib.find_first_not_of("0123456789abcdef")==d.ib.npos,"原绘制索引哈希无效");}
+   require(!d.ib.empty()||!d.gpu.empty(),"缺少原绘制匹配规则");
    d.slot=unsigned(juint(x,"slot",0,model::maxSlot-1));
    if(x.at("first").type!=Json::Null)d.first=int64_t(juint(x,"first",0,0xffffffffu));
    if(x.at("count").type!=Json::Null)d.count=int64_t(juint(x,"count",1,0xffffffffu));

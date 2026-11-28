@@ -1181,6 +1181,10 @@ struct Runtime::Impl {
  static std::string hex8(uint32_t v){char b[12];std::snprintf(b,sizeof b,"%08x",v);return b;}
  uint64_t drawProbeReportAt=0;
  void drawProbeTick(vkcap::Tracker& capture,uint64_t now){
+  for(const auto& sample:capture.takeResourceSamples())
+   log("vulkan-resource",std::string(sample.compute?"dispatch #":"draw #")+std::to_string(sample.pass)+" "+
+    vkcap::resourceSlotName(sample.identity.slot)+":"+hex8(sample.identity.hash)+
+    (sample.count?"，firstIndex "+std::to_string(sample.first)+"，indexCount "+std::to_string(sample.count):""));
   for(const auto& draw:capture.takeDraws()){
    log("vulkan-draw",hex8(draw.hash)+"：索引上传 #"+std::to_string(draw.upload)+"，缓冲 "+hex(draw.buffer)+"，上传偏移 "+std::to_string(draw.uploadOffset)+
     "，绑定偏移 "+std::to_string(draw.bindOffset)+"，firstIndex "+std::to_string(draw.first)+"，上传内起点 "+std::to_string(draw.relativeFirst)+

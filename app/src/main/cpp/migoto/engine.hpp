@@ -287,7 +287,7 @@ inline const std::set<std::string>& overrideKeys(){static const std::set<std::st
  "override_byte_stride","override_vertex_count","uav_byte_stride","iteration","filter_index","expand_region_copy","deny_cpu_read","match_priority",
  "match_type","match_usage","match_bind_flags","match_cpu_access_flags","match_misc_flags","match_byte_width","match_stride","match_mips","match_format",
  "match_width","match_height","match_depth","match_array","match_msaa","match_msaa_quality","match_first_vertex","match_first_index","match_first_instance",
- "match_vertex_count","match_index_count","match_instance_count"};return k;}
+ "match_vertex_count","match_index_count","match_instance_count","match_vulkan"};return k;}
 
 inline void Engine::parseList(ListSection& ls,const std::vector<Line>& lines,const std::set<std::string>& whitelist){
  Scope scope;scope.levels.emplace_front();ls.pre.post=false;ls.post.post=true;ls.pre.section=ls.post.section=ls.name;

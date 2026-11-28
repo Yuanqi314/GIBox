@@ -215,6 +215,15 @@ public final class CompatibilityTest {
         ModelConverter.convert(src,null,gpuScene,Characters.SCENE,gpuSceneOpt,DECODE,new StringBuilder());
         ok(ModelManifest.read(gpuScene).id==Characters.SCENE&&!Fixtures.part(gpuScene,0).containsKey("skeleton")&&
             Fixtures.part(gpuScene,0).containsKey("sourceDraws"),"scene mesh imports by its INI without database entries");
+        String gpuMatch="vb0:a1a2a3a4,ps:b1b2b3b4,tex0.1:c1c2c3c4,cb0.3:d1d2d3d4,sb1.0:e1e2e3e4";
+        File mixed=GimiPatternsTest.mod(base,"gpu-resources",GimiPatternsTest.ini("","","","").replace("match_first_index = 0\n",
+            "match_first_index = 0\nmatch_index_count = 3\nmatch_vulkan = "+gpuMatch+"\n"));
+        File mixedOut=new File(base,"gpu-resources-out");
+        ModelConverter.convert(mixed,null,mixedOut,Characters.SCENE,gpuSceneOpt,DECODE,new StringBuilder());
+        List<Object> matches=Json.arr(Fixtures.part(mixedOut,0).get("sourceDraws"),"source draws",2,2);
+        ok(matches.stream().anyMatch(x->gpuMatch.equals(Json.obj(x,"draw").get("gpu"))&&!Json.obj(x,"draw").containsKey("ib"))&&
+           matches.stream().anyMatch(x->"44444444".equals(Json.obj(x,"draw").get("ib"))),"Vulkan rules and PC IB rules can target separate draws in one model");
+        if(nativeChecker!=null){Process check=new ProcessBuilder(nativeChecker,mixedOut.getAbsolutePath()).inheritIO().start();ok(check.waitFor()==0,"native loader accepts mixed resource rules");}
         File sceneBones=new File(base,"scene-bones");Map<String,Object> sceneTarget=Fixtures.target("NpcBody",6,2,2);
         Fixtures.skeleton(sceneBones,Characters.SCENE,"NPC_Test",new String[]{"Scene0"},new String[]{"Root","Spine"},Collections.singletonMap("Scene0",sceneTarget));
         ModelConverter.Options sceneOpt=new ModelConverter.Options().textureMods(true).deviceRenderers(Collections.singletonMap("44444444","Scene0"));

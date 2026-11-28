@@ -816,18 +816,21 @@ public final class ModelConverter {
         return g.sectionSlots.computeIfAbsent(lower(draw.part)+"|"+draw.hash,k->readSourceDraw(ini,g,draw));
     }
     private static int readSourceDraw(Ini ini,Group g,Draw draw){
-        if(!draw.hash.matches("[0-9a-f]{8}"))return -1;
         Section s=ini.sections.get("textureoverride"+lower(draw.part));if(s==null)return -1;
-        Long first=null,count=null;
+        Long first=null,count=null;String gpu=null;
         try{for(String line:s.lines){String[] a=kv(line);if(a==null)continue;
             if(a[0].equals("match_first_index"))first=Long.parseLong(a[1].trim());
             if(a[0].equals("match_index_count"))count=Long.parseLong(a[1].trim());
-            if(a[0].startsWith("match_")&&!a[0].equals("match_first_index")&&!a[0].equals("match_index_count")&&!a[0].equals("match_priority"))return -1;}}
+            if(a[0].equals("match_vulkan"))gpu=lower(a[1].trim());
+            if(a[0].startsWith("match_")&&!a[0].equals("match_first_index")&&!a[0].equals("match_index_count")&&!a[0].equals("match_priority")&&!a[0].equals("match_vulkan"))return -1;}}
         catch(NumberFormatException e){return -1;}
         if((first!=null&&(first<0||first>0xffffffffL))||(count!=null&&(count<=0||count>0xffffffffL)))return -1;
-        String key=draw.hash+"|"+first+"|"+count;Integer existing=g.sourceSlots.get(key);if(existing!=null)return existing;
+        if(gpu!=null){
+            check(!gpu.isEmpty()&&gpu.length()<=512&&first!=null&&count!=null,"match_vulkan 必须同时提供 match_first_index 和 match_index_count");
+        }else if(!draw.hash.matches("[0-9a-f]{8}"))return -1;
+        String key=(gpu==null?draw.hash:gpu)+"|"+first+"|"+count;Integer existing=g.sourceSlots.get(key);if(existing!=null)return existing;
         int slot=g.sourceDraws.size();if(slot>=64)return -1;
-        Map<String,Object> rule=Json.of("ib",draw.hash,"slot",slot);
+        Map<String,Object> rule=gpu==null?Json.of("ib",draw.hash,"slot",slot):Json.of("gpu",gpu,"slot",slot);
         if(first!=null)rule.put("first",first);if(count!=null)rule.put("count",count);
         g.sourceSlots.put(key,slot);g.sourceDraws.add(rule);return slot;
     }

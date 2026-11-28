@@ -21,6 +21,7 @@
 // The optional draw probe watches a set of hashes against the same uploads without enabling mesh collection.
 #include <algorithm>
 #include <initializer_list>
+#include <iterator>
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -30,9 +31,13 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
+#include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #if defined(__aarch64__)
 #include <arm_acle.h>
@@ -116,6 +121,59 @@ struct SkinHit {
 };
 struct SkinRoute {uint32_t hash=0,total=0;unsigned profile=0;std::vector<std::pair<uint32_t,uint32_t>> ranges;bool pcRule=false;};
 struct IniSkinRule {unsigned profile=0,slot=0;int64_t first=-1,count=-1;};
+enum class ResourceKind : uint8_t {Index,Vertex,Texture,Shader,Constant,Storage,Total};
+struct ResourceSlot {
+ ResourceKind kind;uint32_t set=0,binding=0,element=0;
+ bool operator<(const ResourceSlot& other)const{return std::tie(kind,set,binding,element)<std::tie(other.kind,other.set,other.binding,other.element);}
+};
+struct ResourceMatch {ResourceSlot slot;uint32_t hash;};
+struct ResourceRule {IniSkinRule draw;std::vector<ResourceMatch> all;};
+struct ResourceSample {ResourceMatch identity;bool compute=false;uint64_t pass=0;uint32_t first=0,count=0;};
+struct ResourceBinding {ResourceKind kind;uint64_t handle=0,offset=0,size=~0ull,generation=0;};
+struct ImageCopy {uint64_t offset;uint32_t rowLength,mip,layer,width,height;bool whole;};
+inline std::string resourceSlotName(const ResourceSlot& s){
+ switch(s.kind){
+  case ResourceKind::Index:return "ib";
+  case ResourceKind::Vertex:return "vb"+std::to_string(s.binding);
+  case ResourceKind::Shader:switch(s.binding){case 1:return "vs";case 2:return "hs";case 4:return "ds";case 8:return "gs";case 16:return "ps";case 32:return "cs";default:return "shader";}
+  default:return std::string(s.kind==ResourceKind::Texture?"tex":s.kind==ResourceKind::Constant?"cb":"sb")+
+                 std::to_string(s.set)+"."+std::to_string(s.binding)+(s.element?"."+std::to_string(s.element):"");
+ }
+}
+inline std::optional<std::vector<ResourceMatch>> resourceMatches(std::string_view text){
+ auto trim=[](std::string_view s){auto a=s.find_first_not_of(" \t");return a==s.npos?std::string_view{}:s.substr(a,s.find_last_not_of(" \t")-a+1);};
+ auto number=[](std::string_view s,unsigned& n){if(s.empty())return false;auto p=std::from_chars(s.data(),s.data()+s.size(),n);return p.ec==std::errc{}&&p.ptr==s.data()+s.size();};
+ std::vector<ResourceMatch> out;std::set<ResourceSlot> seen;
+ while(!text.empty()&&out.size()<8){
+  auto comma=text.find(',');auto item=trim(text.substr(0,comma));auto colon=item.find(':');
+  if(colon==item.npos)return std::nullopt;
+  auto key=trim(item.substr(0,colon));auto hash=drawHash(std::string(trim(item.substr(colon+1))));if(!hash)return std::nullopt;
+  ResourceSlot s{ResourceKind::Index};
+  if(key!="ib"){
+   constexpr std::string_view names[]={"vs","hs","ds","gs","ps","cs"};
+   const auto stage=std::find(std::begin(names),std::end(names),key);
+   if(stage!=std::end(names)){s.kind=ResourceKind::Shader;s.binding=1u<<(stage-names);}
+   else if(key.substr(0,2)=="vb"){
+    s.kind=ResourceKind::Vertex;if(!number(key.substr(2),s.binding)||s.binding>=32)return std::nullopt;
+   }else{
+    auto prefix=key.substr(0,3);size_t width=2;
+    if(prefix=="tex"){s.kind=ResourceKind::Texture;width=3;}
+    else if(key.substr(0,2)=="cb")s.kind=ResourceKind::Constant;
+    else if(key.substr(0,2)=="sb")s.kind=ResourceKind::Storage;
+    else return std::nullopt;
+    auto fields=key.substr(width);auto dot=fields.find('.');if(dot==fields.npos||!number(fields.substr(0,dot),s.set)||s.set>=8)return std::nullopt;
+    fields.remove_prefix(dot+1);dot=fields.find('.');
+    if(!number(fields.substr(0,dot),s.binding)||s.binding>=4096)return std::nullopt;
+    if(dot!=fields.npos&&(!number(fields.substr(dot+1),s.element)||s.element>=1024))return std::nullopt;
+   }
+  }
+  if(!seen.insert(s).second)return std::nullopt;
+  out.push_back({s,*hash});
+  if(comma==text.npos)return out;
+  text.remove_prefix(comma+1);
+ }
+ return std::nullopt;
+}
 struct SkinLayoutMiss {unsigned profile;uintptr_t pipeline;std::string details;};
 enum class SkinMiss : unsigned {DrawRange,Ambiguous,Graphics,SkinOutput,Bones,Resources,Pose,VertexBindings,Material,ComputeDescriptors,Total};
 using SkinChoices=std::map<std::string,std::map<std::string,int>>;
@@ -161,20 +219,123 @@ class Tracker {
  struct UploadHash {uint32_t value=0;uint8_t widths=0;}; // bit 0: raw 16-bit input, bit 1: raw 32-bit input
  struct Upload {uint64_t seq,offset,bytes;std::array<UploadHash,12> hashes{};size_t count=0;};
  struct Probe {uint64_t uploads=0;size_t reported=0;std::vector<Draw> draws;};
- struct Buffer {uint64_t size=0,memory=0,memoryOffset=0,generation=0;uint32_t usage=0,skinCrc=0;bool bound=false,captured=false;std::vector<Upload> matches;};
+ struct ResourceSpan {uint64_t offset,size;uint32_t hash;};
+ struct Buffer {uint64_t size=0,memory=0,memoryOffset=0,generation=0;uint32_t usage=0,skinCrc=0;bool bound=false,captured=false;
+  std::vector<Upload> matches;std::vector<ResourceSpan> signatures;};
  struct Mapping {const uint8_t* base=nullptr;uint64_t offset=0,size=0;};
  struct IndexBinding {uint64_t buffer,generation,offset;uint32_t width;};
+ struct Image {unsigned width,height,mips,layers,blockWidth,blockHeight,blockBytes;uint64_t generation;
+  std::map<std::pair<unsigned,unsigned>,uint32_t> hashes{};};
+ struct View {uint64_t image,generation,id;unsigned mip,layer;};
+ struct Pipeline {uint64_t layout=0;std::map<unsigned,uint32_t> stages;};
+ using DescriptorKey=std::pair<unsigned,unsigned>;
+ struct DescriptorLayout {std::vector<DescriptorKey> dynamic;std::map<unsigned,unsigned> counts;};
+ struct DescriptorSet {uint64_t generation,pool;std::shared_ptr<const DescriptorLayout> layout{};std::map<DescriptorKey,ResourceBinding> slots{};};
+ struct BoundSet {uint64_t handle=0,generation=0;std::map<DescriptorKey,uint32_t> offsets{};};
+ struct Bindings {uint64_t pipeline=0,layout=0;std::array<BoundSet,8> sets{};};
+ struct Command {std::array<ResourceBinding,32> vertices{};Bindings graphics,compute;};
+ struct PendingWrite {uint64_t handle,generation,offset,size;unsigned mip=0,layer=0;bool image=false;std::optional<uint32_t> hash;};
  std::mutex m;std::unordered_map<uint64_t,Buffer> buffers;std::unordered_map<uint64_t,Mapping> maps;std::vector<Blob> out;Stats st;uint64_t seq=0;
  std::unordered_map<uintptr_t,IndexBinding> drawBindings;
+ std::unordered_map<uint64_t,Image> images;
+ std::unordered_map<uint64_t,View> views;
+ std::unordered_map<uint64_t,uint32_t> shaders;
+ std::unordered_map<uint64_t,Pipeline> pipelines;
+ std::unordered_map<uint64_t,std::shared_ptr<const DescriptorLayout>> descriptorLayouts;
+ std::unordered_map<uint64_t,DescriptorSet> descriptors;
+ std::unordered_map<uintptr_t,Command> commands;
+ std::unordered_map<uintptr_t,std::vector<PendingWrite>> pending;
+ std::unordered_set<uintptr_t> pendingOverflow;
+ std::vector<ResourceSample> resourceSamples;
+ std::array<uint64_t,2> resourcePasses{};
+ std::array<std::set<std::tuple<bool,ResourceSlot,uint32_t>>,size_t(ResourceKind::Total)> sampled;
  std::map<uint32_t,Probe> probes; // keys set once before the loader hooks are installed
  std::vector<SkinLayoutMiss> skinLayoutMisses;
  std::unordered_set<uint64_t> pcIndexBytes16,pcIndexBytes32;
  uint64_t bufferGeneration=0;
- static constexpr uint32_t indexUsage=0x40,transferSrc=0x1;static constexpr size_t maxBlob=64u<<20,maxQueue=65536;
+ static constexpr uint32_t indexUsage=0x40,transferSrc=0x1,resourceUsages=0xf0;
+ static constexpr size_t maxBlob=64u<<20,maxQueue=65536,maxResourceWrites=2048;
  static bool skinSize(uint64_t n){return n==335880||n==268704;}
  // Host address of [memory offset, +size) or null when that range is not mapped.
- const uint8_t* host(const Buffer& b,uint64_t at,uint64_t size){auto x=maps.find(b.memory);if(x==maps.end()||!x->second.base)return nullptr;uint64_t from=b.memoryOffset+at;
-  if(from<x->second.offset||(x->second.size!=~0ull&&from+size>x->second.offset+x->second.size)){return nullptr;}return x->second.base+(from-x->second.offset);}
+ const uint8_t* host(const Buffer& b,uint64_t at,uint64_t size){auto x=maps.find(b.memory);if(!b.bound||x==maps.end()||!x->second.base||at>~0ull-b.memoryOffset)return nullptr;
+  const auto from=b.memoryOffset+at;if(from<x->second.offset)return nullptr;
+  const auto rel=from-x->second.offset;if(rel>x->second.size||size>x->second.size-rel)return nullptr;
+  return x->second.base+rel;}
+ static bool overlaps(uint64_t a,uint64_t n,uint64_t b,uint64_t s){return a<b+s&&b<a+n;}
+ void remember(const PendingWrite& w){
+  if(w.image){auto i=images.find(w.handle);if(i==images.end()||i->second.generation!=w.generation)return;
+   const auto key=std::make_pair(w.mip,w.layer);if(w.hash)i->second.hashes[key]=*w.hash;else i->second.hashes.erase(key);return;}
+  auto it=buffers.find(w.handle);if(it==buffers.end()||it->second.generation!=w.generation)return;
+  auto& a=it->second.signatures;a.erase(std::remove_if(a.begin(),a.end(),[&](const auto& r){return overlaps(w.offset,w.size,r.offset,r.size);}),a.end());
+  if(w.hash){if(a.size()>=16)a.erase(a.begin());a.push_back({w.offset,w.size,*w.hash});}
+ }
+ void saveWrite(uintptr_t command,const PendingWrite& w){
+  if(!command){remember(w);return;}
+  auto& writes=pending[command];
+  if(writes.size()<maxResourceWrites)writes.push_back(w);
+  else pendingOverflow.insert(command);
+ }
+ std::optional<uint32_t> bufferResource(uintptr_t command,const ResourceBinding& ref,bool staging=false){
+  if(pendingOverflow.count(command))return {};
+  auto lookup=buffers.find(ref.handle);if(lookup==buffers.end()||ref.offset>=lookup->second.size)return {};
+  auto& b=lookup->second;
+  if(ref.generation&&ref.generation!=b.generation)return {};
+  const auto n=ref.size==~0ull?b.size-ref.offset:ref.size;
+  if(!n||n>b.size-ref.offset)return {};
+  const auto use=[&](uint64_t offset,uint64_t size){return offset==ref.offset&&(ref.size==~0ull||size==n);};
+  if(auto p=pending.find(command);p!=pending.end())for(auto w=p->second.rbegin();w!=p->second.rend();++w)
+   if(!w->image&&w->handle==ref.handle&&w->generation==b.generation&&overlaps(ref.offset,n,w->offset,w->size))
+    return use(w->offset,w->size)?w->hash:std::nullopt;
+  const auto limit=(ref.kind==ResourceKind::Constant||ref.kind==ResourceKind::Storage)&&!staging?65536:maxBlob;
+  if(n<=limit)if(const auto* p=host(b,ref.offset,n))return crc32c(0,p,size_t(n));
+  for(auto it=b.signatures.rbegin();it!=b.signatures.rend();++it)if(use(it->offset,it->size))return it->hash;
+  return {};
+ }
+ std::optional<uint32_t> textureResource(uintptr_t command,uint64_t handle,uint64_t generation){
+  const auto view=views.find(handle);if(view==views.end())return {};
+  if(view->second.id!=generation)return {};
+  const auto& v=view->second;const auto image=images.find(v.image);
+  if(image==images.end()||image->second.generation!=v.generation)return {};
+  if(auto p=pending.find(command);p!=pending.end())for(auto w=p->second.rbegin();w!=p->second.rend();++w)
+   if(w->image&&w->handle==v.image&&w->generation==v.generation&&w->mip==v.mip&&w->layer==v.layer)return w->hash;
+  auto hash=image->second.hashes.find({v.mip,v.layer});if(hash!=image->second.hashes.end())return hash->second;return {};
+ }
+ std::optional<uint32_t> resourceHash(uintptr_t command,bool compute,const ResourceSlot& slot){
+  if(pendingOverflow.count(command))return {};
+  if(slot.kind==ResourceKind::Index){auto i=drawBindings.find(command);if(compute||i==drawBindings.end())return {};
+   auto b=buffers.find(i->second.buffer);if(b==buffers.end()||b->second.generation!=i->second.generation)return {};
+   return bufferResource(command,{slot.kind,i->second.buffer,i->second.offset});}
+  auto cmd=commands.find(command);if(cmd==commands.end())return {};
+  const auto& record=cmd->second;
+  if(slot.kind==ResourceKind::Vertex)return !compute&&slot.binding<record.vertices.size()&&record.vertices[slot.binding].generation?bufferResource(command,record.vertices[slot.binding]):std::nullopt;
+  const auto& bound=compute?record.compute:record.graphics;
+  auto p=pipelines.find(bound.pipeline);if(p==pipelines.end())return {};
+  if(slot.kind==ResourceKind::Shader){const auto stage=p->second.stages.find(slot.binding);
+   return stage!=p->second.stages.end()?std::optional<uint32_t>(stage->second):std::nullopt;}
+  if(p->second.layout!=bound.layout)return {};
+  if(slot.set>=bound.sets.size())return {};
+  const auto& set=bound.sets[slot.set];auto d=descriptors.find(set.handle);if(d==descriptors.end()||d->second.generation!=set.generation)return {};
+  const auto key=std::make_pair(slot.binding,slot.element);auto it=d->second.slots.find(key);
+  if(it==d->second.slots.end()||it->second.kind!=slot.kind||!it->second.generation)return {};
+  if(slot.kind==ResourceKind::Texture)return textureResource(command,it->second.handle,it->second.generation);
+  auto ref=it->second;if(auto off=set.offsets.find(key);off!=set.offsets.end()){if(off->second>~0ull-ref.offset)return {};ref.offset+=off->second;}
+  return bufferResource(command,ref);
+ }
+ void sampleResources(uintptr_t command,bool compute,uint32_t first=0,uint32_t count=0){
+  if(!inspectResources||(resourcePasses[compute]++&31u))return;
+  auto sample=[&](const ResourceSlot& slot){auto& seen=sampled[size_t(slot.kind)];if(seen.size()>=48)return;
+   if(auto hash=resourceHash(command,compute,slot);hash&&seen.emplace(compute,slot,*hash).second)
+    resourceSamples.push_back({{slot,*hash},compute,resourcePasses[compute],first,count});};
+  auto cmd=commands.find(command);if(cmd==commands.end())return;
+  if(!compute){sample({ResourceKind::Index});for(unsigned i=0;i<cmd->second.vertices.size();i++)
+   if(cmd->second.vertices[i].handle)sample({ResourceKind::Vertex,0,i});}
+  const auto& state=compute?cmd->second.compute:cmd->second.graphics;
+  if(auto p=pipelines.find(state.pipeline);p!=pipelines.end())for(auto& s:p->second.stages)sample({ResourceKind::Shader,0,s.first});
+  for(unsigned i=0;i<state.sets.size();i++){
+   const auto& set=state.sets[i];auto d=descriptors.find(set.handle);if(d==descriptors.end()||d->second.generation!=set.generation)continue;
+   for(const auto& slot:d->second.slots)sample({slot.second.kind,i,slot.first.first,slot.first.second});
+  }
+ }
  // Under the lock: an unmap waits until the bytes are read.
  void add(const uint8_t* p,uint64_t n,uint64_t buffer,Buffer& dst,uint64_t offset,const char* via){st.uploads++;st.bytes+=n;
   if(!probing()&&out.size()>=maxQueue){st.dropped++;return;}
@@ -217,6 +378,9 @@ public:
  std::string paimonTextureMod; // optional startup preset, chosen before installing any wrappers
  bool skinnedModel=false; // this preset uses the captured Vulkan skinning pipeline instead of Unity mesh APIs
  bool allSkins=false;
+ bool inspectResources=false; // existing hash collection mode, set before installing the loader hooks
+ std::vector<ResourceRule> resourceRules; // published with routesReady
+ bool gpuEnabled()const{return inspectResources||(allSkins&&(!routesReady.load(std::memory_order_acquire)||!resourceRules.empty()));}
  std::vector<std::string> skinMods; // profile index -> mod; published before install
  std::unordered_map<uint32_t,SkinRoute> skinRoutes;
  std::unordered_map<uint32_t,std::vector<IniSkinRule>> iniSkinRules;
@@ -250,10 +414,14 @@ public:
     }
     uploads.erase(std::remove_if(uploads.begin(),uploads.end(),[](const auto& u){return !u.count;}),uploads.end());
    }
+   if(!inspectResources&&resourceRules.empty()){
+    for(auto& resource:buffers)resource.second.signatures.clear();
+    images.clear();views.clear();shaders.clear();pipelines.clear();descriptorLayouts.clear();descriptors.clear();commands.clear();pending.clear();pendingOverflow.clear();
+   }
    routesReady.store(true,std::memory_order_release);
   }
  }
- bool probing()const{return allSkins||!probes.empty();}
+ bool probing()const{return allSkins||inspectResources||!probes.empty();}
  void setPaimonReplacement(bool master,bool tint,const std::string& textureMod){
   if(tintHooks)tintOn.store(master&&(paimonTextureMod.empty()?tint:paimonTextureMod==textureMod),std::memory_order_relaxed);
  }
@@ -274,14 +442,20 @@ public:
  void setSkinChoices(const SkinChoices& choices){std::atomic_store(&skinChoices,std::make_shared<const SkinChoices>(choices));}
  bool skinBackendReady()const{return enabled&&allSkins&&textureUpload.load(std::memory_order_relaxed)==1&&indexedDrawSeen.load(std::memory_order_relaxed);}
  bool hasSkin(const std::string& name)const{return std::find(skinMods.begin(),skinMods.end(),name)!=skinMods.end();}
- void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc))&&!(skinnedModel&&(usage&0x20)&&skinSize(size)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;if(probing())b.generation=++bufferGeneration;buffers[buffer]=std::move(b);}
+ void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc))&&!(gpuEnabled()&&(usage&resourceUsages))&&!(skinnedModel&&(usage&0x20)&&skinSize(size)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;if(probing())b.generation=++bufferGeneration;buffers[buffer]=std::move(b);}
  void destroyed(uint64_t buffer){std::lock_guard<std::mutex> l(m);buffers.erase(buffer);}
- void bound(uint64_t buffer,uint64_t memory,uint64_t offset){std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end())return;b->second.memory=memory;b->second.memoryOffset=offset;b->second.bound=true;b->second.skinCrc=0;}
+ void bound(uint64_t buffer,uint64_t memory,uint64_t offset){std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end())return;b->second.memory=memory;b->second.memoryOffset=offset;b->second.bound=true;b->second.skinCrc=0;b->second.signatures.clear();}
  void mapped(uint64_t memory,uint64_t offset,uint64_t size,const void* p){std::lock_guard<std::mutex> l(m);maps[memory]={static_cast<const uint8_t*>(p),offset,size};}
  void unmapped(uint64_t memory){std::lock_guard<std::mutex> l(m);maps.erase(memory);}
  // A copy into an index buffer: each region's source bytes, as written into the staging memory before the copy.
- void copied(uint64_t src,uint64_t dst,const Copy* regions,uint32_t count){
+ void copied(uint64_t src,uint64_t dst,const Copy* regions,uint32_t count,uintptr_t command=0){
   std::lock_guard<std::mutex> l(m);auto d=buffers.find(dst);if(d==buffers.end())return;auto s=buffers.find(src);
+  if(gpuEnabled()&&(d->second.usage&resourceUsages))for(uint32_t i=0;i<count;i++){
+   const auto& r=regions[i];if(!r.size||r.dstOffset>d->second.size||r.size>d->second.size-r.dstOffset)continue;
+   std::optional<uint32_t> hash;
+   if(r.size<=maxBlob)hash=bufferResource(command,{ResourceKind::Vertex,src,r.srcOffset,r.size},true);
+   saveWrite(command,{dst,d->second.generation,r.dstOffset,r.size,0,0,false,hash});
+  }
   if(skinnedModel&&(d->second.usage&0x20)&&skinSize(d->second.size)){
    for(uint32_t i=0;i<count;i++){const auto& r=regions[i];d->second.skinCrc=0;if(r.dstOffset||r.size!=d->second.size||s==buffers.end()||!s->second.bound||r.srcOffset>s->second.size||r.size>s->second.size-r.srcOffset)continue;
     if(const auto* p=host(s->second,r.srcOffset,r.size))d->second.skinCrc=crc32c(0,p,size_t(r.size));}
@@ -307,10 +481,104 @@ public:
    else if(const uint8_t* p=host(dst,offset,n)){st.mappedBinds++;add(p,n,buffer,dst,offset,"mapped memory at its first bind (offset to the buffer's end)");}
    else st.notMapped++;
   }
-  if(command&&!dst.matches.empty()&&(indexType==0||indexType==1)&&drawBindings.size()<512)
+  if(command&&(!dst.matches.empty()||gpuEnabled())&&(indexType==0||indexType==1)&&drawBindings.size()<512)
    drawBindings.emplace(command,IndexBinding{buffer,dst.generation,offset,indexType==0?2u:4u});
  }
- void beginCommands(uintptr_t command){std::lock_guard<std::mutex> l(m);drawBindings.erase(command);}
+ void beginCommands(uintptr_t command){std::lock_guard<std::mutex> l(m);drawBindings.erase(command);commands.erase(command);pending.erase(command);pendingOverflow.erase(command);}
+ void executeCommands(uintptr_t primary,uintptr_t secondary){
+  std::lock_guard<std::mutex> l(m);auto p=pending.find(secondary);
+  if(pendingOverflow.count(secondary))pendingOverflow.insert(primary);
+  if(p!=pending.end()&&primary!=secondary)for(const auto& w:p->second)saveWrite(primary,w);
+ }
+ void submitted(uintptr_t command){std::lock_guard<std::mutex> l(m);
+  if(pendingOverflow.count(command)){for(auto& b:buffers)b.second.signatures.clear();for(auto& i:images)i.second.hashes.clear();return;}
+  auto p=pending.find(command);if(p==pending.end())return;
+  for(const auto& w:p->second)remember(w);}
+ void updated(uintptr_t command,uint64_t dst,uint64_t offset,uint64_t size,const void* data){
+  if(!gpuEnabled())return;
+  std::lock_guard<std::mutex> l(m);auto d=buffers.find(dst);if(d==buffers.end()||offset>=d->second.size)return;
+  if(size==~0ull&&!data)size=d->second.size-offset;
+  if(!size||size>d->second.size-offset)return;
+  std::optional<uint32_t> hash;if(data&&size<=65536)hash=crc32c(0,data,size_t(size));
+  saveWrite(command,{dst,d->second.generation,offset,size,0,0,false,hash});
+ }
+ void imageCreated(uint64_t handle,unsigned width,unsigned height,unsigned mips,unsigned layers,unsigned bw,unsigned bh,unsigned bytes){
+  std::lock_guard<std::mutex> l(m);images.insert_or_assign(handle,Image{width,height,mips,layers,bw,bh,bytes,++bufferGeneration});}
+ void imageDestroyed(uint64_t handle){std::lock_guard<std::mutex> l(m);images.erase(handle);}
+ void imageView(uint64_t handle,uint64_t image,unsigned mip,unsigned layer){std::lock_guard<std::mutex> l(m);views.erase(handle);
+  auto i=images.find(image);if(i!=images.end()&&mip<i->second.mips&&layer<i->second.layers)views.emplace(handle,View{image,i->second.generation,++bufferGeneration,mip,layer});}
+ void viewDestroyed(uint64_t handle){std::lock_guard<std::mutex> l(m);views.erase(handle);}
+ void imageChanged(uintptr_t command,uint64_t dst,unsigned mip,unsigned levels,unsigned layer,unsigned layers){
+  if(!gpuEnabled())return;
+  std::lock_guard<std::mutex> l(m);auto target=images.find(dst);if(target==images.end())return;const auto& image=target->second;
+  if(mip>=image.mips||layer>=image.layers)return;
+  for(unsigned i=0;i<std::min(levels,image.mips-mip);i++)for(unsigned j=0;j<std::min(layers,image.layers-layer);j++)
+   saveWrite(command,{dst,image.generation,0,0,mip+i,layer+j,true,{}});
+ }
+ void copiedImage(uintptr_t command,uint64_t src,uint64_t dst,const ImageCopy& copy){
+  if(!gpuEnabled())return;
+  std::lock_guard<std::mutex> l(m);const auto target=images.find(dst);if(target==images.end())return;
+  auto& image=target->second;if(copy.mip>=image.mips||copy.layer>=image.layers)return;
+  std::optional<uint32_t> hash;
+  const unsigned w=std::max(1u,image.width>>copy.mip),h=std::max(1u,image.height>>copy.mip);
+  const auto source=buffers.find(src);
+  if(copy.whole&&w==copy.width&&h==copy.height&&source!=buffers.end()&&image.blockBytes){
+   const auto cols=[&](unsigned n){return (uint64_t(n)+image.blockWidth-1)/image.blockWidth*image.blockBytes;};
+   const auto bytes=cols(w),pitch=cols(copy.rowLength?copy.rowLength:w),rows=(uint64_t(h)+image.blockHeight-1)/image.blockHeight;
+   const auto n=(rows-1)*pitch+bytes;
+   if(pitch>=bytes&&n<=maxBlob&&copy.offset<=source->second.size&&n<=source->second.size-copy.offset){
+    if(auto* hostData=host(source->second,copy.offset,n)){uint32_t digest=0;
+     for(uint64_t row=0;row<rows;row++)digest=crc32c(digest,hostData+row*pitch,size_t(bytes));hash=digest;}
+   }
+  }
+  saveWrite(command,{dst,image.generation,0,0,copy.mip,copy.layer,true,hash});
+ }
+ void shaderCreated(uint64_t handle,const void* data,size_t size){std::lock_guard<std::mutex> l(m);shaders.erase(handle);
+  if(data&&size&&size<=maxBlob)shaders.emplace(handle,crc32c(0,data,size));}
+ void shaderDestroyed(uint64_t handle){std::lock_guard<std::mutex> l(m);shaders.erase(handle);}
+ void pipelineCreated(uint64_t handle,uint64_t layout,const std::vector<std::pair<unsigned,uint64_t>>& stages){std::lock_guard<std::mutex> l(m);
+  auto& pipeline=pipelines[handle];pipeline={layout,{}};
+  for(const auto& stage:stages)if(auto s=shaders.find(stage.second);s!=shaders.end())pipeline.stages[stage.first]=s->second;}
+ void pipelineDestroyed(uint64_t handle){std::lock_guard<std::mutex> l(m);pipelines.erase(handle);}
+ void bindPipeline(uintptr_t command,bool compute,uint64_t handle){std::lock_guard<std::mutex> l(m);auto& c=commands[command];(compute?c.compute:c.graphics).pipeline=handle;}
+ void bindVertex(uintptr_t command,unsigned slot,uint64_t handle,uint64_t offset,uint64_t size=~0ull){
+  if(slot>=32)return;
+  std::lock_guard<std::mutex> l(m);auto b=buffers.find(handle);
+  commands[command].vertices[slot]={ResourceKind::Vertex,handle,offset,size,b==buffers.end()?0:b->second.generation};
+ }
+ void descriptorLayout(uint64_t layout,std::vector<DescriptorKey> entries,std::map<unsigned,unsigned> counts){std::sort(entries.begin(),entries.end());
+  auto definition=std::make_shared<const DescriptorLayout>(DescriptorLayout{std::move(entries),std::move(counts)});
+  std::lock_guard<std::mutex> l(m);descriptorLayouts[layout]=std::move(definition);}
+ void descriptorLayoutDestroyed(uint64_t layout){std::lock_guard<std::mutex> l(m);descriptorLayouts.erase(layout);}
+ void descriptorAllocated(uint64_t handle,uint64_t pool,uint64_t layout){std::lock_guard<std::mutex> l(m);DescriptorSet set{++bufferGeneration,pool};
+  if(auto i=descriptorLayouts.find(layout);i!=descriptorLayouts.end())set.layout=i->second;
+  descriptors.insert_or_assign(handle,std::move(set));}
+ void descriptorReleased(uint64_t handle){std::lock_guard<std::mutex> l(m);descriptors.erase(handle);}
+ void descriptorPoolReset(uint64_t pool){std::lock_guard<std::mutex> l(m);for(auto d=descriptors.begin();d!=descriptors.end();)if(d->second.pool==pool)d=descriptors.erase(d);else ++d;}
+ void descriptorWrite(uint64_t handle,unsigned binding,unsigned element,ResourceBinding resource){std::lock_guard<std::mutex> l(m);
+  auto d=descriptors.find(handle);if(d==descriptors.end())return;const auto key=std::make_pair(binding,element);
+  if(!d->second.layout)return;
+  const auto& counts=d->second.layout->counts;auto n=counts.find(binding);
+  if(n==counts.end()||element>=n->second){d->second.slots.clear();return;}
+  if(resource.kind==ResourceKind::Texture){auto v=views.find(resource.handle);if(v!=views.end())resource.generation=v->second.id;}
+  else{auto b=buffers.find(resource.handle);if(b!=buffers.end())resource.generation=b->second.generation;}
+  if(resource.generation&&(d->second.slots.size()<256||d->second.slots.count(key)))d->second.slots[key]=resource;else d->second.slots.erase(key);}
+ void descriptorUnknown(uint64_t handle){std::lock_guard<std::mutex> l(m);auto d=descriptors.find(handle);if(d!=descriptors.end())d->second.slots.clear();}
+ void bindDescriptors(uintptr_t command,bool compute,uint64_t layout,unsigned first,const uint64_t* sets,unsigned count,const uint32_t* offsets,unsigned offsetCount){
+  std::lock_guard<std::mutex> l(m);auto& c=commands[command];auto& b=compute?c.compute:c.graphics;
+  if(b.layout!=layout){b.sets={};b.layout=layout;}
+  unsigned consumed=0;
+  for(unsigned i=0;i<count&&first+i<b.sets.size();i++){
+   auto& to=b.sets[first+i];to={};auto set=descriptors.find(sets[i]);if(set==descriptors.end()){for(unsigned j=first+i;j<b.sets.size();j++)b.sets[j]={};return;}
+   if(!set->second.layout){for(unsigned j=first+i;j<b.sets.size();j++)b.sets[j]={};return;}
+   const auto& dynamic=set->second.layout->dynamic;
+   if(dynamic.size()>offsetCount-consumed||(!offsets&&!dynamic.empty())){for(unsigned j=first+i;j<b.sets.size();j++)b.sets[j]={};return;}
+   to.handle=sets[i];to.generation=set->second.generation;
+   for(const auto& key:dynamic)to.offsets.emplace(key,offsets[consumed++]);
+  }
+ }
+ void observeResources(uintptr_t command,bool compute){std::lock_guard<std::mutex> l(m);sampleResources(command,compute);}
+ std::vector<ResourceSample> takeResourceSamples(){std::lock_guard<std::mutex> l(m);std::vector<ResourceSample> result;result.swap(resourceSamples);return result;}
  bool skinSource(uint64_t buffer,uint64_t n,uint32_t expected){
   std::lock_guard<std::mutex> l(m);auto it=buffers.find(buffer);if(it==buffers.end()||it->second.size!=n||!it->second.bound||!(it->second.usage&0x20))return false;
   auto& b=it->second;if(!b.skinCrc){if(const auto* p=host(b,0,n)){auto crc=crc32c(0,p,size_t(n));if(crc==expected)b.skinCrc=crc;}}
@@ -322,6 +590,7 @@ public:
   if(!st.indexedDraws)indexedDrawSeen.store(true,std::memory_order_relaxed);
   st.indexedDraws++;
   if(!routesReady.load(std::memory_order_acquire))return -1;
+  sampleResources(command,false,first,count);
   auto binding=drawBindings.find(command);if(binding==drawBindings.end())return -1;
   const auto& state=binding->second;
   auto buffer=buffers.find(state.buffer);if(buffer==buffers.end()||buffer->second.generation!=state.generation)return -1;
@@ -331,6 +600,20 @@ public:
   int part=-1;
   bool conflict=false,compatConflict=false,iniChecked=false;
   SkinHit compatibility;
+  auto accept=[&](SkinHit& hit,unsigned profile,unsigned slot,uint32_t relative,bool& ambiguous){
+   if(hit&&(hit.profile!=profile||hit.slot!=slot)){
+    const bool previous=skinActive(hit.profile),next=skinActive(profile);
+    if(previous&&!next)return;
+    ambiguous=previous==next;
+   }
+   hit={profile,slot,relative,count};
+  };
+  if(skin&&allSkins&&!baseVertex&&instances==1&&count%3==0)for(const auto& rule:resourceRules){
+   const auto& d=rule.draw;
+   if(!skinActive(d.profile)||(d.first>=0&&first!=d.first)||(d.count>=0&&count!=d.count))continue;
+   if(std::all_of(rule.all.begin(),rule.all.end(),[&](const auto& term){return resourceHash(command,false,term.slot)==term.hash;}))
+    accept(*skin,d.profile,d.slot,first,conflict);
+  }
   for(const auto& upload:buffer->second.matches){
    if(begin<upload.offset||begin+bytes>upload.offset+upload.bytes||(begin-upload.offset)%state.width)continue;
    for(size_t i=0;i<upload.count;i++){
@@ -339,14 +622,6 @@ public:
     auto& draws=probe->second.draws;
     if(skin&&allSkins){
      const auto relative=uint32_t((begin-upload.offset)/state.width);
-     auto accept=[&](SkinHit& hit,unsigned profile,unsigned slot,bool& ambiguous){
-      if(hit&&(hit.profile!=profile||hit.slot!=slot)){
-       const bool previous=skinActive(hit.profile),next=skinActive(profile);
-       if(previous&&!next)return;
-       ambiguous=previous==next;
-      }
-      hit={profile,slot,relative,count};
-     };
      const auto rules=iniSkinRules.find(hash);
      if(rules!=iniSkinRules.end()){
       iniChecked=true;
@@ -354,13 +629,13 @@ public:
        if(baseVertex||instances!=1||count%3||upload.bytes%state.width)continue;
        if(rule.first>=0?relative!=rule.first:(relative||uint64_t(count)*state.width!=upload.bytes))continue;
        if(rule.count>=0&&count!=rule.count)continue;
-       accept(*skin,rule.profile,rule.slot,conflict);
+       accept(*skin,rule.profile,rule.slot,relative,conflict);
       }
      }
      auto route=skinRoutes.find(hash);
      if(!baseVertex&&instances==1&&route!=skinRoutes.end()&&upload.bytes==uint64_t(route->second.total)*state.width){
       const auto& r=route->second;const auto sub=std::find(r.ranges.begin(),r.ranges.end(),std::make_pair(relative,count));
-      if(sub!=r.ranges.end())accept(compatibility,r.profile,unsigned(sub-r.ranges.begin()),compatConflict);
+      if(sub!=r.ranges.end())accept(compatibility,r.profile,unsigned(sub-r.ranges.begin()),relative,compatConflict);
      }
     }
     if(tintOn.load(std::memory_order_relaxed)){

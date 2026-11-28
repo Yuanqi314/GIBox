@@ -222,6 +222,16 @@ static void tintTrial(){
   call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
   assert(call==expected&&updates==5&&dispatches==2&&T().lightMapDraws==i+1);
  }
+ // The same draw executor can select its model by a Vulkan shader and vertex upload without a PC IB rule.
+ T().iniSkinRules.clear();
+ const uint32_t code[]={0x07230203u,0x10000u,0u,8u,0u};const unsigned usedVertex=203;
+ const auto hash=ms::vkcap::crc32c(0,code,sizeof code);const auto command=reinterpret_cast<uintptr_t>(c);
+ T().resourceRules.push_back({{1,0,0,26226},{{{ms::vkcap::ResourceKind::Vertex,0,1},hash},{{ms::vkcap::ResourceKind::Shader,0,16},hash}}});
+ T().created(usedVertex,sizeof code,0x80);T().bound(usedVertex,111,0);T().mapped(111,0,sizeof code,code);state.vertex[1]=fake<VkBuffer>(usedVertex);
+ T().bindVertex(command,1,usedVertex,0);T().shaderCreated(210,code,sizeof code);
+ T().pipelineCreated(gpuHandle(p),gpuHandle(layout),{{16,210}});T().bindPipeline(command,false,gpuHandle(p));
+ call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);assert(call==expected&&T().lightMapDraws==3);
+ T().pipelineDestroyed(gpuHandle(p));call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);assert((call==std::vector<uintptr_t>{26226}));
  std::cout<<"Vulkan draw replacement: PASS (scoped textures, skinned vertex and index rebind, queue ownership, restoration and master switch)\n";
 }
 #endif
