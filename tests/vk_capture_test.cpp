@@ -41,6 +41,15 @@ int main(){
  {Tracker one;one.allForms=false;uint8_t h2[12];std::memcpy(h2,idx,12);one.created(7,12,0x40);one.bound(7,12,0);one.mapped(12,0,12,h2);one.indexBound(7,0);auto b=one.take();
   assert(b.size()==1&&b[0].hashes.size()==4);for(size_t i=0;i<4;i++)assert(b[0].hashes[i].value==hs[i].value&&b[0].hashes[i].variant==hs[i].variant);}
  assert(drawHash("5B4cDC9c")==0x5b4cdc9cu&&drawHash("00000000")==0u&&!drawHash("0xfedcba")&&!drawHash("-1234567"));
+ assert(paimonTintPart(paimonBodyHash,61224,0,26226,2,1,0,0)==0);
+ assert(paimonTintPart(paimonBodyHash,61224,26226,4386,2,1,0,0)==1);
+ assert(paimonTintPart(paimonBodyHash,61224,0,4386,2,1,0,0)<0&&paimonTintPart(paimonBodyHash,61224,26226,4386,4,1,0,0)<0);
+ assert(paimonTintPart(paimonBodyHash,61224,26226,4386,2,2,0,0)<0&&paimonTintPart(paimonBodyHash,61224,26226,4386,2,1,1,0)<0);
+ {uint32_t spirv[]={0x07230203,0x10000,0,8,0,(5u<<16)|5u,2,0x69614d5f,0x7865546e,0,(4u<<16)|71u,2,34,0,(4u<<16)|71u,2,33,0};
+  constexpr size_t words=sizeof spirv/sizeof spirv[0];
+  assert(mainTextureBinding(spirv,words)&&!mainTextureBinding(spirv,words-1));
+  spirv[words-1]=1;assert(!mainTextureBinding(spirv,words));
+  spirv[words-1]=0;spirv[15]=3;assert(!mainTextureBinding(spirv,words));}
  {Tracker probe;probe.allForms=false;probe.probeOnly=true;probe.setDrawHashes({hs[1].value});
   probe.created(1,64,0x40);probe.created(2,32,0x1);probe.bound(1,10,0);probe.bound(2,9,0);probe.mapped(9,0,32,staging);
   Copy upload{8,16,12};probe.copied(2,1,&upload,1);
@@ -78,5 +87,14 @@ int main(){
   auto stats=probe.drawStats();assert(stats.size()==4&&stats.front().hash==0&&stats.front().uploads==0&&stats.front().draws==0);
   for(size_t i=1;i<stats.size();++i){assert(stats[i].uploads==1&&stats[i].draws==(stats[i].hash==other?1:Tracker::maxDrawsPerHash));}
   assert(probe.stats().uploads==2&&probe.stats().drawProbeUploads==2&&probe.take().empty());
+  probe.allSkins=true;probe.skinMods={"First","Second"};probe.setSkinReplacement(true,true,{"Second"});
+  probe.skinRoutes[hs[1].value]={hs[1].value,6,0,{{0,3},{3,3}}};
+  probe.skinRoutes[other]={other,6,1,{{0,3},{3,3}}};
+  SkinHit a,b,shortDraw;
+  probe.drawIndexed(1,3,1,0,0,0,&a);probe.drawIndexed(2,3,1,3,0,0,&b);probe.drawIndexed(2,2,1,3,0,0,&shortDraw);
+  assert(a&&a.profile==0&&a.slot==0&&!probe.skinActive(a.profile));
+  assert(b&&b.profile==1&&b.slot==1&&probe.skinActive(b.profile)&&!shortDraw);
+  probe.skinRoutes[hs[2].value]={hs[2].value,6,1,{{0,3},{3,3}}};
+  SkinHit conflict;probe.drawIndexed(1,3,1,0,0,0,&conflict);assert(!conflict);
  }
  std::cout<<"Vulkan index-buffer hashes and draw probe: PASS (hash variants, staging and mapped buffers, targeted draws and offsets, overwrite and command buffer reuse)\n";}

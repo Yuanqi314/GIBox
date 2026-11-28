@@ -128,10 +128,27 @@ void bootStatus(const std::string& pkg,const std::string& state,const std::strin
 extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv* env,jclass,jstring jp,jstring jd,jbyteArray iconData){try{
  auto pkg=jstringValue(env,jp),priv=jstringValue(env,jd);auto icon=readSynthesisIcon(env,iconData);if(env->ExceptionCheck())return;ms::require(pkg=="com.miHoYo.Yuanshen"||pkg=="com.miHoYo.ys.bilibili"||pkg=="com.miHoYo.GenshinImpact","不支持的包名");if(started.exchange(true))return;
  // Install before device creation when either hash capture or the targeted draw probe was requested at startup.
- {auto mode=ms::vkcap::Mode::Off;std::vector<uint32_t> probes;
+ {auto mode=ms::vkcap::Mode::Off;std::vector<uint32_t> probes;std::vector<std::string> selected;bool paimonTint=false,master=false,skinned=false,sharedSkins=false;std::string paimonTextureMod;
   try{auto c=ms::JsonParser(ms::text(sharedDir(pkg)+"/control.json")).parse();const auto& t=c.at("textureMods");
    if(t.type==ms::Json::Object){auto flag=[&](const char* k){return t.at(k).type==ms::Json::Bool&&t.at(k).boolean;};
     mode=ms::vkcap::modeFrom(t.at("hashMode").type==ms::Json::String?t.at("hashMode").string:std::string(),flag("ibHash"),flag("capture"));
+    master=c.at("enabled").type==ms::Json::Bool&&c.at("enabled").boolean;
+    for(const auto& m:c.at("selected").array)if(m.type==ms::Json::String&&selected.size()<128)selected.push_back(m.string);
+    if(flag("vulkanSkinModels"))try{
+     for(const auto& note:ms::vkhook::prepareVulkanSkins(sharedDir(pkg),selected,probes))bootLog(pkg,"vulkan-skin-model",note);
+     sharedSkins=!ms::vkcap::tracker().skinMods.empty();
+    }catch(const std::exception& e){bootLog(pkg,"vulkan-skin-disabled",e.what());}
+    paimonTint=flag("vulkanPaimonTint");
+    const auto& skin=t.at("vulkanPaimonModel");skinned=skin.type==ms::Json::String&&!skin.string.empty();
+    const auto& preset=skinned?skin:t.at("vulkanPaimonTextures");
+    if(!sharedSkins&&preset.type==ms::Json::String&&!preset.string.empty()){
+     const auto& name=preset.string;
+     if(name.size()<=128&&name!="."&&name!=".."&&name.find_first_of("/\\")==name.npos){
+      try{ms::vkhook::preparePaimonTextures(sharedDir(pkg)+"/models/"+name,skinned);paimonTextureMod=name;}
+      catch(const std::exception& e){paimonTint=false;bootLog(pkg,"vulkan-texture-disabled",e.what());}
+     }else{paimonTint=false;bootLog(pkg,"vulkan-texture-disabled","派蒙贴图 MOD 目录无效");}
+    }
+    if(!sharedSkins&&(paimonTint||!paimonTextureMod.empty()))probes.push_back(ms::vkcap::paimonBodyHash);
     size_t invalid=0,excess=0;
     auto add=[&](const ms::Json& value){auto hash=value.type==ms::Json::String?ms::vkcap::drawHash(value.string):std::nullopt;
      if(!hash){++invalid;return;}if(std::find(probes.begin(),probes.end(),*hash)!=probes.end())return;
@@ -145,8 +162,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv*
    auto& tracker=ms::vkcap::tracker();tracker.allForms=mode==ms::vkcap::Mode::Full;
    tracker.probeOnly=mode==ms::vkcap::Mode::Off;
    tracker.setDrawHashes(probes);
+   tracker.tintHooks=sharedSkins||paimonTint||!paimonTextureMod.empty();tracker.paimonTextureMod=paimonTextureMod;
+   tracker.allSkins=sharedSkins;tracker.skinnedModel=sharedSkins||(skinned&&!paimonTextureMod.empty());
+   if(sharedSkins)tracker.setSkinReplacement(master,true,selected);else tracker.setPaimonReplacement(master,paimonTint,paimonTextureMod);
    std::string detail;bool ok=false;try{ok=ms::vkhook::install(detail);}catch(const std::exception& e){detail=e.what();}
-   bootLog(pkg,ok?"vulkan-capture":"vulkan-capture-disabled",ok?"已安装："+detail+"（索引采集模式 "+ms::vkcap::modeName(mode)+(probes.empty()?"":"，绘制探针目标 "+std::to_string(probes.size())+" 个")+"）":detail);
+   bootLog(pkg,ok?"vulkan-capture":"vulkan-capture-disabled",ok?"已安装："+detail+"（索引采集模式 "+ms::vkcap::modeName(mode)+(probes.empty()?"":"，绘制探针目标 "+std::to_string(probes.size())+" 个")+(sharedSkins?"，Vulkan 骨骼部件 "+std::to_string(tracker.skinMods.size())+" 个":!paimonTextureMod.empty()?(skinned?"，派蒙 Vulkan 骨骼模型 ":"，派蒙贴图来源 ")+paimonTextureMod:paimonTint?"，派蒙染色试验已配置":"")+"）":detail);
   }}
  std::thread([pkg,priv,icon=std::move(icon)]() mutable{try{bootStatus(pkg,"waiting","等待 libyuanshen.so");Image image;for(unsigned n=0;n<480&&!image.base;n++){dl_iterate_phdr(findImage,&image);if(!image.base)std::this_thread::sleep_for(std::chrono::milliseconds(500));}ms::require(image.base!=0,"等待 libyuanshen.so 加载超时");
  auto actual=ms::loadedBuildId(image.base,image.ph,image.count,sizeof(ElfW(Phdr)));if(!ms::abi::select(actual)){bootStatus(pkg,"buildid-mismatch","实际 Build ID："+actual);return;}

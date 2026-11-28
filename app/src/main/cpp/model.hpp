@@ -374,6 +374,44 @@ inline std::set<std::string> materialsDrawn(const std::vector<PartFile>& parts,c
 // ...and the textures swapped onto the game's renderers, which every assignment uses.
 inline std::set<std::string> materialsNeeded(const ModelFile& m,const Assignment& a){auto out=materialsDrawn(m.parts,a);for(auto& x:m.swaps)out.insert(x.material);return out;}
 
+// The verified Vulkan skinning shader takes the same weight and joint layout already produced by the
+// converter. The two vertex streams follow the captured Unity Vulkan layouts, not the imported DX bindings.
+struct VulkanSkinPayload {
+ uint32_t vertices=0,indexBytes=2;Bytes rest,weights,attributes,indices;std::vector<Submesh> slots{Submesh{},Submesh{}};
+};
+inline VulkanSkinPayload packVulkanSkin(const PartFile& part,const Assignment& defaults,unsigned slots,const std::vector<int>& mapping={}){
+ const auto& g=part.geo;const auto n=g.n;
+ require(n&&n<=model::maxVertices&&slots&&slots<=model::maxSlot,"Vulkan：网格或槽位数超限");
+ const Bytes *color=nullptr,*tangent=nullptr,*uv2=nullptr;
+ for(const auto& c:part.channels){if(c.first==".colors")color=&c.second;if(c.first==".tangents")tangent=&c.second;if(c.first==".uv2")uv2=&c.second;}
+ require(color&&tangent&&color->size()==size_t(n)*4&&tangent->size()==size_t(n)*16&&(!uv2||uv2->size()==size_t(n)*8)&&
+  g.positions.size()==size_t(n)*12&&g.normals.size()==size_t(n)*12&&g.uvs.size()==size_t(n)*8&&part.weights.size()==size_t(n)*32,
+  "Vulkan：缺少原着色器需要的顶点通道");
+ VulkanSkinPayload out;out.vertices=n;out.slots.resize(slots);out.indexBytes=n>65535?4:2;out.rest.resize(size_t(n)*40);out.attributes.resize(size_t(n)*20);
+ if(mapping.empty())out.weights=part.weights;else{Skin skin{part.weights,part.used};remap(skin,mapping);out.weights=std::move(skin.data);}
+ for(size_t i=0;i<n;i++){
+  auto* p=out.rest.data()+40*i;std::memcpy(p,g.pos()+12*i,12);std::memcpy(p+12,g.norm()+12*i,12);std::memcpy(p+24,tangent->data()+16*i,16);
+  auto* a=out.attributes.data()+20*i;std::memcpy(a,color->data()+4*i,4);std::memcpy(a+4,g.uv()+8*i,8);if(uv2)std::memcpy(a+12,uv2->data()+8*i,8);
+ }
+ std::vector<Submesh> subs;std::vector<Material> rows;activeDraws(part.draws,defaults,subs,rows);
+ for(size_t slot=0;slot<out.slots.size();slot++){
+  auto& range=out.slots[slot];range.start=unsigned(out.indices.size()/out.indexBytes);
+  for(size_t i=0;i<subs.size();i++)if(rows[i].slot==slot){const auto& sub=subs[i];require(sub.start<=g.ni&&sub.count<=g.ni-sub.start,"Vulkan：绘制范围无效");
+   for(uint32_t j=0;j<sub.count;j++){const auto v=u32(g.idx()+4ull*(sub.start+j));require(v<n,"Vulkan：索引越界");for(unsigned b=0;b<out.indexBytes;b++)out.indices.push_back(uint8_t(v>>(b*8)));}
+   range.count+=sub.count;}
+  require(range.count%3==0,"Vulkan：绘制必须为三角形");
+ }
+ require(!out.indices.empty(),"Vulkan：当前款式没有绘制命令");
+ return out;
+}
+inline VulkanSkinPayload packPaimonSkin(const PartFile& part,const Assignment& defaults){
+ require(part.sourceBones.size()==72&&part.sourceBinds.size()==72*64,"Vulkan 派蒙：缺少原版 72 骨骼");
+ uint32_t names=0;for(const auto& b:part.sourceBones)names=crc32(reinterpret_cast<const uint8_t*>(b.c_str()),b.size()+1,names);
+ // Hashes derived from assets/offline-skeletons.json, NPC_Kanban_Paimon/Body (8397 vertices).
+ require(names==0x1a5d6c7fu&&crc32(part.sourceBinds.data(),part.sourceBinds.size())==0x298569b2u,"Vulkan 派蒙：骨骼顺序或绑定姿势与已验明的原版调色板不同");
+ return packVulkanSkin(part,defaults,2);
+}
+
 // ---------------------------------------------------------------- learned.json (runtime-written)
 struct Learned {unsigned id=0;std::map<std::string,Fingerprint> targets;};
 inline Learned learnedOf(const Json& j){Learned l;require(j.type==Json::Object&&j.at("format").type==Json::String&&j.at("format").string=="gibox-learned","learned.json：格式不符");

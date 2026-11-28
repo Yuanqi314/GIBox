@@ -59,7 +59,7 @@ struct KeyPress {long long seq=0;size_t file=0;std::string section;bool back=fal
 // full / migrate, test rounds.
 // auto (0.7.60): the game's own per-renderer instance is written in place (its effects keep running on it); a loaded asset
 // or a material another renderer shows is copied first, and the game's instance made from that copy is followed in place.
-struct TexModControl {std::string strategy="auto",lod="full";bool capture=false;vkcap::Mode hash=vkcap::Mode::Off;long long testRequest=0;std::vector<std::string> testStrategies{"auto","direct","clone"};int observeMs=4000;};
+struct TexModControl {std::string strategy="auto",lod="full",paimonTextureMod,paimonMeshMod;bool capture=false,paimonTint=false,sharedSkins=false;vkcap::Mode hash=vkcap::Mode::Off;long long testRequest=0;std::vector<std::string> testStrategies{"auto","direct","clone"};int observeMs=4000;};
 struct ControlState {std::string loadingFit="original";cameraFade::Mode cameraFadeMode=cameraFade::Mode::Original;TexModControl tex;Experiments exp;bool sharedChoices=false,enabled=false,lodPin=true,hideUid=false,npcModels=false,synthesisButton=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;std::map<std::string,std::vector<KeyPress>> keys;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"control.json 不是对象");ControlState s;
@@ -90,6 +90,10 @@ ControlState parseControl(const std::string& raw){
  s.logLevel=logThreshold(c);
  const auto& t=c.at("textureMods");if(t.type==Json::Object){auto text=[&](const char* k,const char* fallback,std::initializer_list<const char*> allowed){const auto& v=t.at(k);if(v.type!=Json::String)return std::string(fallback);for(auto* a:allowed)if(v.string==a)return v.string;return std::string(fallback);};
   s.tex.hash=vkcap::modeFrom(t.at("hashMode").type==Json::String?t.at("hashMode").string:std::string(),t.at("ibHash").type==Json::Bool&&t.at("ibHash").boolean,t.at("capture").type==Json::Bool&&t.at("capture").boolean);s.tex.capture=s.tex.hash>=vkcap::Mode::Collect;s.tex.strategy=text("strategy","auto",{"diagnose","auto","direct","clone"});s.tex.lod=text("lod","full",{"full","migrate"});s.tex.testRequest=integerOf(t.at("testRequest"));require(s.tex.testRequest>=0,"textureMods.testRequest");
+  s.tex.paimonTint=t.at("vulkanPaimonTint").type==Json::Bool&&t.at("vulkanPaimonTint").boolean;
+  if(t.at("vulkanPaimonTextures").type==Json::String)s.tex.paimonTextureMod=t.at("vulkanPaimonTextures").string;
+  if(t.at("vulkanPaimonModel").type==Json::String)s.tex.paimonMeshMod=t.at("vulkanPaimonModel").string;
+  s.tex.sharedSkins=t.at("vulkanSkinModels").type==Json::Bool&&t.at("vulkanSkinModels").boolean;
   const auto& ts=t.at("testStrategies");if(ts.type==Json::Array){s.tex.testStrategies.clear();for(auto& v:ts.array)if(v.type==Json::String&&(v.string=="auto"||v.string=="direct"||v.string=="clone")&&s.tex.testStrategies.size()<4)s.tex.testStrategies.push_back(v.string);if(s.tex.testStrategies.empty())s.tex.testStrategies={"auto","direct","clone"};}
   auto ms=integerOf(t.at("observeMs"));if(ms)s.tex.observeMs=int(std::min<long long>(60000,std::max<long long>(1000,ms)));}
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
@@ -1185,7 +1189,20 @@ struct Runtime::Impl {
   }
   if(now>=drawProbeReportAt){drawProbeReportAt=now+10000;auto stats=capture.stats();std::string targets;
    for(const auto& p:capture.drawStats()){targets+=(targets.empty()?"":"，")+hex8(p.hash)+"：上传 "+std::to_string(p.uploads)+" / 绘制样本 "+std::to_string(p.draws);}
-   log("vulkan-draw-status","索引上传 "+std::to_string(stats.uploads)+" 次，哈希命中 "+std::to_string(stats.drawProbeUploads)+" 次，vkCmdDrawIndexed "+std::to_string(stats.indexedDraws)+" 次；"+targets);}
+   log("vulkan-draw-status","索引上传 "+std::to_string(stats.uploads)+" 次，哈希命中 "+std::to_string(stats.drawProbeUploads)+" 次，vkCmdDrawIndexed "+std::to_string(stats.indexedDraws)+" 次；"+targets);
+   if(capture.allSkins){auto upload=capture.textureUpload.load(std::memory_order_relaxed);
+    std::map<std::string,uint64_t> draws;for(size_t i=0;i<capture.skinMods.size();i++)draws[capture.skinMods[i]]+=capture.profileDraws[i].load(std::memory_order_relaxed);
+    std::string models;for(const auto& entry:draws)models+=(models.empty()?"；":"，")+entry.first+" "+std::to_string(entry.second);
+    log("vulkan-skin-status",std::string(capture.activeSkins.load(std::memory_order_relaxed)?"开启":"关闭")+
+     (upload==1?"，资源已排入队列":upload<0?"，资源准备失败":"，等待上传")+"，识别 "+std::to_string(capture.skinMatches.load(std::memory_order_relaxed))+
+     "，蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed))+"，换绑 "+std::to_string(capture.sharedDraws.load(std::memory_order_relaxed))+
+     "，保持原样 "+std::to_string(capture.sharedMisses.load(std::memory_order_relaxed))+models);
+   }else if(capture.tintHooks){std::string line=capture.tintOn.load(std::memory_order_relaxed)?"开启":"关闭";const bool textured=!capture.paimonTextureMod.empty();
+    if(textured){const int upload=capture.textureUpload.load(std::memory_order_relaxed);line+=upload==1?"，贴图已排入队列":upload<0?"，贴图准备失败":"，等待贴图上传";}
+    for(size_t i=0;i<2;i++)line+=(textured?(i==0?"，槽 0":"，槽 1"):(i==0?"，绿":"，紫"))+std::string("：换绑 ")+std::to_string(capture.tintDraws[i].load(std::memory_order_relaxed))+"，保持原样 "+std::to_string(capture.tintMisses[i].load(std::memory_order_relaxed));
+    if(capture.skinnedModel)line+="，Vulkan 蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed))+" 次";
+    log(capture.skinnedModel?"vulkan-skin-status":textured?"vulkan-texture-status":"vulkan-tint-status",line);
+   }}
  }
  static uint64_t meshIndices(const std::vector<std::pair<uint32_t,uint32_t>>& subs){uint64_t n=0;for(auto& s:subs)n=std::max<uint64_t>(n,uint64_t(s.first)+s.second);return n;}
  std::string ibDescribe(const vkcap::Blob& b){std::string head;for(auto v:b.head16)head+=(head.empty()?"":" ")+std::to_string(v);
@@ -1827,7 +1844,8 @@ struct Runtime::Impl {
  // the order changed (discover); parts only one of them replaces are shown from each.
  std::vector<const ModelInfo*> chooseModels(){
   std::vector<const ModelInfo*> out;std::set<std::string> taken;
-  for(auto& n:ctl.selected)for(auto& m:models)if(m.name==n&&!(ch.entity&&loginOnly(m.sceneTargets))&&taken.insert(m.path).second){auto v=ctl.variables.find(m.name);
+  for(auto& n:ctl.selected)for(auto& m:models)if(m.name==n&&!(ctl.tex.sharedSkins&&vkcap::tracker().ownsSkin(n))&&
+    (vkcap::tracker().allSkins||n!=ctl.tex.paimonMeshMod)&&!(ch.entity&&loginOnly(m.sceneTargets))&&taken.insert(m.path).second){auto v=ctl.variables.find(m.name);
    if(drawn(m.replaceWhen,pick(m.variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second)))out.push_back(&m);}
   return out;}
  // A selected model left out only because its own switch (replaceWhen) is off.
@@ -3274,6 +3292,9 @@ struct Runtime::Impl {
   if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel||c->keys!=ctl.keys);
    if(!(c->exp==ctl.exp))log("experiments",c->exp.text());
    ctl=*c;synthesis.setEnabled(ctl.synthesisButton);
+   auto& capture=vkcap::tracker();
+   if(capture.allSkins)capture.setSkinReplacement(ctl.enabled,ctl.tex.sharedSkins,ctl.selected);
+   else capture.setPaimonReplacement(ctl.enabled,ctl.tex.paimonTint,capture.skinnedModel?ctl.tex.paimonMeshMod:ctl.tex.paimonTextureMod);
    if(!diagnosticOnly){failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();bindingRejected.clear();bindingStamp.clear();}}
 
   if(!cerr.empty())log("control-error",cerr);}
