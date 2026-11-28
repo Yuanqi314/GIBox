@@ -115,6 +115,7 @@ struct SkinHit {
 };
 struct SkinRoute {uint32_t hash=0,total=0;unsigned profile=0;std::vector<std::pair<uint32_t,uint32_t>> ranges;bool pcRule=false;};
 struct IniSkinRule {unsigned profile=0,slot=0;int64_t first=-1,count=-1;};
+struct SkinLayoutMiss {unsigned profile;uintptr_t pipeline;std::string details;};
 enum class SkinMiss : unsigned {DrawRange,Ambiguous,Graphics,SkinOutput,Bones,Resources,Pose,VertexBindings,Material,ComputeDescriptors,Total};
 using SkinChoices=std::map<std::string,std::map<std::string,int>>;
 inline constexpr uint32_t paimonBodyHash=0x5b4cdc9cu;
@@ -157,6 +158,7 @@ class Tracker {
  std::mutex m;std::unordered_map<uint64_t,Buffer> buffers;std::unordered_map<uint64_t,Mapping> maps;std::vector<Blob> out;Stats st;uint64_t seq=0;
  std::unordered_map<uintptr_t,IndexBinding> drawBindings;
  std::map<uint32_t,Probe> probes; // keys set once before the loader hooks are installed
+ std::vector<SkinLayoutMiss> skinLayoutMisses;
  std::unordered_set<uint64_t> pcIndexBytes16,pcIndexBytes32;
  uint64_t bufferGeneration=0;
  static constexpr uint32_t indexUsage=0x40,transferSrc=0x1;static constexpr size_t maxBlob=64u<<20,maxQueue=65536;
@@ -251,6 +253,14 @@ public:
  }
  bool skinActive(unsigned profile)const{return profile<64&&(activeSkins.load(std::memory_order_relaxed)&(uint64_t(1)<<profile));}
  void noteSkinMiss(SkinMiss why){skinMisses[unsigned(why)].fetch_add(1,std::memory_order_relaxed);}
+ void noteSkinLayout(unsigned profile,uintptr_t pipeline,const char* details){
+  std::lock_guard<std::mutex> lock(m);
+  if(skinLayoutMisses.size()<48)skinLayoutMisses.push_back({profile,pipeline,details});
+ }
+ std::vector<SkinLayoutMiss> takeSkinLayouts(){
+  std::lock_guard<std::mutex> lock(m);
+  std::vector<SkinLayoutMiss> out;out.swap(skinLayoutMisses);return out;
+ }
  void setSkinChoices(const SkinChoices& choices){std::atomic_store(&skinChoices,std::make_shared<const SkinChoices>(choices));}
  bool skinBackendReady()const{return enabled&&allSkins&&textureUpload.load(std::memory_order_relaxed)==1&&indexedDrawSeen.load(std::memory_order_relaxed);}
  bool hasSkin(const std::string& name)const{return std::find(skinMods.begin(),skinMods.end(),name)!=skinMods.end();}

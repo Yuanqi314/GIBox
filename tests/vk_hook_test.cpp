@@ -35,19 +35,36 @@ static void pcRouteTrial(){
  assert(ms::vkhook::pcSkinHashes(part,legacy,mesh,device,db,10000107).empty());
 }
 static void vertexLayoutTrial(){
- VkVertexInputBindingDescription binding{0,40,VK_VERTEX_INPUT_RATE_VERTEX};
- VkVertexInputAttributeDescription position{0,0,VK_FORMAT_R32G32B32_SFLOAT,0};
+ std::array<VkVertexInputBindingDescription,3> bindings{{{0,40,VK_VERTEX_INPUT_RATE_VERTEX},
+  {1,12,VK_VERTEX_INPUT_RATE_VERTEX},{2,0,VK_VERTEX_INPUT_RATE_VERTEX}}};
+ std::array<VkVertexInputAttributeDescription,5> attributes{{{0,0,VK_FORMAT_R32G32B32_SFLOAT,0},
+  {6,1,VK_FORMAT_R8G8B8A8_UNORM,0},{2,1,VK_FORMAT_R32G32_SFLOAT,4},
+  {3,1,VK_FORMAT_R32G32_SFLOAT,4},{4,2,VK_FORMAT_R8G8B8A8_UNORM,12}}};
  VkPipelineVertexInputStateCreateInfo vertex{};
- vertex.vertexBindingDescriptionCount=1;vertex.pVertexBindingDescriptions=&binding;
- vertex.vertexAttributeDescriptionCount=1;vertex.pVertexAttributeDescriptions=&position;
+ vertex.vertexBindingDescriptionCount=bindings.size();vertex.pVertexBindingDescriptions=bindings.data();
+ vertex.vertexAttributeDescriptionCount=attributes.size();vertex.pVertexAttributeDescriptions=attributes.data();
  VkPipelineInputAssemblyStateCreateInfo assembly{};assembly.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
  VkGraphicsPipelineCreateInfo pipeline{};pipeline.pVertexInputState=&vertex;pipeline.pInputAssemblyState=&assembly;
- assert(skinVertexLayout(pipeline,0,nullptr,true)==1);
- binding.stride=32;assert(!skinVertexLayout(pipeline,0,nullptr,true));binding.stride=40;
- position.offset=12;assert(!skinVertexLayout(pipeline,0,nullptr,true));position.offset=0;
+ auto packed=skinDrawLayout(pipeline,nullptr);
+ assert(packed.bindings==3&&packed.attributes.stride==12&&!packed.attributes.packed());
+ ms::VulkanSkinPayload mesh;mesh.vertices=2;
+ for(unsigned b=0;b<40;b++)mesh.attributes.push_back(uint8_t(b+1));
+ auto repacked=packSkinAttributes(mesh,packed.attributes);
+ assert(repacked.size()==24&&repacked[0]==1&&repacked[11]==12&&repacked[12]==21&&repacked[23]==32);
+ bindings[1].stride=24;
+ auto padded=skinDrawLayout(pipeline,nullptr);
+ assert(padded.bindings==3&&padded.attributes.stride==24&&packSkinAttributes(mesh,padded.attributes)[23]==0);
+ bindings[1].stride=8;attributes[1]={2,1,VK_FORMAT_R32G32_SFLOAT,0};vertex.vertexAttributeDescriptionCount=2;
+ std::array<uint8_t,32> semantics{};semantics[2]=5;
+ auto uvOnly=skinDrawLayout(pipeline,&semantics);
+ assert(uvOnly.bindings==3&&uvOnly.attributes.stride==8&&packSkinAttributes(mesh,uvOnly.attributes)[8]==25);
+ assert(!skinDrawLayout(pipeline,nullptr).bindings);
+ bindings[1].stride=12;attributes[1]={6,1,VK_FORMAT_R8G8B8A8_UNORM,0};vertex.vertexAttributeDescriptionCount=attributes.size();
+ bindings[0].stride=32;assert(!skinDrawLayout(pipeline,nullptr).bindings);bindings[0].stride=40;
+ attributes[0].offset=12;assert(!skinDrawLayout(pipeline,nullptr).bindings);attributes[0].offset=0;
  const VkDynamicState topology=VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY;
  VkPipelineDynamicStateCreateInfo dynamic{};dynamic.dynamicStateCount=1;dynamic.pDynamicStates=&topology;
- pipeline.pDynamicState=&dynamic;assert(!skinVertexLayout(pipeline,0,nullptr,true));pipeline.pDynamicState=nullptr;
+ pipeline.pDynamicState=&dynamic;assert(!skinDrawLayout(pipeline,nullptr).bindings);pipeline.pDynamicState=nullptr;
  VkPipelineShaderStageCreateInfo stage{};stage.stage=VK_SHADER_STAGE_VERTEX_BIT;stage.module=fake<VkShaderModule>(71);stage.pName="main";
  pipeline.stageCount=1;pipeline.pStages=&stage;
  const auto device=fake<VkDevice>(72);VkPipeline handle{};
@@ -57,7 +74,7 @@ static void vertexLayoutTrial(){
  T().allSkins=true;
  assert(tintOnCreateGraphicsPipelines(device,{},1,&pipeline,nullptr,&handle)==VK_SUCCESS);
  auto& tracked=tintState().devices.at(device);
- assert(tracked.skin.graphics.at(handle)==1&&tracked.pipelines.empty());
+ assert(tracked.skin.drawLayouts.at(handle).bindings==3&&tracked.pipelines.empty());
  tintState().devices.erase(device);T().allSkins=false;
 }
 static void tintTrial(){
@@ -127,6 +144,7 @@ static void tintTrial(){
  assert((call==std::vector<uintptr_t>{32,107,106,120,101,102,5}));
  // Different mesh profiles learn independent input buffers from the confirmed graphics draw, not from a name or shape alone.
  T().allSkins=true;T().skinMods={"Alpha","Beta"};T().setSkinReplacement(true,true,{"Alpha","Beta"});
+ skin.drawLayouts[p]={7,{20,{}}};
  sharedSkins.resize(2);skin.profiles.resize(2);
  for(unsigned i=0;i<2;i++){
   auto& profile=sharedSkins[i];profile.originalVertices=123+i;profile.bones=10+i;profile.mesh.slots[0]={6+i,120+i*3};
@@ -175,19 +193,19 @@ static void tintTrial(){
  sharedSkinDispatch(d,c,state,dev,shortJob,(seen.vertices+63)/64);
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
  assert((call==std::vector<uintptr_t>{26226})&&dispatches==1);
- profile.rigid=true;skin.graphics[p]=2;state.vertex[0]=fake<VkBuffer>(800);
+ profile.rigid=true;skin.drawLayouts[p].bindings=3;state.vertex[0]=fake<VkBuffer>(800);
  gpu.input[Rest].buffer=fake<VkBuffer>(801);
  upCmdBindVertexBuffers=+[](VkCommandBuffer,uint32_t,uint32_t n,const VkBuffer* buffers,const VkDeviceSize*){
   assert(n==2);call.push_back(reinterpret_cast<uintptr_t>(buffers[0]));};
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
  assert((call==std::vector<uintptr_t>{801,2000,14,23,101,800})&&dispatches==1);
  // An original depth or material pass without a supported texture descriptor can still use the skinned streams.
- profile.rigid=false;skin.graphics[p]=3;state.vertex[0]=output;state.set={};dev.pipelines.erase(p);
+ profile.rigid=false;skin.drawLayouts[p].bindings=5;state.vertex[0]=output;state.set={};dev.pipelines.erase(p);
  sharedSkinDispatch(d,c,state,dev,job,(seen.vertices+63)/64);
- upCmdBindVertexBuffers=+[](VkCommandBuffer,uint32_t,uint32_t n,const VkBuffer* buffers,const VkDeviceSize*){
-  assert(n==3);call.push_back(reinterpret_cast<uintptr_t>(buffers[0]));};
+ upCmdBindVertexBuffers=+[](VkCommandBuffer,uint32_t first,uint32_t n,const VkBuffer* buffers,const VkDeviceSize*){
+  assert(n==1&&(first==0||first==2));call.push_back(reinterpret_cast<uintptr_t>(buffers[0]));};
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
- assert((call==std::vector<uintptr_t>{204,2000,14,23,101,200})&&dispatches==2);
+ assert((call==std::vector<uintptr_t>{204,204,2000,14,23,101,200,201})&&dispatches==2);
  std::cout<<"Vulkan draw replacement: PASS (scoped textures, skinned vertex and index rebind, queue ownership, restoration and master switch)\n";
 }
 #endif

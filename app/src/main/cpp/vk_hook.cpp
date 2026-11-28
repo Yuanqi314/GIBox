@@ -94,6 +94,21 @@ SKIN_HOOKS(UPLOAD_DECLARE)
 constexpr size_t tintBindings=12,tintSetLimit=256;
 using TintViews=std::array<VkImageView,tintBindings>;
 using SkinTextureSlots=std::array<unsigned,3>;
+constexpr unsigned maxSkinVertexBindings=8;
+struct SkinAttributeLayout {
+ unsigned stride=0;
+ std::array<uint8_t,32> bytes{}; // 0 is unused, otherwise the byte offset in the MOD's attribute stream plus one
+ bool operator<(const SkinAttributeLayout& other)const{return std::tie(stride,bytes)<std::tie(other.stride,other.bytes);}
+ bool packed()const{
+  if(stride!=20)return false;
+  for(unsigned i=0;i<stride;i++)if(bytes[i]&&bytes[i]!=i+1)return false;
+  return true;
+ }
+};
+struct SkinDrawLayout {
+ unsigned bindings=0; // bitmask for streams that need rebinding, excluding the game's constant streams
+ SkinAttributeLayout attributes;
+};
 struct TintImg {VkImageViewCreateInfo info{};uint64_t generation=0;std::array<VkImageView,2> colored{};};
 struct TintSet {
  VkDescriptorPool pool{};uint32_t shape=0,written=0;
@@ -104,7 +119,7 @@ struct TintSet {
 struct TintCmd {
  VkCommandPool pool{};VkPipeline pipeline{};VkPipelineLayout layout{};VkDescriptorSet set{};
  VkPipeline compute{};VkPipelineLayout computeLayout{};std::array<VkDescriptorSet,2> computeSets{};
- std::array<VkBuffer,3> vertex{};std::array<VkDeviceSize,3> vertexOffset{};
+ std::array<VkBuffer,maxSkinVertexBindings> vertex{};std::array<VkDeviceSize,maxSkinVertexBindings> vertexOffset{};
  VkBuffer index{};VkDeviceSize indexOffset=0;VkIndexType indexType=VK_INDEX_TYPE_MAX_ENUM;
  std::set<VkBuffer> skinProduced{};
  std::map<std::pair<VkBuffer,unsigned>,uint64_t> sharedProduced{};
@@ -129,6 +144,7 @@ struct SharedSkin {
 };
 struct SharedGpuSkin {
  std::array<SkinBuffer,SkinStreamCount> input{};VkDescriptorSet count{};bool ready=false;
+ std::map<SkinAttributeLayout,SkinBuffer> attributeBuffers;
  std::shared_ptr<const ms::vkcap::SkinChoices> choices;ms::Assignment assignment;
 };
 struct SkinSource {VkBuffer rest{},weights{};unsigned vertices=0,bones=0;uint64_t revision=0;};
@@ -140,6 +156,9 @@ struct SkinDevice {
  std::map<VkShaderModule,uint32_t> vertexCodes;
  std::map<VkShaderModule,std::array<uint8_t,32>> vertexSemantics;
  std::map<VkPipeline,unsigned> graphics;
+ std::map<VkPipeline,SkinDrawLayout> drawLayouts;
+ std::map<VkPipeline,std::string> rejectedLayouts;
+ std::map<VkPipeline,uint64_t> layoutSamples;
  std::set<VkPipelineLayout> layouts;
  std::map<VkPipeline,VkPipelineLayout> compute;
  std::map<VkDescriptorSet,SkinSet> sets;
@@ -257,13 +276,29 @@ bool prepareSkinBuffers(VkDevice d,TintDevice& dev){
  for(size_t i=0;i<sharedSkins.size();i++)skin.profiles[i].ready=prepareSkinInput(d,dev.upload,sharedSkins[i].mesh,skin.profiles[i].input,sharedSkins[i].rigid);
  return std::any_of(skin.profiles.begin(),skin.profiles.end(),[](const auto& p){return p.ready;});
 }
+ms::Bytes packSkinAttributes(const ms::VulkanSkinPayload& mesh,const SkinAttributeLayout& layout){
+ ms::Bytes bytes(size_t(mesh.vertices)*layout.stride);
+ for(size_t i=0;i<mesh.vertices;i++)for(unsigned b=0;b<layout.stride;b++)
+  if(layout.bytes[b])bytes[i*layout.stride+b]=mesh.attributes[i*20+layout.bytes[b]-1];
+ return bytes;
+}
+VkBuffer skinAttributes(VkDevice device,const TextureUpload& upload,SharedGpuSkin& gpu,const ms::VulkanSkinPayload& mesh,const SkinAttributeLayout& layout){
+ if(layout.packed())return gpu.input[Attributes].buffer;
+ auto found=gpu.attributeBuffers.find(layout);
+ if(found!=gpu.attributeBuffers.end())return found->second.buffer;
+ if(gpu.attributeBuffers.size()>=8||mesh.attributes.size()!=size_t(mesh.vertices)*20)return {};
+ auto bytes=packSkinAttributes(mesh,layout);
+ auto& b=gpu.attributeBuffers[layout];
+ makeSkinBuffer(device,upload,b,bytes.size(),VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,bytes.data());
+ return b.buffer;
+}
 void releaseSkin(VkDevice d,SkinDevice& s){
  if(s.pool)tintDestroyDescriptorPool.load()(d,s.pool,nullptr);
  if(s.storage)tintDestroyDescriptorSetLayout.load()(d,s.storage,nullptr);
  if(s.uniform)tintDestroyDescriptorSetLayout.load()(d,s.uniform,nullptr);
  for(auto& b:s.input)releaseSkinBuffer(d,b);
  for(auto& kv:s.output)releaseSkinBuffer(d,kv.second.buffer);
- for(auto& p:s.profiles)for(auto& b:p.input)releaseSkinBuffer(d,b);
+ for(auto& p:s.profiles){for(auto& b:p.input)releaseSkinBuffer(d,b);for(auto& entry:p.attributeBuffers)releaseSkinBuffer(d,entry.second);}
  for(auto& kv:s.sharedOutput)releaseSkinBuffer(d,kv.second.buffer);
  for(auto& b:s.retired)releaseSkinBuffer(d,b);
  s.pool={};s.storage={};s.uniform={};s.ready=false;
@@ -452,16 +487,22 @@ std::array<uint8_t,32> skinSemantics(const uint32_t* code,size_t n){
 void tintOnDestroyShaderModule(VkDevice d,VkShaderModule shader,const VkAllocationCallbacks* a){
  tintObserve([&](auto& s){auto& dev=s.devices[d];dev.mainTextures.erase(shader);dev.skin.kernels.erase(shader);dev.skin.vertexCodes.erase(shader);dev.skin.vertexSemantics.erase(shader);});tintDestroyShaderModule.load()(d,shader,a);
 }
-unsigned skinVertexLayout(const VkGraphicsPipelineCreateInfo& p,uint32_t code,const std::array<uint8_t,32>* semantics=nullptr,bool shared=false){
- const auto* v=p.pVertexInputState;if(!v)return 0;
- const unsigned n=shared||semantics?v->vertexBindingDescriptionCount:code==0xad6ddb74u?3:2;
- if((!shared&&p.pNext)||!p.pInputAssemblyState||p.pInputAssemblyState->topology!=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST||p.pInputAssemblyState->primitiveRestartEnable||
-  n<(shared?1u:2u)||n>3||v->pNext||v->vertexBindingDescriptionCount!=n||!v->pVertexBindingDescriptions||!v->pVertexAttributeDescriptions)return 0;
+bool fixedSkinPipeline(const VkGraphicsPipelineCreateInfo& p){
+ const auto* v=p.pVertexInputState;
+ if(!v||v->pNext||!v->pVertexBindingDescriptions||!v->pVertexAttributeDescriptions||!p.pInputAssemblyState||
+    p.pInputAssemblyState->topology!=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST||p.pInputAssemblyState->primitiveRestartEnable)return false;
  if(const auto* dynamic=p.pDynamicState)for(uint32_t i=0;dynamic->pDynamicStates&&i<dynamic->dynamicStateCount;i++){
   auto state=dynamic->pDynamicStates[i];
   if(state==VK_DYNAMIC_STATE_VERTEX_INPUT_EXT||state==VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE||
-     state==VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY||state==VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE)return 0;
+     state==VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY||state==VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE)return false;
  }
+ return true;
+}
+unsigned skinVertexLayout(const VkGraphicsPipelineCreateInfo& p,uint32_t code,const std::array<uint8_t,32>* semantics=nullptr){
+ if(p.pNext||!fixedSkinPipeline(p))return 0;
+ const auto* v=p.pVertexInputState;
+ const unsigned n=semantics?v->vertexBindingDescriptionCount:code==0xad6ddb74u?3:2;
+ if(n<2||n>3||v->vertexBindingDescriptionCount!=n)return 0;
  unsigned seen=0;for(uint32_t i=0;i<n;i++){const auto& b=v->pVertexBindingDescriptions[i];if(b.binding>=n||b.stride!=(b.binding==1?20u:40u)||b.inputRate!=VK_VERTEX_INPUT_RATE_VERTEX||(seen&(1u<<b.binding)))return 0;seen|=1u<<b.binding;}
  bool position=false;
  for(uint32_t i=0;i<v->vertexAttributeDescriptionCount;i++){const auto& a=v->pVertexAttributeDescriptions[i];
@@ -483,26 +524,92 @@ unsigned skinVertexLayout(const VkGraphicsPipelineCreateInfo& p,uint32_t code,co
  }
  return position?n:0;
 }
+SkinDrawLayout skinDrawLayout(const VkGraphicsPipelineCreateInfo& p,const std::array<uint8_t,32>* semantics){
+ if(!fixedSkinPipeline(p))return {};
+ const auto& v=*p.pVertexInputState;
+ if(v.vertexBindingDescriptionCount>maxSkinVertexBindings)return {};
+ std::array<const VkVertexInputBindingDescription*,maxSkinVertexBindings> bindings{};
+ for(uint32_t i=0;i<v.vertexBindingDescriptionCount;i++){
+  const auto& b=v.pVertexBindingDescriptions[i];
+  if(b.binding>=bindings.size()||bindings[b.binding])return {};
+  bindings[b.binding]=&b;
+ }
+ SkinDrawLayout layout;
+ bool position=false;
+ for(uint32_t i=0;i<v.vertexAttributeDescriptionCount;i++){
+  const auto& a=v.pVertexAttributeDescriptions[i];
+  if(a.binding>=bindings.size()||!bindings[a.binding])return {};
+  const auto& b=*bindings[a.binding];
+  if(!b.stride)continue; // Vulkan reads the same value for every vertex, regardless of the replacement index.
+  if(b.inputRate!=VK_VERTEX_INPUT_RATE_VERTEX)return {};
+  if(a.binding==0&&b.stride==40){
+   if(a.offset==0&&a.format==VK_FORMAT_R32G32B32_SFLOAT)position=true;
+   else if(!((a.offset==12&&a.format==VK_FORMAT_R32G32B32_SFLOAT)||
+             (a.offset==24&&a.format==VK_FORMAT_R32G32B32A32_SFLOAT)))return {};
+  }else if(a.binding==2&&b.stride==40){
+   if(a.offset!=0||a.format!=VK_FORMAT_R32G32B32_SFLOAT)return {};
+  }else if(a.binding==1&&b.stride<=layout.attributes.bytes.size()){
+   unsigned source=0,width=0;
+   if(a.offset==0&&a.format==VK_FORMAT_R8G8B8A8_UNORM)width=4;
+   else if(a.format==VK_FORMAT_R32G32_SFLOAT&&(a.offset==4||a.offset==12)){source=a.offset;width=8;}
+   else if(a.format==VK_FORMAT_R32G32_SFLOAT&&!a.offset&&semantics&&a.location<semantics->size()){
+    const auto kind=(*semantics)[a.location];
+    if(kind==5||kind==6){source=kind==5?4:12;width=8;}
+   }
+   if(!width||a.offset+width>b.stride)return {};
+   layout.attributes.stride=b.stride;
+   for(unsigned j=0;j<width;j++){
+    auto& mapped=layout.attributes.bytes[a.offset+j];
+    if(mapped&&mapped!=source+j+1)return {};
+    mapped=uint8_t(source+j+1);
+   }
+  }else return {};
+  layout.bindings|=1u<<a.binding;
+ }
+ return position?layout:SkinDrawLayout{};
+}
+std::string skinLayoutDescription(const VkGraphicsPipelineCreateInfo& p){
+ const auto* v=p.pVertexInputState;if(!v)return "无顶点输入声明";
+ std::string result="绑定/步长";
+ for(uint32_t i=0;v->pVertexBindingDescriptions&&i<std::min(v->vertexBindingDescriptionCount,8u);i++){
+  const auto& b=v->pVertexBindingDescriptions[i];
+  result+=" "+std::to_string(b.binding)+"/"+std::to_string(b.stride);
+ }
+ result+="；属性位置/绑定/偏移/格式";
+ for(uint32_t i=0;v->pVertexAttributeDescriptions&&i<std::min(v->vertexAttributeDescriptionCount,16u);i++){
+  const auto& a=v->pVertexAttributeDescriptions[i];
+  result+=" "+std::to_string(a.location)+"/"+std::to_string(a.binding)+"/"+std::to_string(a.offset)+"/"+std::to_string(a.format);
+ }
+ return result;
+}
 ::VkResult tintOnCreateGraphicsPipelines(VkDevice d,VkPipelineCache c,uint32_t n,const VkGraphicsPipelineCreateInfo* p,const VkAllocationCallbacks* a,VkPipeline* out){
  auto r=tintCreateGraphicsPipelines.load()(d,c,n,p,a,out);
  if(r==VK_SUCCESS&&p&&out)tintObserve([&](auto& s){auto& dev=s.devices[d];for(uint32_t i=0;i<n;i++)if(out[i]){
   dev.pipelines.erase(out[i]);dev.textureSlots.erase(out[i]);dev.skin.graphics.erase(out[i]);
+  dev.skin.drawLayouts.erase(out[i]);dev.skin.rejectedLayouts.erase(out[i]);dev.skin.layoutSamples.erase(out[i]);
   for(uint32_t j=0;p[i].pStages&&j<p[i].stageCount;j++){const auto& stage=p[i].pStages[j];
    if(stage.stage==VK_SHADER_STAGE_FRAGMENT_BIT){auto images=dev.mainTextures.find(stage.module);
     if(images!=dev.mainTextures.end()&&dev.pipelineLayouts.count(p[i].layout)){dev.pipelines[out[i]]=p[i].layout;dev.textureSlots[out[i]]=images->second;}}
    if(stage.stage==VK_SHADER_STAGE_VERTEX_BIT&&!stage.pNext&&!stage.pSpecializationInfo&&stage.pName&&std::strcmp(stage.pName,"main")==0){
     auto v=dev.skin.vertexCodes.find(stage.module);auto semantics=dev.skin.vertexSemantics.find(stage.module);
-    if(T().allSkins||v!=dev.skin.vertexCodes.end()||semantics!=dev.skin.vertexSemantics.end()){
-     const auto names=semantics!=dev.skin.vertexSemantics.end()?&semantics->second:nullptr;
+    const auto names=semantics!=dev.skin.vertexSemantics.end()?&semantics->second:nullptr;
+    if(T().allSkins){
+     auto layout=skinDrawLayout(p[i],names);
+     if(layout.bindings)dev.skin.drawLayouts[out[i]]=layout;
+    }else if(v!=dev.skin.vertexCodes.end()||names){
      const auto code=v!=dev.skin.vertexCodes.end()?v->second:0;
-     if(auto bindings=skinVertexLayout(p[i],code,names,T().allSkins))dev.skin.graphics[out[i]]=bindings;
+     if(auto bindings=skinVertexLayout(p[i],code,names))dev.skin.graphics[out[i]]=bindings;
     }
    }}
+  if(T().allSkins&&!dev.skin.drawLayouts.count(out[i])&&dev.skin.rejectedLayouts.size()<4096)
+   dev.skin.rejectedLayouts[out[i]]=skinLayoutDescription(p[i]);
  }});
  return r;
 }
 void tintOnDestroyPipeline(VkDevice d,VkPipeline pipeline,const VkAllocationCallbacks* a){
- tintObserve([&](auto& s){auto& dev=s.devices[d];dev.pipelines.erase(pipeline);dev.textureSlots.erase(pipeline);dev.skin.graphics.erase(pipeline);dev.skin.compute.erase(pipeline);});tintDestroyPipeline.load()(d,pipeline,a);
+ tintObserve([&](auto& s){auto& dev=s.devices[d];dev.pipelines.erase(pipeline);dev.textureSlots.erase(pipeline);dev.skin.graphics.erase(pipeline);
+  dev.skin.drawLayouts.erase(pipeline);dev.skin.rejectedLayouts.erase(pipeline);dev.skin.layoutSamples.erase(pipeline);
+  dev.skin.compute.erase(pipeline);});tintDestroyPipeline.load()(d,pipeline,a);
 }
 ::VkResult skinOnCreateComputePipelines(VkDevice d,VkPipelineCache c,uint32_t n,const VkComputePipelineCreateInfo* p,const VkAllocationCallbacks* a,VkPipeline* out){
  auto r=upCreateComputePipelines.load()(d,c,n,p,a,out);
@@ -599,7 +706,8 @@ void tintOnCmdBindDescriptorSets(VkCommandBuffer c,VkPipelineBindPoint bp,VkPipe
 void skinOnCmdBindVertexBuffers(VkCommandBuffer c,uint32_t first,uint32_t n,const VkBuffer* buffers,const VkDeviceSize* offsets){
  upCmdBindVertexBuffers.load()(c,first,n,buffers,offsets);
  tintObserve([&](auto& s){auto i=s.commands.find(c);if(i==s.commands.end()||!buffers||!offsets)return;auto& x=i->second.second;
-  for(uint32_t j=0;j<n&&first<3&&j<3-first;j++){x.vertex[first+j]=buffers[j];x.vertexOffset[first+j]=offsets[j];}});
+  for(uint32_t j=0;j<n&&first<maxSkinVertexBindings&&j<maxSkinVertexBindings-first;j++){
+   x.vertex[first+j]=buffers[j];x.vertexOffset[first+j]=offsets[j];}});
 }
 void skinBoundIndex(VkCommandBuffer c,VkBuffer b,VkDeviceSize offset,VkIndexType type){tintObserve([&](auto& s){auto i=s.commands.find(c);if(i!=s.commands.end()){
  auto& x=i->second.second;x.index=b;x.indexOffset=offset;x.indexType=type;}});}
@@ -790,7 +898,8 @@ TintSet* boundTintSet(TintDevice& device,const TintCmd& state){
 }
 struct TintDraw {
  VkPipelineLayout layout{};VkDescriptorSet original{},replacement{};
- unsigned bindings=0;std::array<VkBuffer,3> oldVertex{},newVertex{};std::array<VkDeviceSize,3> oldOffsets{};
+ unsigned bindings=0;std::array<VkBuffer,maxSkinVertexBindings> oldVertex{},newVertex{};
+ std::array<VkDeviceSize,maxSkinVertexBindings> oldOffsets{};
  VkBuffer oldIndex{},newIndex{};VkDeviceSize oldIndexOffset=0;VkIndexType oldIndexType=VK_INDEX_TYPE_UINT16,newIndexType=VK_INDEX_TYPE_UINT16;
  ms::Submesh slot{};bool skip=false;
  std::vector<std::pair<ms::Submesh,VkDescriptorSet>> draws;
@@ -810,13 +919,28 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={}){
    if(shared.profile>=sharedSkins.size()||shared.profile>=d.skin.profiles.size())return;
    const auto& profile=sharedSkins[shared.profile];auto& s=d.skin;auto& buffers=s.profiles[shared.profile];
    if(!buffers.ready||shared.slot>=profile.mesh.slots.size()||!state.index||!state.vertex[0]){miss(SkinMiss::Resources);return;}
-   auto layout=s.graphics.find(state.pipeline);if(layout==s.graphics.end()){miss(SkinMiss::Graphics);return;}
+   auto layout=s.drawLayouts.find(state.pipeline);
+   if(layout==s.drawLayouts.end()){
+    miss(SkinMiss::Graphics);
+    if(T().skinActive(shared.profile)&&s.layoutSamples.size()<256){
+     const auto bit=uint64_t(1)<<shared.profile;
+     auto& seen=s.layoutSamples[state.pipeline];
+     if(!(seen&bit)){
+      const auto details=s.rejectedLayouts.find(state.pipeline);
+      T().noteSkinLayout(shared.profile,reinterpret_cast<uintptr_t>(state.pipeline),
+                        details==s.rejectedLayouts.end()?"未捕获管线声明":details->second.c_str());
+      seen|=bit;
+     }
+    }
+    return;
+   }
    const auto& u=d.upload;auto family=d.families.find(state.pool);if(!u.queued||family==d.families.end()||family->second!=u.usedFamily){miss(SkinMiss::Resources);return;}
-   plan.bindings=layout->second;
-   for(unsigned z=0;z<plan.bindings;z++)if(!state.vertex[z]||state.vertexOffset[z]){miss(SkinMiss::VertexBindings);return;}
+   plan.bindings=layout->second.bindings;
+   if(state.vertexOffset[0]){miss(SkinMiss::VertexBindings);return;}
+   for(unsigned z=0;z<state.vertex.size();z++)if((plan.bindings&(1u<<z))&&!state.vertex[z]){miss(SkinMiss::VertexBindings);return;}
    if(profile.rigid){
-    if(plan.bindings!=2||s.seenOutputs.count(state.vertex[0])){miss(SkinMiss::Graphics);return;}
-    plan.newVertex={buffers.input[Rest].buffer,buffers.input[Attributes].buffer,{}};
+    if(s.seenOutputs.count(state.vertex[0])){miss(SkinMiss::Graphics);return;}
+    plan.newVertex[0]=plan.newVertex[2]=buffers.input[Rest].buffer;
    }else{
     auto observed=s.seenOutputs.find(state.vertex[0]);if(observed==s.seenOutputs.end()){miss(SkinMiss::SkinOutput);return;}
     if(!skinFits(profile,observed->second,shared.profile))return;
@@ -828,8 +952,15 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={}){
     const auto recorded=state.sharedProduced.find(currentKey);
     if(current==s.sharedOutput.end()||current->second.revision!=observed->second.revision||
        (!current->second.queued&&(recorded==state.sharedProduced.end()||recorded->second!=current->second.revision))){miss(SkinMiss::Pose);return;}
-    plan.newVertex={current->second.buffer.buffer,buffers.input[Attributes].buffer,current->second.buffer.buffer};
-    if(plan.bindings==3){auto previous=s.sharedOutput.find({state.vertex[2],shared.profile});if(previous!=s.sharedOutput.end()&&previous->second.queued)plan.newVertex[2]=previous->second.buffer.buffer;}
+    plan.newVertex[0]=plan.newVertex[2]=current->second.buffer.buffer;
+    if((plan.bindings&4)&&!state.vertexOffset[2]){
+     auto previous=s.sharedOutput.find({state.vertex[2],shared.profile});
+     if(previous!=s.sharedOutput.end()&&previous->second.queued)plan.newVertex[2]=previous->second.buffer.buffer;
+    }
+   }
+   if(plan.bindings&2){
+    plan.newVertex[1]=skinAttributes(i->second.first,u,buffers,profile.mesh,layout->second.attributes);
+    if(!plan.newVertex[1]){miss(SkinMiss::Resources);return;}
    }
    plan.oldIndex=state.index;plan.oldIndexOffset=state.indexOffset;plan.oldIndexType=state.indexType;
    plan.newIndex=buffers.input[Indices].buffer;plan.newIndexType=profile.mesh.indexBytes==4?VK_INDEX_TYPE_UINT32:VK_INDEX_TYPE_UINT16;
@@ -868,12 +999,12 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={}){
   if(T().skinnedModel&&!shared){
    const auto& s=d.skin;auto layout=s.graphics.find(state.pipeline);
    if(layout==s.graphics.end()||!s.ready||!state.index||state.indexOffset||state.indexType!=VK_INDEX_TYPE_UINT16)return;
-   plan.bindings=layout->second;
-   for(unsigned n=0;n<plan.bindings;n++)if(!state.vertex[n]||state.vertexOffset[n])return;
+   plan.bindings=(1u<<layout->second)-1;
+   for(unsigned n=0;n<layout->second;n++)if(!state.vertex[n]||state.vertexOffset[n])return;
    auto current=s.output.find(state.vertex[0]);if(current==s.output.end()||(!current->second.queued&&!state.skinProduced.count(state.vertex[0])))return;
    plan.oldVertex=state.vertex;plan.oldOffsets=state.vertexOffset;plan.oldIndex=state.index;plan.newIndex=s.input[Indices].buffer;
    plan.newVertex={current->second.buffer.buffer,s.input[Attributes].buffer,current->second.buffer.buffer};
-   if(plan.bindings==3){auto previous=s.output.find(state.vertex[2]);if(previous!=s.output.end()&&previous->second.queued)plan.newVertex[2]=previous->second.buffer.buffer;}
+   if(plan.bindings&4){auto previous=s.output.find(state.vertex[2]);if(previous!=s.output.end()&&previous->second.queued)plan.newVertex[2]=previous->second.buffer.buffer;}
    plan.slot=paimonSkin.slots[part];
   }
   TintViews views{};views[0]=preset;
@@ -930,11 +1061,20 @@ void onCmdDrawIndexed(void* c,uint32_t count,uint32_t instances,uint32_t first,i
    };
    bindMaterial(plan.replacement);
    if(plan.bindings){
-    constexpr std::array<VkDeviceSize,3> zero{};auto vb=upCmdBindVertexBuffers.load();auto ib=cmdBindIndexBuffer.load();
-    vb(command,0,plan.bindings,plan.newVertex.data(),zero.data());ib(c,reinterpret_cast<uintptr_t>(plan.newIndex),0,plan.newIndexType);
+    constexpr std::array<VkDeviceSize,maxSkinVertexBindings> zero{};
+    auto vb=upCmdBindVertexBuffers.load();auto ib=cmdBindIndexBuffer.load();
+    auto bindVertices=[&](const auto& buffers,const auto& offsets){
+     for(unsigned first=0;first<buffers.size();){
+      if(!(plan.bindings&(1u<<first))){++first;continue;}
+      unsigned end=first+1;
+      while(end<buffers.size()&&(plan.bindings&(1u<<end)))++end;
+      vb(command,first,end-first,buffers.data()+first,offsets.data()+first);first=end;
+     }
+    };
+    bindVertices(plan.newVertex,zero);ib(c,reinterpret_cast<uintptr_t>(plan.newIndex),0,plan.newIndexType);
     if(plan.draws.empty())draw(c,plan.slot.count,instances,plan.slot.start,0,firstInstance);
     else for(const auto& pass:plan.draws){bindMaterial(pass.second);draw(c,pass.first.count,instances,pass.first.start,0,firstInstance);}
-    ib(c,reinterpret_cast<uintptr_t>(plan.oldIndex),plan.oldIndexOffset,plan.oldIndexType);vb(command,0,plan.bindings,plan.oldVertex.data(),plan.oldOffsets.data());
+    ib(c,reinterpret_cast<uintptr_t>(plan.oldIndex),plan.oldIndexOffset,plan.oldIndexType);bindVertices(plan.oldVertex,plan.oldOffsets);
    }else draw(c,count,instances,first,baseVertex,firstInstance);
    bindMaterial(plan.original);
    if(shared){T().sharedDraws.fetch_add(1,std::memory_order_relaxed);T().profileDraws[shared.profile].fetch_add(1,std::memory_order_relaxed);}

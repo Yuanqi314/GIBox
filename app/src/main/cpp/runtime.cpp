@@ -1194,6 +1194,8 @@ struct Runtime::Impl {
     " 次，队列提交 "+std::to_string(capture.queueSubmits.load(std::memory_order_relaxed))+
     " 次，索引上传 "+std::to_string(stats.uploads)+" 次，哈希命中 "+std::to_string(stats.drawProbeUploads)+" 次，vkCmdDrawIndexed "+std::to_string(stats.indexedDraws)+" 次；"+targets);
    if(capture.allSkins){auto upload=capture.textureUpload.load(std::memory_order_relaxed);
+    for(const auto& miss:capture.takeSkinLayouts())if(miss.profile<capture.skinMods.size())
+     log("vulkan-skin-layout",capture.skinMods[miss.profile]+"，管线 "+hex(miss.pipeline)+"，"+miss.details);
     std::map<std::string,uint64_t> draws;for(size_t i=0;i<capture.skinMods.size();i++){
      draws[capture.skinMods[i]]+=capture.profileDraws[i].load(std::memory_order_relaxed);
      if(const auto bones=capture.skinBoneErrors[i].exchange(0,std::memory_order_relaxed))
