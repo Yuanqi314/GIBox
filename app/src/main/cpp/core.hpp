@@ -116,6 +116,7 @@ inline void remap(Skin& s,const std::vector<int>& map){
   for(int j=0;j<4;j++){float w=j<n&&sum>0?slot[j].first/sum:0.f;std::memcpy(v+4*j,&w,4);put32(v+16+4*j,j<n?slot[j].second:0);}}}
 Texture decodeDds(const Bytes& b);
 Texture decodeModelDds(const Bytes& b,bool roleLinear,TextureColor overrideColor=TextureColor::Role);
+void buildTextureMips(Texture& texture,bool roleLinear);
 
 // Identity of an original Mesh asset, readable without CPU vertex data:
 // asset name, vertex count (shared+0x74), submesh count (shared+0xc0), bindpose count (shared+0xe0).

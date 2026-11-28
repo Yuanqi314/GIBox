@@ -337,8 +337,12 @@ struct Runtime::Impl {
      // report only the same text failing twice.
      try{auto c=parseControl(raw);loadingWorkerControl=c;controlBad.clear();logLevel.store(c.logLevel);uid::on.store(c.hideUid);cameraFade::mode.store(c.cameraFadeMode);std::lock_guard<std::mutex> l(sm);pendingControl=c;controlError.clear();}
      catch(const std::exception& ex){if(raw!=controlBad){controlBad=raw;controlRaw.clear();}else{std::lock_guard<std::mutex> l(sm);controlError=ex.what();}}}}}catch(const std::exception&){}}
-  if(now>=loadingAt){loadingAt=now+250;try{auto p=loadingReader.update(modelRoot,loadingWorkerControl.selected,loadingWorkerControl.enabled,loadingWorkerControl.variables,loading.cycle.load());if(p){std::lock_guard<std::mutex> lock(sm);loadingPending=p;}}catch(const std::exception& ex){log("loading-image-error",ex.what());}
-   try{auto p=profileReader.update(modelRoot,loadingWorkerControl.selected,loadingWorkerControl.enabled);if(p){std::lock_guard<std::mutex> lock(sm);profilePending=std::move(p);}}catch(const std::exception& ex){log("profile-image-error",ex.what());}}
+  if(now>=loadingAt){loadingAt=now+250;
+   auto compatible=loadingWorkerControl.selected;
+   auto& capture=vkcap::tracker();
+   compatible.erase(std::remove_if(compatible.begin(),compatible.end(),[&](const auto& name){return capture.ownsRenderMod(name);}),compatible.end());
+   try{auto p=loadingReader.update(modelRoot,compatible,loadingWorkerControl.enabled,loadingWorkerControl.variables,loading.cycle.load());if(p){std::lock_guard<std::mutex> lock(sm);loadingPending=p;}}catch(const std::exception& ex){log("loading-image-error",ex.what());}
+   try{auto p=profileReader.update(modelRoot,compatible,loadingWorkerControl.enabled);if(p){std::lock_guard<std::mutex> lock(sm);profilePending=std::move(p);}}catch(const std::exception& ex){log("profile-image-error",ex.what());}}
   if(now>=scanAt){scanAt=now+1000;try{auto list=scanModels(modelRoot,scanCache);std::lock_guard<std::mutex> l(sm);scanned=std::move(list);scannedFresh=true;}catch(const std::exception&){}}
   if(now>=texDiagScanAt){texDiagScanAt=now+2000;textureDiagScan();
    try{auto file=shared+"/skeleton-policy.json";auto st=exists(file)?stampOf(file):std::string();if(st!=bonePolicyStamp){
@@ -594,7 +598,7 @@ struct Runtime::Impl {
  std::map<Ptr,std::pair<Ptr,Ptr>> texPending;void texPend(Ptr r){texPending[r]={load<Ptr>(r),load<Ptr>(r+0x10)};}
  static bool texPendLive(const std::pair<const Ptr,std::pair<Ptr,Ptr>>& kv){return kv.second.second&&load<Ptr>(kv.first)==kv.second.first&&load<Ptr>(kv.first+0x10)==kv.second.second;}std::vector<Ptr> texHanded;std::set<std::string> texHandoffSaid;
  std::map<TexNoKey,uint64_t> texWaitUntil;std::string texWaitLod;std::set<Ptr> texDeferred;   // a renderer near a mapping that does not apply: checked again after 500 ms
- bool texModOn(const std::string& name)const{return ctl.enabled&&std::find(ctl.selected.begin(),ctl.selected.end(),name)!=ctl.selected.end();}
+ bool texModOn(const std::string& name)const{return ctl.enabled&&!vkcap::tracker().ownsRenderMod(name)&&std::find(ctl.selected.begin(),ctl.selected.end(),name)!=ctl.selected.end();}
  static std::string texFnv(const std::string& s){uint64_t h=1469598103934665603ull;for(unsigned char c:s){h^=c;h*=1099511628211ull;}char b[20];std::snprintf(b,sizeof b,"%016llx",(unsigned long long)h);return b;}
  // The rules a mapping belongs to: a change of any section, hash, match_first_index or kind makes the saved one stale.
  static std::string texSignature(const texdiag::TextureMod& m){std::string s=std::to_string(m.character);for(auto& r:m.doc.rules)s+="|"+r.section+"#"+r.hash+"#"+std::to_string(r.first)+"#"+r.kind;return texFnv(s);}
@@ -1907,6 +1911,50 @@ struct Runtime::Impl {
   return out;}
  struct VulkanActivity {uint64_t draws=0,lastAt=0;};
  std::array<VulkanActivity,64> vulkanActivity{};
+ std::array<VulkanActivity,64> vulkanTextureActivity{};
+ std::array<bool,64> vulkanFirstSkinSaid{};
+ std::array<bool,64> vulkanWaitingSkinSaid{},vulkanFirstTextureSaid{};
+ void vulkanTextureStatus(std::vector<std::string>& active,uint64_t now){
+  auto& gpu=vkcap::tracker();
+  if(!gpu.renderTextures||!gpu.routesReady.load(std::memory_order_acquire))return;
+  const auto enabled=gpu.activeRenderMods.load(std::memory_order_relaxed);
+  for(size_t i=0;i<gpu.renderMods.size();i++){
+   auto& recent=vulkanTextureActivity[i];
+   const auto draws=gpu.renderDraws[i].load(std::memory_order_relaxed);
+   if(!(enabled&(uint64_t(1)<<i))){recent={draws,0};continue;}
+   if(draws&&!vulkanFirstTextureSaid[i]){
+    log("vulkan-texture-draw",gpu.renderMods[i]+"：已按绘制上下文换绑贴图");
+    vulkanFirstTextureSaid[i]=true;
+   }
+   if(draws!=recent.draws){recent={draws,now};}
+   if(recent.lastAt&&now-recent.lastAt<=1000){active.push_back(gpu.renderMods[i]);}
+  }
+ }
+ void vulkanFirstSkinTimes(){
+  auto& gpu=vkcap::tracker();
+  if(!gpu.allSkins||!gpu.routesReady.load(std::memory_order_acquire))return;
+  using Phase=vkcap::SkinPhase;
+  for(size_t i=0;i<gpu.skinMods.size();i++){
+   if(vulkanFirstSkinSaid[i])continue;
+   const auto& times=gpu.skinTimes[i];
+   auto at=[&](Phase p){return times[unsigned(p)].load(std::memory_order_relaxed);};
+   const auto start=at(Phase::Index),first=at(Phase::FirstDraw);
+   if(!start)continue;
+   if(!first){
+    const auto now=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if(vulkanWaitingSkinSaid[i]||uint64_t(now)-start<1000000)continue;
+    vulkanWaitingSkinSaid[i]=true;
+   }
+   auto elapsed=[&](Phase p){
+    const auto value=at(p);
+    return value?std::to_string(int64_t(value)-int64_t(start))+" µs":std::string("未观测");
+   };
+   log("vulkan-skin-first",gpu.skinMods[i]+"，部件 "+std::to_string(i)+"，首次索引命中 0 µs；贴图就绪 "+
+       elapsed(Phase::Textures)+"；蒙皮关联 "+elapsed(Phase::Association)+"；蒙皮输出可用于绘制 "+
+       elapsed(Phase::Pose)+"；首次换绑 "+elapsed(Phase::FirstDraw));
+   vulkanFirstSkinSaid[i]=first!=0;
+  }
+ }
  std::string vulkanModelStatus(std::vector<std::string>& active,uint64_t now){
   if(ctl.useUnityModels){vulkanActivity={};return {};}
   auto& capture=vkcap::tracker();
@@ -3389,6 +3437,10 @@ struct Runtime::Impl {
    const bool finishLogic=ctl.exp.logicCore&&(!c->exp.logicCore||(ctl.enabled&&!c->enabled)||ctl.useUnityModels!=c->useUnityModels||ctl.selected!=c->selected);
    ctl=*c;synthesis.setEnabled(ctl.synthesisButton);
    auto& capture=vkcap::tracker();
+   if(capture.renderTextures){
+    capture.setRenderReplacement(ctl.enabled,ctl.selected,ctl.loadingFit);
+    if(!previousVars||!std::atomic_load(&capture.skinChoices)){capture.setSkinChoices(ctl.variables);}
+   }
    if(capture.allSkins){
     capture.setSkinReplacement(ctl.enabled,!ctl.useUnityModels,ctl.selected);
     if(!previousVars||!std::atomic_load(&capture.skinChoices))capture.setSkinChoices(ctl.variables);
@@ -3495,6 +3547,8 @@ struct Runtime::Impl {
    for(auto& n:notes)errors.push_back(n);
    for(auto& kv:attachments){auto& n=kv.second->set->name;if(std::find(active.begin(),active.end(),n)==active.end())active.push_back(n);}
    auto vkWaiting=vulkanModelStatus(active,now);
+   vulkanTextureStatus(active,now);
+   vulkanFirstSkinTimes();
    for(auto& kv:texLive)if(kv.second&&!kv.second->slots.empty()&&std::find(active.begin(),active.end(),kv.second->mod)==active.end())active.push_back(kv.second->mod);
    if(loading.active()&&std::find(active.begin(),active.end(),loading.name())==active.end())active.push_back(loading.name());
    profile.appendActive(active);

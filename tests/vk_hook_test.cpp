@@ -353,6 +353,89 @@ endif
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);assert((call==std::vector<uintptr_t>{26226}));
  std::cout<<"Vulkan draw replacement: PASS (scoped textures, skinned vertex and index rebind, queue ownership, restoration and master switch)\n";
 }
+static void ordinaryTextureTrial(){
+ using namespace ms::vkcap;
+ const auto device=fake<VkDevice>(501);
+ const auto command=fake<VkCommandBuffer>(502);
+ const auto ui=fake<VkPipeline>(503),other=fake<VkPipeline>(504);
+ const auto layout=fake<VkPipelineLayout>(505);
+ const auto original=fake<VkDescriptorSet>(506),clone=fake<VkDescriptorSet>(507);
+ const auto gameView=fake<VkImageView>(508),modView=fake<VkImageView>(509);
+ const auto sampler=fake<VkSampler>(510);
+ const auto cmd=gpuHandle(command);
+ auto& tracker=T();
+ tracker.enabled=true;tracker.allSkins=false;tracker.skinnedModel=false;tracker.renderTextures=true;
+ tracker.renderResourceContexts=true;tracker.tintOn=false;
+ tracker.renderMods={"texture-trial"};
+ auto& dev=tintState().devices[device];
+ const VkDescriptorSetLayoutBinding mixed[]={{3,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},
+                                            {5,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1,VK_SHADER_STAGE_VERTEX_BIT,nullptr}};
+ const VkDescriptorSetLayoutCreateInfo mixedLayout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,nullptr,0,2,mixed};
+ const auto shape=mixedShape(dev,mixedLayout);assert(shape&&mixedShape(dev,mixedLayout)==shape);
+ dev.pipelineLayouts[layout].sets[1]=shape;
+ dev.pipelines[ui]=dev.pipelines[other]=layout;
+ dev.upload.queued=true;dev.upload.images[0].view=modView;
+ dev.families[{}]=0;
+ tintState().commands[command]={device,TintCmd{}};
+ auto& set=dev.sets[original];set.shape=shape;set.mixed=dev.mixedLayouts.at(shape);set.written=(1u<<3)|(1u<<5);
+ set.images[3]={sampler,gameView,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+ set.buffers[5]={fake<VkBuffer>(521),0,16};
+ std::array<uint8_t,20> bytes{};
+ bytes[0]=1;bytes[16]=2;bytes[17]=3;
+ const auto hash=crc32c(0,bytes.data(),16),shader=crc32c(0,bytes.data()+16,4);
+ tracker.created(511,bytes.size(),1);tracker.bound(511,512,0);tracker.mapped(512,0,bytes.size(),bytes.data());
+ tracker.imageCreated(513,2,2,1,1,1,1,4);tracker.imageView(gpuHandle(gameView),513,0,0);
+ tracker.copiedImage(0,511,513,{0,0,0,0,2,2,true});
+ tracker.shaderCreated(514,bytes.data()+16,4);tracker.shaderCreated(515,bytes.data(),4);
+ tracker.pipelineCreated(gpuHandle(ui),gpuHandle(layout),{{16,514}});
+ tracker.pipelineCreated(gpuHandle(other),gpuHandle(layout),{{16,515}});
+ tracker.descriptorLayout(516,{},{{3,1}});tracker.descriptorAllocated(gpuHandle(original),517,516);
+ tracker.descriptorWrite(gpuHandle(original),3,0,{ResourceKind::Texture,gpuHandle(gameView)});
+ TextureProgram program;
+ program.ini="[Constants]\nglobal persist $enabled = 1\n[ResourceColor]\n";
+ program.defaults["$enabled"]=1;program.vars["$enabled"]={0,1};
+ program.persistFile="texture-trial";
+ program.images["resourcecolor"].push_back({0,0,0});
+ TextureRoute sampled;sampled.thisSet=1;sampled.thisBinding=3;sampled.vertices=6;
+ sampled.terms={{{ResourceKind::Texture,1,3},hash},{{ResourceKind::Shader,0,16},shader}};
+ ms::vkhook::appendTextureRule(program,sampled,"if $enabled\nthis = ResourceColor\nendif\n");
+ TextureRoute indexed=sampled;indexed.vertices=-1;indexed.ib=paimonBodyHash;indexed.first=0;indexed.count=26226;
+ ms::vkhook::appendTextureRule(program,indexed,"this = ResourceColor\n");
+ texturePrograms={std::move(program)};explicitTexturePrograms=1;textureIBPrograms[paimonBodyHash]=1;
+ tracker.setSkinChoices({});tracker.setRenderReplacement(true,{"texture-trial"},"original");
+ assert(tracker.ownsRenderMod("texture-trial"));
+ static std::vector<uintptr_t> calls;
+ tintCmdBindDescriptorSets=+[](VkCommandBuffer,VkPipelineBindPoint point,VkPipelineLayout,uint32_t first,uint32_t n,const VkDescriptorSet* bound,uint32_t offsets,const uint32_t*){
+  assert(point==VK_PIPELINE_BIND_POINT_GRAPHICS&&first==1&&n==1&&!offsets);calls.push_back(gpuHandle(*bound));};
+ tintCreateDescriptorSetLayout=+[](VkDevice,const VkDescriptorSetLayoutCreateInfo* info,const VkAllocationCallbacks*,VkDescriptorSetLayout* out){
+  assert(info->bindingCount==2&&info->pBindings[0].binding==3&&info->pBindings[1].binding==5);*out=fake<VkDescriptorSetLayout>(518);return VK_SUCCESS;};
+ tintAllocateDescriptorSets=+[](VkDevice,const VkDescriptorSetAllocateInfo*,VkDescriptorSet* out){*out=fake<VkDescriptorSet>(507);return VK_SUCCESS;};
+ tintUpdateDescriptorSets=+[](VkDevice,uint32_t n,const VkWriteDescriptorSet* writes,uint32_t copies,const VkCopyDescriptorSet*){
+  assert(n==2&&!copies&&writes[0].dstBinding==3&&writes[0].pImageInfo->imageView==fake<VkImageView>(509)&&writes[0].pImageInfo->sampler==fake<VkSampler>(510));
+  assert(writes[1].dstBinding==5&&writes[1].descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER&&writes[1].pBufferInfo->buffer==fake<VkBuffer>(521));};
+ gpuCmdDraw=+[](VkCommandBuffer,uint32_t n,uint32_t,uint32_t,uint32_t){calls.push_back(n);};
+ cmdDrawIndexed=+[](void*,uint32_t n,uint32_t,uint32_t,int32_t,uint32_t){calls.push_back(n);};
+ tintOnCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,1,1,&original,0,nullptr);
+ tintOnCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,ui);
+ calls.clear();resourceOnCmdDraw(command,6,1,0,0);
+ assert((calls==std::vector<uintptr_t>{gpuHandle(clone),6,gpuHandle(original)}));
+ calls.clear();resourceOnCmdDraw(command,12,1,0,0);
+ tintOnCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,other);
+ resourceOnCmdDraw(command,6,1,0,0);assert((calls==std::vector<uintptr_t>{12,6}));
+ tracker.setSkinChoices({{"texture-trial",{{"$enabled",0}}}});
+ tintOnCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,ui);
+ calls.clear();resourceOnCmdDraw(command,6,1,0,0);assert((calls==std::vector<uintptr_t>{6}));
+ assert(tracker.savedLogic("texture-trial","",true)->at("$enabled")==0);
+ std::vector<uint8_t> index(61224);const uint32_t tail=0x86c821d5;std::memcpy(index.data()+index.size()-4,&tail,4);
+ tracker.setDrawHashes({paimonBodyHash});
+ tracker.created(519,index.size(),0x40);tracker.bound(519,520,0);tracker.mapped(520,0,index.size(),index.data());
+ tracker.indexBound(519,0,cmd,0);
+ calls.clear();onCmdDrawIndexed(command,26226,1,0,0,0);onCmdDrawIndexed(command,4386,1,26226,0,0);
+ assert((calls==std::vector<uintptr_t>{gpuHandle(clone),26226,gpuHandle(original),4386}));
+ tracker.setRenderReplacement(false,{"texture-trial"},"original");
+ calls.clear();onCmdDrawIndexed(command,26226,1,0,0,0);assert((calls==std::vector<uintptr_t>{26226}&&set.images[3].imageView==gameView));
+ std::cout<<"Vulkan ordinary textures: PASS (both draw calls, atlas context, INI choices and persistence, original descriptor restoration, no model)\n";
+}
 #endif
 int main(){
  const size_t page=size_t(sysconf(_SC_PAGESIZE));auto* code=static_cast<uint32_t*>(mmap(nullptr,page*4,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0));assert(code!=MAP_FAILED);
@@ -375,5 +458,6 @@ int main(){
  pcRouteTrial();
  vertexLayoutTrial();
  tintTrial();
+ ordinaryTextureTrial();
 #endif
 }

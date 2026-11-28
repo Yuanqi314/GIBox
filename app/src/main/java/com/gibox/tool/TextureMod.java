@@ -64,7 +64,7 @@ final class TextureMod {
             // The game side writes diffuse (_MainTex) and lightmap (_LightMapTex) only; anything else is diagnosed, not written.
             int usable = 0, rules = 0;
             for (Object raw : (List<?>) doc.get("rules")) { Map<?, ?> r = (Map<?, ?>) raw; if ("control".equals(r.get("kind"))) continue; rules++; boolean any = false;
-                for (Object t : (List<?>) r.get("textures")) { Map<?, ?> b = (Map<?, ?>) t; any = any || (("diffuse".equals(b.get("role")) || "lightmap".equals(b.get("role"))) && decoded.contains(b.get("resource"))); }
+                for (Object t : (List<?>) r.get("textures")) { Map<?, ?> b = (Map<?, ?>) t; any = any || (("diffuse".equals(b.get("role")) || "lightmap".equals(b.get("role")) || "normal".equals(b.get("role")) || r.containsKey("matchVulkan")) && decoded.contains(b.get("resource"))); }
                 if (any) usable++; }
             check(usable > 0, "纯贴图 MOD 里没有能写入的贴图：" + rules + " 条规则都不是能确认的 diffuse / lightmap，或其贴图无法读取");
             List<Object> vars = new ArrayList<>(); Map<String, Object> defaults = new LinkedHashMap<>();

@@ -66,11 +66,15 @@ final class TextureDiag {
 
         List<Object> rules = new ArrayList<>(); Set<String> usedResources = new LinkedHashSet<>(); Set<String> conditionVars = new TreeSet<>();
         for (ModelConverter.Section s : ini.sections.values()) {
-            if (!lower(s.name).startsWith("textureoverride")) continue;
+            if (!lower(s.name).startsWith("textureoverride")&&!lower(s.name).startsWith("shaderoverride")) continue;
             Map<String, Object> r = new LinkedHashMap<>(); String part = s.name.length() > 15 ? s.name.substring(15) : s.name;
             String hash = "", first = null, priority = null; List<Object> textures = new ArrayList<>(), draws = new ArrayList<>(), sets = new ArrayList<>(), conds = new ArrayList<>(), external = new ArrayList<>(), runs = new ArrayList<>(), other = new ArrayList<>();
             for (String l : s.lines) { String[] a = kv(l); if (a == null) continue;
-                if (a[0].equals("hash")) hash = lower(a[1]); else if (a[0].equals("match_first_index")) first = a[1].trim(); else if (a[0].equals("match_priority")) priority = a[1].trim(); }
+                if (a[0].equals("hash")) hash = lower(a[1]); else if (a[0].equals("match_first_index")) first = a[1].trim(); else if (a[0].equals("match_priority")) priority = a[1].trim();
+                else if (a[0].equals("match_vulkan")) r.put("matchVulkan",lower(a[1]).trim());
+                else if (a[0].equals("match_index_count")) r.put("indexCount",parseInt(a[1].trim(),-2));
+                else if (a[0].equals("match_first_vertex")) r.put("firstVertex",parseInt(a[1].trim(),-2));
+                else if (a[0].equals("match_vertex_count")) r.put("vertexCount",parseInt(a[1].trim(),-2)); }
             walk(ini, s, null, new ArrayList<>(), new HashSet<>(), 0, textures, draws, sets, conds, external, runs, other, notes);
             for (Object o : textures) { @SuppressWarnings("unchecked") Map<String, Object> t = (Map<String, Object>) o; if (t.get("resource") instanceof String) usedResources.add((String) t.get("resource")); }
             for (Object c : conds) { java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$[a-z_][a-z0-9_]*").matcher((String) c); while (m.find()) conditionVars.add(m.group()); }

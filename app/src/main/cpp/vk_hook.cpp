@@ -36,7 +36,9 @@
 #include <vulkan/vulkan_core.h>
 #include "model.hpp"
 #include "logic_game.hpp"
+#include "loading_images.hpp"
 #include "pc_hashes.hpp"
+#include "texture_diag.hpp"
 #endif
 
 namespace {
@@ -75,7 +77,7 @@ ms::vkcap::Tracker& T(){return ms::vkcap::tracker();}
 // The test replaces the sampled RGB channels, keeping alpha, with another view of the same image. No upload or
 // queue operations are required. Only ordinary, single-image bindings of a fully observed set 0 are accepted.
 #define TINT_FUNCTIONS(X) \
- X(CreateImageView) X(DestroyImageView) X(DestroyImage) X(CreateDescriptorSetLayout) X(DestroyDescriptorSetLayout) \
+ X(CreateImageView) X(DestroyImageView) X(DestroyImage) X(CreateSampler) X(DestroySampler) X(CreateDescriptorSetLayout) X(DestroyDescriptorSetLayout) \
  X(CreatePipelineLayout) X(DestroyPipelineLayout) X(CreateShaderModule) X(DestroyShaderModule) X(CreateGraphicsPipelines) X(DestroyPipeline) \
  X(AllocateDescriptorSets) X(UpdateDescriptorSets) X(FreeDescriptorSets) X(ResetDescriptorPool) X(DestroyDescriptorPool) \
  X(AllocateCommandBuffers) X(FreeCommandBuffers) X(ResetCommandPool) X(DestroyCommandPool) X(DestroyDevice) \
@@ -164,8 +166,10 @@ void resourceOnCmdUpdateBuffer(VkCommandBuffer c,VkBuffer b,VkDeviceSize o,VkDev
 void resourceOnCmdFillBuffer(VkCommandBuffer c,VkBuffer b,VkDeviceSize o,VkDeviceSize n,uint32_t data){
  T().updated(gpuHandle(c),gpuHandle(b),o,n,nullptr);gpuCmdFillBuffer.load()(c,b,o,n,data);
 }
+bool renderTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw& draw);
 void resourceOnCmdDraw(VkCommandBuffer c,uint32_t n,uint32_t i,uint32_t first,uint32_t instance){
  if(T().inspectResources)T().observeResources(gpuHandle(c),false);
+ if(T().renderTextures&&renderTextureDraw(c,{false,n,i,first,instance,0}))return;
  gpuCmdDraw.load()(c,n,i,first,instance);
 }
 template<class R>void resourceImageWrites(VkCommandBuffer c,VkImage dst,uint32_t n,const R* regions){
@@ -195,11 +199,19 @@ void resourceOnCmdExecuteCommands(VkCommandBuffer c,uint32_t n,const VkCommandBu
   T().submitted(gpuHandle(p[i].pCommandBufferInfos[j].commandBuffer));
  return result;
 }
-::VkResult resourceOnQueueSubmit2(VkQueue q,uint32_t n,const VkSubmitInfo2* p,VkFence f){return resourceSubmitted2(gpuQueueSubmit2.load()(q,n,p,f),n,p);}
-::VkResult resourceOnQueueSubmit2KHR(VkQueue q,uint32_t n,const VkSubmitInfo2* p,VkFence f){return resourceSubmitted2(gpuQueueSubmit2KHR.load()(q,n,p,f),n,p);}
+void serviceUploads(VkQueue queue);
+::VkResult resourceOnQueueSubmit2(VkQueue q,uint32_t n,const VkSubmitInfo2* p,VkFence f){
+ if(T().renderTextures){serviceUploads(q);}
+ return resourceSubmitted2(gpuQueueSubmit2.load()(q,n,p,f),n,p);
+}
+::VkResult resourceOnQueueSubmit2KHR(VkQueue q,uint32_t n,const VkSubmitInfo2* p,VkFence f){
+ if(T().renderTextures){serviceUploads(q);}
+ return resourceSubmitted2(gpuQueueSubmit2KHR.load()(q,n,p,f),n,p);
+}
 
 constexpr size_t tintBindings=12,tintSetLimit=256;
 using TintViews=std::array<VkImageView,tintBindings>;
+using TintSamplers=std::array<VkSampler,tintBindings>;
 using SkinTextureSlots=std::array<unsigned,3>;
 constexpr unsigned maxSkinVertexBindings=8;
 struct SkinAttributeLayout {
@@ -217,14 +229,19 @@ struct SkinDrawLayout {
  SkinAttributeLayout attributes;
 };
 struct TintImg {VkImageViewCreateInfo info{};uint64_t generation=0;std::array<VkImageView,2> colored{};};
+using MixedBindings=std::array<std::pair<VkDescriptorType,VkShaderStageFlags>,tintBindings>;
+struct MixedLayout {MixedBindings bindings;uint32_t writtenMask,imageMask;};
 struct TintSet {
  VkDescriptorPool pool{};uint32_t shape=0,written=0;
  std::array<VkDescriptorImageInfo,tintBindings> images{};
  struct Cache {VkDescriptorSet set{};uint64_t generation=0;};std::array<Cache,2> cache{};
- std::map<TintViews,Cache> textureCache{};
+ std::map<std::pair<TintViews,TintSamplers>,Cache> textureCache{};
+ std::shared_ptr<const MixedLayout> mixed{};
+ std::map<unsigned,VkDescriptorBufferInfo> buffers{};
 };
 struct TintCmd {
  VkCommandPool pool{};VkPipeline pipeline{};VkPipelineLayout layout{};VkDescriptorSet set{};
+ VkPipelineLayout sampledLayout{};std::array<VkDescriptorSet,8> sampledSets{};
  VkPipeline compute{};VkPipelineLayout computeLayout{};std::array<VkDescriptorSet,2> computeSets{};
  std::array<VkBuffer,maxSkinVertexBindings> vertex{};std::array<VkDeviceSize,maxSkinVertexBindings> vertexOffset{};
  VkBuffer index{};VkDeviceSize indexOffset=0;VkIndexType indexType=VK_INDEX_TYPE_MAX_ENUM;
@@ -232,8 +249,28 @@ struct TintCmd {
  std::map<std::pair<VkBuffer,unsigned>,uint64_t> sharedProduced{};
 };
 struct TextureGpu {VkImage image{};VkDeviceMemory memory{};VkImageView view{};};
-struct SkinImageFile {std::string dir,generation;uint64_t size=0;};
-struct SkinImage {std::shared_ptr<const SkinImageFile> file;ms::TexRef ref;bool linear=false;};
+struct SkinImageFile {std::string dir,generation;uint64_t size=0;std::string manifest{};};
+struct SkinImage {
+ std::shared_ptr<const SkinImageFile> file;ms::TexRef ref;bool linear=false;
+ std::string raw{};bool circle=false;float aspect=0;int fit=-1;
+};
+struct TextureRoute {
+ uint32_t check=0;std::optional<uint32_t> ib;
+ std::vector<ms::vkcap::ResourceMatch> terms;
+ int64_t first=-1,count=-1,firstVertex=-1,vertices=-1,limit=-1;
+ uint32_t total=0;
+ unsigned thisSet=0,thisBinding=~0u;
+ bool semantic=false;
+};
+struct TextureProgram {
+ std::string ini;
+ std::vector<TextureRoute> rules;
+ std::map<std::string,std::vector<int>> vars;
+ std::map<std::string,int> defaults;
+ std::map<std::string,std::vector<std::array<unsigned,3>>> images;
+ std::string persistFile;
+ bool loading=false;
+};
 using UploadPixels=std::vector<std::pair<std::shared_ptr<ms::Texture>,bool>>;
 constexpr uint64_t maxResidentSkinTextures=192ull<<20,skinTextureBatch=16ull<<20;
 constexpr uint64_t startupSkinTextureBudget=64ull<<20;
@@ -372,8 +409,9 @@ struct SkinDevice {
  VkDescriptorPool pool{};VkDescriptorSetLayout storage{},uniform{};VkDescriptorSet count{};size_t allocated=0;
 };
 struct TintDevice {
- struct Layout {uint32_t shape=0;};
+ struct Layout {uint32_t shape=0;std::array<uint32_t,8> sets{};};
  std::map<VkDescriptorSetLayout,uint32_t> layouts;
+ std::map<uint32_t,std::shared_ptr<const MixedLayout>> mixedLayouts;
  std::map<VkPipelineLayout,Layout> pipelineLayouts;
  std::map<VkShaderModule,SkinTextureSlots> materialShaders;
  std::map<VkPipeline,VkPipelineLayout> pipelines;
@@ -382,10 +420,23 @@ struct TintDevice {
  std::map<VkImageView,TintImg> images;
  std::vector<std::pair<VkImage,VkImageView>> ownedViews;
  std::map<uint32_t,VkDescriptorSetLayout> ownedLayouts;
+ std::map<VkSampler,VkSamplerCreateInfo> samplers;
+ std::map<VkSampler,VkSampler> clamped;
+ std::vector<VkSampler> ownedSamplers;
  VkDescriptorPool pool{};size_t allocated=0;uint64_t generation=0;
  TextureUpload upload;std::map<VkCommandPool,uint32_t> families;
  SkinDevice skin;
  std::map<const ms::LogicSpec*,SkinLogic> logic;
+ struct TextureLogic {
+  migoto::Engine engine;
+  std::shared_ptr<const ms::vkcap::SkinChoices> choices;
+  std::map<std::string,int> pushed;
+  bool initialized=false;
+  uint64_t lastSeen=0;
+  unsigned slide=0;
+ };
+ std::map<unsigned,TextureLogic> textureLogic;
+ uint64_t renderFrame=0;
  std::chrono::steady_clock::time_point logicEpoch=std::chrono::steady_clock::now();
 };
 struct TintState {
@@ -398,24 +449,66 @@ std::array<std::shared_ptr<ms::Texture>,2> paimonPixels; // immutable after star
 ms::VulkanSkinPayload paimonSkin; // immutable after startup
 std::vector<SharedSkin> sharedSkins;
 std::vector<SkinImage> sharedImages;
-void warmSkinImages(TintDevice& device,uint64_t profiles,bool startup);
+std::vector<TextureProgram> texturePrograms;
+std::map<uint32_t,uint64_t> textureIBPrograms;
+uint64_t explicitTexturePrograms=0;
+void warmSkinImages(TintDevice& device,uint64_t profiles,bool startup,bool request=true);
+VkImageView skinImage(TextureUpload& upload,unsigned id);
+void warmRenderImages(TextureUpload& upload,uint64_t profiles,bool startup){
+ uint64_t budget=startupSkinTextureBudget;
+ for(;profiles;profiles&=profiles-1){
+  const auto& program=texturePrograms.at(unsigned(__builtin_ctzll(profiles)));
+  const auto mode=program.loading?unsigned(T().renderLoadingFit.load(std::memory_order_relaxed)):0u;
+  for(const auto& resource:program.images){
+   const auto id=resource.second.front()[mode];
+   if(upload.images[id].view||upload.warm.count(id)||upload.requested.count(id)||upload.unavailable.count(id)||
+      std::find(upload.readingIds.begin(),upload.readingIds.end(),id)!=upload.readingIds.end())continue;
+   if(!startup){skinImage(upload,id);continue;}
+   const auto bytes=sharedImages[id].ref.len;
+   if(bytes<=budget){upload.warm.insert(id);budget-=bytes;}
+  }
+ }
+}
 
-// Shader access flags (in addition to descriptor types/count) are part of set compatibility. Here every
-// layout has contiguous combined samplers; accept only the layouts seen for this Body in the capture.
+// The packed shape preserves each binding and its shader stage flags when cloning a combined-sampler layout.
 uint32_t tintShape(const VkDescriptorSetLayoutCreateInfo& info){
  const auto n=info.bindingCount;if(info.flags||info.pNext||!info.pBindings||!n||n>tintBindings)return 0;
- uint32_t seen=0,vs=0,fs=0;
+ uint32_t seen=0,vs=0,fs=0,slots=0;
  for(uint32_t i=0;i<n;i++){const auto& b=info.pBindings[i];
-  if(b.binding>=n||(seen&(1u<<b.binding))||b.descriptorCount!=1||b.pImmutableSamplers||b.descriptorType!=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER||
+  if(b.binding>=tintBindings||(seen&(1u<<b.binding))||b.descriptorCount!=1||b.pImmutableSamplers||b.descriptorType!=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER||
     !b.stageFlags||(b.stageFlags&~(VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT)))return 0;
   seen|=1u<<b.binding;
+  slots=std::max(slots,b.binding+1);
   if(b.stageFlags&VK_SHADER_STAGE_VERTEX_BIT)vs|=1u<<b.binding;
   if(b.stageFlags&VK_SHADER_STAGE_FRAGMENT_BIT)fs|=1u<<b.binding;
  }
  const auto legacy=n>=4?1u<<(n-1):0u;
- return vs==legacy&&fs==(seen^legacy)?n:n|(vs<<4)|(fs<<16);
+ return slots==n&&vs==legacy&&fs==(seen^legacy)?n:slots|(vs<<4)|(fs<<16);
 }
 uint32_t tintSlotCount(uint32_t shape){return shape&15u;}
+uint32_t tintSlotMask(uint32_t shape){return shape<16?(1u<<shape)-1:((shape>>4)|(shape>>16))&0xfffu;}
+uint32_t writtenMask(const TintSet& set){return set.mixed?set.mixed->writtenMask:tintSlotMask(set.shape);}
+uint32_t imageMask(const TintSet& set){return set.mixed?set.mixed->imageMask:tintSlotMask(set.shape);}
+uint32_t mixedShape(TintDevice& device,const VkDescriptorSetLayoutCreateInfo& info){
+ if(info.flags||info.pNext||!info.pBindings||!info.bindingCount||info.bindingCount>tintBindings)return 0;
+ MixedLayout layout{};
+ for(uint32_t i=0;i<info.bindingCount;i++){
+  const auto& b=info.pBindings[i];
+  if(b.binding>=tintBindings||b.descriptorCount!=1||b.pImmutableSamplers||!b.stageFlags||
+     (b.stageFlags&~(VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT))||(layout.writtenMask&(1u<<b.binding)))return 0;
+  switch(b.descriptorType){
+   case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:layout.imageMask|=1u<<b.binding;break;
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:break;
+   default:return 0;
+  }
+  layout.writtenMask|=1u<<b.binding;layout.bindings[b.binding]={b.descriptorType,b.stageFlags};
+ }
+ if(!layout.imageMask)return 0;
+ for(const auto& entry:device.mixedLayouts){if(entry.second->bindings==layout.bindings){return entry.first;}}
+ if(device.mixedLayouts.size()>=256)return 0;
+ const uint32_t shape=0x20000000u+16*uint32_t(device.mixedLayouts.size())+uint32_t(tintBindings);
+ device.mixedLayouts.emplace(shape,std::make_shared<const MixedLayout>(std::move(layout)));return shape;
+}
 VkShaderStageFlags tintSlotStages(uint32_t shape,unsigned slot){
  if(shape<16)return shape>=4&&slot+1==shape?VK_SHADER_STAGE_VERTEX_BIT:VK_SHADER_STAGE_FRAGMENT_BIT;
  return (((shape>>4)&(1u<<slot))?unsigned(VK_SHADER_STAGE_VERTEX_BIT):0u)|(((shape>>16)&(1u<<slot))?unsigned(VK_SHADER_STAGE_FRAGMENT_BIT):0u);
@@ -561,7 +654,36 @@ bool stageSkinImages(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u,c
 UploadPixels readSkinImages(const std::vector<unsigned>& indices){
  UploadPixels out(indices.size());
  std::map<const SkinImageFile*,std::vector<size_t>> grouped;
- for(size_t i=0;i<indices.size();i++){grouped[sharedImages.at(indices[i]).file.get()].push_back(i);}
+ for(size_t i=0;i<indices.size();i++){
+  const auto& image=sharedImages.at(indices[i]);
+  if(image.raw.empty()){grouped[image.file.get()].push_back(i);continue;}
+  try{
+   const auto& owner=*image.file;
+   auto check=[&]{ms::require(ms::jstr(ms::JsonParser(ms::text(owner.dir+"/"+owner.manifest)).parse(),"generation",64)==owner.generation,
+                              "贴图包已变化");};
+   check();
+   const unsigned w=image.ref.w,h=image.ref.h;const auto length=4ull*w*h;
+   auto bytes=ms::read(owner.dir+"/"+image.raw,length);
+   ms::require(bytes.size()==length,"RGBA 贴图长度不符");
+   check();
+   ms::Texture pixels=image.circle?ms::ProfileReader::circleAvatar(w,h,std::move(bytes)):ms::Texture{w,h,std::move(bytes)};
+   if(image.aspect&&image.fit!=2){
+    const unsigned edge=std::max(w,h);
+    const unsigned ow=image.aspect>=1?edge:std::max(1l,std::lround(edge*image.aspect));
+    const unsigned oh=image.aspect>=1?std::max(1l,std::lround(edge/image.aspect)):edge;
+    const float scale=image.fit==1?std::max(float(ow)/w,float(oh)/h):std::min(float(ow)/w,float(oh)/h);
+    ms::Texture fitted{ow,oh,ms::Bytes(4ull*ow*oh)};
+    for(unsigned y=0;y<oh;y++)for(unsigned x=0;x<ow;x++){
+     const float sx=(float(x)+.5f-ow*.5f)/scale+w*.5f,sy=(float(y)+.5f-oh*.5f)/scale+h*.5f;
+     if(sx<0||sx>=w||sy<0||sy>=h)continue;
+     std::memcpy(fitted.pixels.data()+4ull*(size_t(y)*ow+x),pixels.pixels.data()+4ull*(size_t(sy)*w+size_t(sx)),4);
+    }
+    pixels=std::move(fitted);
+   }
+   ms::buildTextureMips(pixels,image.linear);
+   out[i]={std::make_shared<ms::Texture>(std::move(pixels)),image.linear};
+  }catch(const std::exception&){}
+ }
  for(const auto& group:grouped){
   const auto& file=*group.first;
   std::map<std::string,ms::MaterialFile> materials;std::set<std::string> names;
@@ -652,19 +774,21 @@ void uploadOnGetDeviceQueue2(VkDevice d,const VkDeviceQueueInfo2* i,VkQueue* q){
  const auto r=upCreateCommandPool.load()(d,c,a,pool);
  if(r==VK_SUCCESS&&c&&pool)tintObserve([&](auto& s){s.devices[d].families[*pool]=c->queueFamilyIndex;});return r;
 }
-::VkResult uploadOnQueueSubmit(VkQueue queue,uint32_t n,const VkSubmitInfo* p,VkFence fence){
+void serviceUploads(VkQueue queue){
  T().queueSubmits.fetch_add(1,std::memory_order_relaxed);
  // The application already serializes this queue. On its sole graphics queue, the copy/barrier submission
  // orders all later draws for this family. Retire staging only after our fence signals, without blocking.
  tintObserve([&](auto& s){auto q=s.queues.find(queue);if(q==s.queues.end())return;
   auto [d,family]=q->second;auto it=s.devices.find(d);if(it==s.devices.end())return;auto& u=it->second.upload;
-  if(T().allSkins&&(!T().routesReady.load(std::memory_order_acquire)||sharedSkins.empty()))return;
+  const bool sharedBackend=T().allSkins||T().renderTextures;
+  if(sharedBackend&&(!T().routesReady.load(std::memory_order_acquire)||(sharedSkins.empty()&&texturePrograms.empty())))return;
   if(!u.attempted){
    u.attempted=true;
-   if(!T().skinnedModel||prepareSkinBuffers(d,it->second)){
-    if(T().allSkins){
+   if(!T().skinnedModel||prepareSkinBuffers(d,it->second)||!texturePrograms.empty()){
+    if(sharedBackend){
      u.images.resize(sharedImages.size());u.usedFamily=family;u.queued=true;
      warmSkinImages(it->second,T().activeSkins.load(std::memory_order_relaxed),true);
+     warmRenderImages(u,T().activeRenderMods.load(std::memory_order_relaxed),true);
     }
     else{stageSkinImages(d,queue,family,u,{{paimonPixels[0],false},{paimonPixels[1],false}},maxResidentSkinTextures);}
    }
@@ -673,12 +797,19 @@ void uploadOnGetDeviceQueue2(VkDevice d,const VkDeviceQueueInfo2* i,VkQueue* q){
   }
   if(!u.queued||u.usedFamily!=family)return;
   if(u.fence&&upGetFenceStatus.load()(d,u.fence)==VK_SUCCESS){releaseUploadStaging(d,u);}
-  if(T().allSkins){
+  if(sharedBackend){
    const auto seen=T().skinIndexUploads.exchange(0,std::memory_order_relaxed);
    if(seen){warmSkinImages(it->second,seen&T().activeSkins.load(std::memory_order_relaxed),false);}
+   const auto textured=T().renderIndexUploads.exchange(0,std::memory_order_relaxed);
+   if(textured){warmRenderImages(u,textured&T().activeRenderMods.load(std::memory_order_relaxed),false);}
+   const auto before=u.imageBytes;
    serviceSkinImages(d,queue,family,u);
+   if(u.imageBytes!=before){warmSkinImages(it->second,T().activeSkins.load(std::memory_order_relaxed),false,false);}
   }
  });
+}
+::VkResult uploadOnQueueSubmit(VkQueue queue,uint32_t n,const VkSubmitInfo* p,VkFence fence){
+ serviceUploads(queue);
  const auto result=upQueueSubmit.load()(queue,n,p,fence);
  if(result==VK_SUCCESS&&T().gpuBuffersEnabled())for(uint32_t i=0;p&&i<n;i++)for(uint32_t j=0;j<p[i].commandBufferCount;j++)
   T().submitted(gpuHandle(p[i].pCommandBuffers[j]));
@@ -730,7 +861,8 @@ void tintOnDestroyImage(VkDevice d,VkImage image,const VkAllocationCallbacks* a)
   }
   if(complete)T().descriptorLayout(gpuHandle(*out),std::move(offsets),std::move(counts));
  }
- if(r==VK_SUCCESS&&p&&out)tintObserve([&](auto& s){auto& l=s.devices[d].layouts;auto shape=tintShape(*p);
+ if(r==VK_SUCCESS&&p&&out)tintObserve([&](auto& s){auto& dev=s.devices[d];auto& l=dev.layouts;auto shape=tintShape(*p);
+  if(!shape&&T().renderTextures){shape=mixedShape(dev,*p);}
   if(!shape&&T().skinnedModel)shape=skinShape(*p);if(shape)l[*out]=shape;else l.erase(*out);});
  return r;
 }
@@ -741,11 +873,35 @@ void tintOnDestroyDescriptorSetLayout(VkDevice d,VkDescriptorSetLayout layout,co
 ::VkResult tintOnCreatePipelineLayout(VkDevice d,const VkPipelineLayoutCreateInfo* p,const VkAllocationCallbacks* a,VkPipelineLayout* out){
  auto r=tintCreatePipelineLayout.load()(d,p,a,out);
  if(r==VK_SUCCESS&&p&&out)tintObserve([&](auto& s){auto& dev=s.devices[d];dev.pipelineLayouts.erase(*out);dev.skin.layouts.erase(*out);
-  if(!p->flags&&!p->pNext&&p->setLayoutCount&&p->pSetLayouts){auto i=dev.layouts.find(p->pSetLayouts[0]);if(i==dev.layouts.end())return;
-   if(i->second<skinStorage)dev.pipelineLayouts[*out]={i->second};
-   else if(i->second==skinStorage&&p->setLayoutCount==2&&!p->pushConstantRangeCount){auto j=dev.layouts.find(p->pSetLayouts[1]);if(j!=dev.layouts.end()&&j->second==skinUniform)dev.skin.layouts.insert(*out);}
+  if(!p->flags&&!p->pNext&&p->setLayoutCount&&p->pSetLayouts){
+   auto i=dev.layouts.find(p->pSetLayouts[0]);
+   if(i!=dev.layouts.end()&&i->second==skinStorage&&p->setLayoutCount==2&&!p->pushConstantRangeCount){
+    auto j=dev.layouts.find(p->pSetLayouts[1]);if(j!=dev.layouts.end()&&j->second==skinUniform)dev.skin.layouts.insert(*out);
+   }
+   TintDevice::Layout layout;
+   for(uint32_t set=0;set<std::min(p->setLayoutCount,8u);set++){
+    auto found=dev.layouts.find(p->pSetLayouts[set]);
+    if(found!=dev.layouts.end()&&found->second<skinStorage){layout.sets[set]=found->second;}
+   }
+   layout.shape=layout.sets[0];
+   if(layout.shape||(T().renderTextures&&std::any_of(layout.sets.begin(),layout.sets.end(),[](auto shape){return shape!=0;}))){
+    dev.pipelineLayouts[*out]=layout;
+   }
   }});
  return r;
+}
+::VkResult tintOnCreateSampler(VkDevice d,const VkSamplerCreateInfo* p,const VkAllocationCallbacks* a,VkSampler* out){
+ const auto result=tintCreateSampler.load()(d,p,a,out);
+ if(result==VK_SUCCESS&&T().renderTextures&&p&&out&&!p->pNext&&!p->flags){
+  tintObserve([&](auto& s){s.devices[d].samplers[*out]=*p;});
+ }
+ return result;
+}
+void tintOnDestroySampler(VkDevice d,VkSampler sampler,const VkAllocationCallbacks* a){
+ if(T().renderTextures){tintObserve([&](auto& s){auto at=s.devices.find(d);if(at!=s.devices.end()){
+  at->second.samplers.erase(sampler);at->second.clamped.erase(sampler);
+ }});}
+ tintDestroySampler.load()(d,sampler,a);
 }
 void tintOnDestroyPipelineLayout(VkDevice d,VkPipelineLayout layout,const VkAllocationCallbacks* a){
  tintObserve([&](auto& s){auto& dev=s.devices[d];dev.pipelineLayouts.erase(layout);
@@ -773,7 +929,7 @@ std::array<uint8_t,32> skinSemantics(const uint32_t* code,size_t n){
  if(r==VK_SUCCESS&&p&&out)tintObserve([&](auto& s){auto& dev=s.devices[d];auto& modules=dev.materialShaders;modules.erase(*out);
   if(p->codeSize%4==0){
    const auto words=p->codeSize/4;
-   if(T().allSkins){
+   if(T().allSkins||T().renderTextures){
     const auto bindings=ms::vkcap::materialTextureBindings(p->pCode,words);
     if(std::any_of(bindings.begin(),bindings.end(),[](unsigned b){return b!=~0u;}))modules[*out]=bindings;
    }else if(ms::vkcap::mainTextureBinding(p->pCode,words))modules[*out]={0,~0u,~0u};
@@ -897,6 +1053,7 @@ std::string skinLayoutDescription(const VkGraphicsPipelineCreateInfo& p){
  }
  if(r==VK_SUCCESS&&p&&out)tintObserve([&](auto& s){auto& dev=s.devices[d];for(uint32_t i=0;i<n;i++)if(out[i]){
   dev.pipelines.erase(out[i]);dev.textureSlots.erase(out[i]);dev.skin.graphics.erase(out[i]);
+  if(T().renderTextures&&dev.pipelineLayouts.count(p[i].layout)){dev.pipelines[out[i]]=p[i].layout;}
   dev.skin.drawLayouts.erase(out[i]);dev.skin.rejectedLayouts.erase(out[i]);dev.skin.layoutSamples.erase(out[i]);
   for(uint32_t j=0;p[i].pStages&&j<p[i].stageCount;j++){const auto& stage=p[i].pStages[j];
    if(stage.stage==VK_SHADER_STAGE_FRAGMENT_BIT){auto images=dev.materialShaders.find(stage.module);
@@ -944,7 +1101,10 @@ void tintOnDestroyPipeline(VkDevice d,VkPipeline pipeline,const VkAllocationCall
   dev.sets.erase(out[i]);dev.skin.sets.erase(out[i]);auto l=dev.layouts.find(p->pSetLayouts[i]);
   if(!p->pNext&&l!=dev.layouts.end()){
    if(l->second>=skinStorage)dev.skin.sets.emplace(out[i],SkinSet{p->descriptorPool,l->second});
-   else dev.sets.emplace(out[i],TintSet{p->descriptorPool,l->second});}}});
+   else{
+    auto& set=dev.sets.emplace(out[i],TintSet{p->descriptorPool,l->second}).first->second;
+    if(auto mix=dev.mixedLayouts.find(l->second);mix!=dev.mixedLayouts.end()){set.mixed=mix->second;}
+   }}}});
  return r;
 }
 void tintOnUpdateDescriptorSets(VkDevice d,uint32_t n,const VkWriteDescriptorSet* p,uint32_t nc,const VkCopyDescriptorSet* copies){
@@ -981,8 +1141,13 @@ void tintOnUpdateDescriptorSets(VkDevice d,uint32_t n,const VkWriteDescriptorSet
   }
   auto& set=it->second;
   set.cache={};set.textureCache.clear(); // a known handle value may now name a freshly allocated resource
-  if(w.pNext||w.dstBinding>=tintSlotCount(set.shape)||w.dstArrayElement||w.descriptorCount!=1||w.descriptorType!=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER||!w.pImageInfo){set.written=0;continue;}
-  set.images[w.dstBinding]=*w.pImageInfo;set.written|=1u<<w.dstBinding;
+  if(w.pNext||w.dstBinding>=tintBindings||!(writtenMask(set)&(1u<<w.dstBinding))||w.dstArrayElement||w.descriptorCount!=1){set.written=0;continue;}
+  const auto type=set.mixed?set.mixed->bindings[w.dstBinding].first:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  if(w.descriptorType!=type){set.written=0;continue;}
+  if(type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER&&w.pImageInfo){set.images[w.dstBinding]=*w.pImageInfo;}
+  else if(type!=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER&&w.pBufferInfo){set.buffers[w.dstBinding]=*w.pBufferInfo;}
+  else{set.written=0;continue;}
+  set.written|=1u<<w.dstBinding;
  }for(uint32_t i=0;copies&&i<nc;i++){auto it=dev.sets.find(copies[i].dstSet);if(it!=dev.sets.end()){it->second.written=0;it->second.cache={};it->second.textureCache.clear();}
    auto a=dev.skin.sets.find(copies[i].dstSet);if(a!=dev.skin.sets.end())a->second.bits=0;}});
 }
@@ -1029,6 +1194,7 @@ void tintOnDestroyCommandPool(VkDevice d,VkCommandPool p,const VkAllocationCallb
 void tintOnDestroyDevice(VkDevice d,const VkAllocationCallbacks* a){
  tintObserve([&](auto& s){auto i=s.devices.find(d);if(i!=s.devices.end()){auto& dev=i->second;
   if(dev.pool)tintDestroyDescriptorPool.load()(d,dev.pool,nullptr);
+  for(auto sampler:dev.ownedSamplers){tintDestroySampler.load()(d,sampler,nullptr);}
   for(const auto& v:dev.ownedViews)tintDestroyImageView.load()(d,v.second,nullptr);
   for(const auto& l:dev.ownedLayouts)tintDestroyDescriptorSetLayout.load()(d,l.second,nullptr);
   releaseSkin(d,dev.skin);
@@ -1053,7 +1219,14 @@ void tintOnCmdBindDescriptorSets(VkCommandBuffer c,VkPipelineBindPoint bp,VkPipe
   T().bindDescriptors(gpuHandle(c),bp==VK_PIPELINE_BIND_POINT_COMPUTE,gpuHandle(layout),first,handles.data(),count,values,offsets);
  }
  if(n&&(bp==VK_PIPELINE_BIND_POINT_GRAPHICS||(bp==VK_PIPELINE_BIND_POINT_COMPUTE&&T().skinnedModel)))tintObserve([&](auto& s){auto i=s.commands.find(c);if(i==s.commands.end())return;auto& cmd=i->second.second;
-  if(bp==VK_PIPELINE_BIND_POINT_GRAPHICS){if(!first){cmd.layout=layout;cmd.set=p?p[0]:VkDescriptorSet{};}else if(cmd.layout!=layout){cmd.layout={};cmd.set={};}}
+  if(bp==VK_PIPELINE_BIND_POINT_GRAPHICS){
+   if(!first){cmd.layout=layout;cmd.set=p?p[0]:VkDescriptorSet{};}
+   else if(cmd.layout!=layout){cmd.layout={};cmd.set={};}
+   if(T().renderTextures&&p&&first<cmd.sampledSets.size()){
+    if(cmd.sampledLayout!=layout){cmd.sampledLayout=layout;cmd.sampledSets={};}
+    for(uint32_t set=0;set<std::min(n,uint32_t(cmd.sampledSets.size()-first));set++){cmd.sampledSets[first+set]=p[set];}
+   }
+  }
   else if(!offsets&&p&&first<2&&n<=2-first){
    if(layout!=cmd.computeLayout)cmd.computeSets={};
    cmd.computeLayout=layout;for(uint32_t j=0;j<n;j++)cmd.computeSets[first+j]=p[j];
@@ -1175,7 +1348,7 @@ ms::Assignment warmAssignment(TintDevice& device,const SharedSkin& skin,unsigned
  }
  return values;
 }
-void warmSkinImages(TintDevice& device,uint64_t profiles,bool startup){
+void warmSkinImages(TintDevice& device,uint64_t profiles,bool startup,bool request){
  auto& upload=device.upload;
  uint64_t budget=startupSkinTextureBudget;
  for(;profiles;profiles&=profiles-1){
@@ -1192,7 +1365,11 @@ void warmSkinImages(TintDevice& device,uint64_t profiles,bool startup){
   }else{images.insert(skin.images.begin(),skin.images.end());}
   images.erase(~0u);
   if(!startup){
-   for(auto id:images){skinImage(upload,id);}
+   const bool ready=!images.empty()&&std::all_of(images.begin(),images.end(),[&](auto id){return id<upload.images.size()&&upload.images[id].view;});
+   if(ready){T().noteSkinTime(profile,ms::vkcap::SkinPhase::Textures);}
+   else if(request){
+    for(auto id:images){skinImage(upload,id);}
+   }
    continue;
   }
   uint64_t bytes=0;
@@ -1229,9 +1406,15 @@ void syncSkinLogic(SkinLogic& logic,const SharedSkin& skin,unsigned profile){
   const auto q=state.queues.find(queue);if(q==state.queues.end())return;
   auto& device=state.devices.at(q->second.first);
   if(!device.upload.queued||device.upload.usedFamily!=q->second.second)return;
+  ++device.renderFrame;
+  const auto seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-device.logicEpoch).count();
+  const auto render=T().activeRenderMods.load(std::memory_order_relaxed);
+  for(auto it=device.textureLogic.begin();it!=device.textureLogic.end();){
+   if(!(render&(uint64_t(1)<<it->first))){it=device.textureLogic.erase(it);continue;}
+   it->second.engine.frame(seconds);++it;
+  }
   auto keys=T().takeSkinKeys();
   if(!T().skinLogic.load(std::memory_order_relaxed)){device.logic.clear();return;}
-  const auto seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-device.logicEpoch).count();
   std::set<const ms::LogicSpec*> advanced;
   for(unsigned profile=0;profile<sharedSkins.size();profile++){
    const auto& skin=sharedSkins[profile];
@@ -1331,22 +1514,32 @@ void skinOnCmdDispatch(VkCommandBuffer cmd,uint32_t x,uint32_t y,uint32_t z){
  });
 }
 
-VkDescriptorSet tintClone(VkDevice d,TintDevice& dev,TintSet& target,TintImg* image,unsigned part,const TintViews& overrides){
+VkDescriptorSet tintClone(VkDevice d,TintDevice& dev,TintSet& target,TintImg* image,unsigned part,const TintViews& overrides,const TintSamplers& samplers={}){
  const bool preset=std::any_of(overrides.begin(),overrides.end(),[](auto view){return bool(view);});
  if(!preset&&!image)return {};
  const auto generation=image?image->generation:0;
- auto& saved=preset?target.textureCache[overrides]:target.cache.at(part);if(saved.set&&saved.generation==generation)return saved.set;
+ auto& saved=preset?target.textureCache[{overrides,samplers}]:target.cache.at(part);if(saved.set&&saved.generation==generation)return saved.set;
  const auto count=tintSlotCount(target.shape);
+ const auto slots=writtenMask(target),sampled=imageMask(target);
  if(dev.allocated>=tintSetLimit)return {};
  for(unsigned i=0;i<count;i++)if((overrides[i]||(!preset&&i==0))&&target.images[i].imageLayout!=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)return {};
- for(uint32_t i=0;i<count;i++)if(!target.images[i].imageView||!target.images[i].sampler)return {};
- if(!dev.pool){VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,uint32_t(tintSetLimit*tintBindings)};
-  const VkDescriptorPoolCreateInfo p{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,nullptr,0,uint32_t(tintSetLimit),1,&size};
+ for(uint32_t i=0;i<count;i++){
+  if((sampled&(1u<<i))&&(!target.images[i].imageView||!target.images[i].sampler))return {};
+ }
+ if(!dev.pool){
+  constexpr auto limit=uint32_t(tintSetLimit*tintBindings);
+  const VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,limit},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,limit},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,limit}};
+  const VkDescriptorPoolCreateInfo p{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,nullptr,0,uint32_t(tintSetLimit),T().renderTextures?3u:1u,sizes};
   if(tintCreateDescriptorPool.load()(d,&p,nullptr,&dev.pool)!=VK_SUCCESS){dev.pool={};return {};}}
  auto& layout=dev.ownedLayouts[target.shape];
  if(!layout){std::array<VkDescriptorSetLayoutBinding,tintBindings> b{};
-  for(uint32_t i=0;i<count;i++)b[i]={i,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,tintSlotStages(target.shape,i),nullptr};
-  const VkDescriptorSetLayoutCreateInfo p{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,nullptr,0,count,b.data()};
+  uint32_t bindings=0;
+  for(uint32_t i=0;i<count;i++){
+   if(!(slots&(1u<<i)))continue;
+   const auto [type,stages]=target.mixed?target.mixed->bindings[i]:std::make_pair(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,tintSlotStages(target.shape,i));
+   b[bindings++]={i,type,1,stages,nullptr};
+  }
+  const VkDescriptorSetLayoutCreateInfo p{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,nullptr,0,bindings,b.data()};
   if(tintCreateDescriptorSetLayout.load()(d,&p,nullptr,&layout)!=VK_SUCCESS){layout={};return {};}}
  VkImageView unused{};auto& view=preset?unused:image->colored.at(part);
  if(!preset&&!view){if(dev.ownedViews.size()>=tintSetLimit)return {};auto ci=image->info;auto a=ci.components.a;
@@ -1361,10 +1554,19 @@ VkDescriptorSet tintClone(VkDevice d,TintDevice& dev,TintSet& target,TintImg* im
  if(tintAllocateDescriptorSets.load()(d,&a,&set)!=VK_SUCCESS)return {};
  ++dev.allocated;
  auto images=target.images;if(!preset)images[0].imageView=view;
- else for(unsigned b=0;b<count;b++)if(overrides[b])images[b].imageView=overrides[b];
+ else for(unsigned b=0;b<count;b++){
+  if(overrides[b]){images[b].imageView=overrides[b];}
+  if(samplers[b]){images[b].sampler=samplers[b];}
+ }
  std::array<VkWriteDescriptorSet,tintBindings> writes{};
- for(uint32_t i=0;i<count;i++)writes[i]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,set,i,0,1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,&images[i],nullptr,nullptr};
- tintUpdateDescriptorSets.load()(d,count,writes.data(),0,nullptr);
+ uint32_t filled=0;
+ for(uint32_t i=0;i<count;i++){
+  if(!(slots&(1u<<i)))continue;
+  const auto type=target.mixed?target.mixed->bindings[i].first:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  const bool hasImage=(sampled&(1u<<i))!=0;
+  writes[filled++]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,set,i,0,1,type,hasImage?&images[i]:nullptr,hasImage?nullptr:&target.buffers.at(i),nullptr};
+ }
+ tintUpdateDescriptorSets.load()(d,filled,writes.data(),0,nullptr);
  saved={set,generation};return set;
 }
 TintSet* boundTintSet(TintDevice& device,const TintCmd& state){
@@ -1373,8 +1575,196 @@ TintSet* boundTintSet(TintDevice& device,const TintCmd& state){
  auto layout=device.pipelineLayouts.find(state.layout);
  if(layout==device.pipelineLayouts.end())return nullptr;
  auto set=device.sets.find(state.set);
- if(set==device.sets.end()||set->second.shape!=layout->second.shape||set->second.written!=(1u<<tintSlotCount(set->second.shape))-1)return nullptr;
+ if(set==device.sets.end()||set->second.shape!=layout->second.shape||set->second.written!=writtenMask(set->second))return nullptr;
  return &set->second;
+}
+VkSampler clampSampler(VkDevice d,TintDevice& dev,VkSampler sampler){
+ auto at=dev.samplers.find(sampler);if(at==dev.samplers.end())return {};
+ auto info=at->second;
+ if(info.addressModeU==VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE&&info.addressModeV==VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)return sampler;
+ if(auto existing=dev.clamped.find(sampler);existing!=dev.clamped.end())return existing->second;
+ if(dev.ownedSamplers.size()>=tintSetLimit)return {};
+ info.addressModeU=info.addressModeV=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+ VkSampler replacement{};
+ if(tintCreateSampler.load()(d,&info,nullptr,&replacement)!=VK_SUCCESS)return {};
+ dev.ownedSamplers.push_back(replacement);dev.clamped.emplace(sampler,replacement);
+ return replacement;
+}
+std::string textureCheck(uint32_t value){return "vkcheck"+std::to_string(value);}
+std::optional<uint32_t> textureRouteStart(VkCommandBuffer command,const ms::vkcap::RenderDraw& draw,const TextureRoute& rule){
+ const int64_t first=draw.indexed?rule.first:rule.firstVertex,count=draw.indexed?rule.count:rule.vertices;
+ if(draw.indexed?(rule.firstVertex>=0||rule.vertices>=0):(rule.first>=0||rule.count>=0))return {};
+ if(count>=0&&draw.count!=count)return {};
+ if(rule.ib){
+  if(!draw.indexed||draw.instances!=1||draw.baseVertex)return {};
+  for(const auto& index:draw.indices){
+   if(index.hash!=*rule.ib||(first>=0&&index.first!=first)||(rule.total&&rule.total!=index.total))continue;
+   if(rule.limit>=0&&uint64_t(index.first)+draw.count>uint64_t(rule.limit))continue;
+   return index.first;
+  }
+  return {};
+ }
+ if(first>=0&&draw.first!=first)return {};
+ return T().renderMatches(gpuHandle(command),draw,rule.terms)?std::optional<uint32_t>(draw.first):std::nullopt;
+}
+void syncTextureLogic(TintDevice::TextureLogic& logic,const TextureProgram& program,unsigned profile){
+ const bool initial=!logic.initialized;
+ std::map<std::string,float> saved;
+ if(initial){
+  logic.engine.load({{"",program.ini}});
+  saved=T().savedLogic(program.persistFile,"").value_or(std::map<std::string,float>{});
+  logic.engine.start(saved);
+  logic.initialized=true;
+ }
+ const auto choices=std::atomic_load(&T().skinChoices);
+ if(!initial&&choices==logic.choices)return;
+ logic.choices=choices;
+ auto wanted=program.defaults;
+ std::set<std::string> explicitVars;
+ if(choices){
+  const auto mod=choices->find(T().renderMods[profile]);
+  if(mod!=choices->end())for(const auto& [key,value]:mod->second){
+   auto found=program.vars.find(key);
+   if(found!=program.vars.end()&&std::find(found->second.begin(),found->second.end(),value)!=found->second.end()){
+    wanted[key]=value;explicitVars.insert(key);
+   }
+  }
+ }
+ for(const auto& [key,value]:wanted){
+  const auto pushed=logic.pushed.find(key);
+  if(pushed==logic.pushed.end()||pushed->second!=value){
+   if(auto* var=logic.engine.global(key,"")){
+    if(initial&&saved.count(key)&&!explicitVars.count(key)){continue;}
+    if(var->value!=float(value)){
+     var->value=float(value);
+     if(var->flags&migoto::VarPersist){logic.engine.persistDirty=true;}
+    }
+   }
+  }
+ }
+ logic.pushed=std::move(wanted);
+}
+struct TextureDraw {
+ struct Binding {uint32_t index;VkDescriptorSet original,replacement;};
+ VkPipelineLayout layout{};
+ std::vector<Binding> bindings;
+ unsigned profile=0;
+};
+TextureDraw planTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw& draw){
+ TextureDraw result;
+ if(!draw.count||!draw.instances||!T().routesReady.load(std::memory_order_acquire))return result;
+ uint64_t candidates=explicitTexturePrograms;
+ for(const auto& index:draw.indices){
+  if(auto at=textureIBPrograms.find(index.hash);at!=textureIBPrograms.end()){candidates|=at->second;}
+ }
+ const auto enabled=candidates&T().activeRenderMods.load(std::memory_order_relaxed);
+ if(!enabled)return result;
+ tintObserve([&](auto& state){
+  auto cmd=state.commands.find(command);if(cmd==state.commands.end())return;
+  const auto& bind=cmd->second.second;auto& device=state.devices.at(cmd->second.first);
+  const auto family=device.families.find(bind.pool);
+  if(!device.upload.queued||family==device.families.end()||family->second!=device.upload.usedFamily)return;
+  auto pipeline=device.pipelines.find(bind.pipeline);if(pipeline==device.pipelines.end())return;
+  const auto layout=pipeline->second;
+  const auto known=device.pipelineLayouts.find(layout);if(known==device.pipelineLayouts.end())return;
+  auto available=bind.sampledLayout==layout?bind.sampledSets:decltype(bind.sampledSets){};
+  if(!available[0]&&bind.layout==layout){available[0]=bind.set;}
+  std::array<TintSet*,8> sets{};
+  for(unsigned i=0;i<sets.size();i++){
+   auto set=device.sets.find(available[i]);
+   const auto shape=i?known->second.sets[i]:known->second.shape;
+   if(shape&&set!=device.sets.end()&&set->second.shape==shape&&set->second.written==writtenMask(set->second)){
+    sets[i]=&set->second;
+   }
+  }
+  const auto roles=device.textureSlots.find(bind.pipeline);
+  for(uint64_t active=enabled;active;active&=active-1){
+   const unsigned profile=unsigned(__builtin_ctzll(active));
+   const auto& program=texturePrograms[profile];
+   migoto::DrawInfo observed;observed.live=true;
+   std::map<std::string,std::pair<unsigned,unsigned>> targets;
+   uint32_t first=draw.first;
+   for(const auto& route:program.rules){
+    const auto start=textureRouteStart(command,draw,route);
+    if(!start)continue;
+    first=*start;
+    const auto key=textureCheck(route.check);
+    observed.checks.push_back(key);observed.bindings[key]=migoto::Ref::game(route.check);
+    if(route.thisBinding!=~0u){targets[key]={route.thisSet,route.thisBinding};}
+   }
+   if(observed.checks.empty())continue;
+   if(sets[0]){
+    for(unsigned b=0;b<tintSlotCount(sets[0]->shape);b++){
+     if(imageMask(*sets[0])&(1u<<b)){targets["ps-t"+std::to_string(b)]={0,b};}
+    }
+   }
+   if(sets[0]&&roles!=device.textureSlots.end()){
+    for(size_t role=0;role<roles->second.size();role++){
+     const auto binding=roles->second[role];
+     if(binding<tintBindings&&(imageMask(*sets[0])&(1u<<binding))){targets["ps-t"+std::to_string(20+role)]={0,binding};}
+    }
+   }
+   observed.call={{draw.indexed?"index_count":"vertex_count",float(draw.count)},
+                  {draw.indexed?"first_index":"first_vertex",float(first)},
+                  {"instance_count",float(draw.instances)},{"first_instance",float(draw.firstInstance)}};
+   auto& logic=device.textureLogic[profile];syncTextureLogic(logic,program,profile);
+   if(program.loading&&logic.lastSeen+1<device.renderFrame){++logic.slide;}
+   logic.lastSeen=device.renderFrame;
+   const auto selected=logic.engine.draw(observed);
+   if(selected.skip||!selected.draws.empty()||selected.unsupported||!selected.customShaders.empty())return;
+   if(logic.engine.persistDirty){
+    auto values=logic.engine.persistent();
+    if(!values.empty()){T().rememberLogic(program.persistFile,{"",std::move(values)},true);}
+    logic.engine.persistDirty=false;
+   }
+   std::array<TintViews,8> replacements{};
+   std::array<TintSamplers,8> samplers{};
+   bool waiting=false;
+   for(const auto& [slot,ref]:selected.bindings){
+    if(ref.kind!=migoto::Ref::Mod)continue;
+    auto target=targets.find(slot);auto image=program.images.find(ref.resource);
+    if(target==targets.end()&&(slot=="ps-t20"||slot=="ps-t21"||slot=="ps-t22"))continue;
+    if(target==targets.end()||image==program.images.end())return;
+    const auto [set,binding]=target->second;
+    if(!sets[set]||!(imageMask(*sets[set])&(1u<<binding)))return;
+    const auto& slides=image->second;
+    const auto mode=program.loading?unsigned(T().renderLoadingFit.load(std::memory_order_relaxed)):0u;
+    const auto id=slides[logic.slide%slides.size()][mode];
+    auto view=skinImage(device.upload,id);
+    if(!view){waiting=true;continue;}
+    auto& out=replacements[set][binding];
+    if(out&&out!=view)return;
+    out=view;
+    if(program.loading){
+     samplers[set][binding]=clampSampler(cmd->second.first,device,sets[set]->images[binding].sampler);
+     if(!samplers[set][binding])return;
+    }
+   }
+   if(waiting)return;
+   TextureDraw plan;plan.layout=layout;plan.profile=profile;
+   for(unsigned i=0;i<sets.size();i++){
+    if(std::none_of(replacements[i].begin(),replacements[i].end(),[](auto view){return bool(view);}))continue;
+    const auto set=tintClone(cmd->second.first,device,*sets[i],nullptr,0,replacements[i],samplers[i]);
+    if(!set)return;
+    plan.bindings.push_back({i,available[i],set});
+   }
+   if(!plan.bindings.empty()){
+    result=std::move(plan);return;
+   }
+  }
+ });
+ return result;
+}
+bool renderTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw& draw){
+ const auto plan=planTextureDraw(command,draw);
+ if(plan.bindings.empty())return false;
+ auto bind=tintCmdBindDescriptorSets.load();
+ for(const auto& set:plan.bindings){bind(command,VK_PIPELINE_BIND_POINT_GRAPHICS,plan.layout,set.index,1,&set.replacement,0,nullptr);}
+ if(draw.indexed){cmdDrawIndexed.load()(command,draw.count,draw.instances,draw.first,draw.baseVertex,draw.firstInstance);}
+ else{gpuCmdDraw.load()(command,draw.count,draw.instances,draw.first,draw.firstInstance);}
+ for(const auto& set:plan.bindings){bind(command,VK_PIPELINE_BIND_POINT_GRAPHICS,plan.layout,set.index,1,&set.original,0,nullptr);}
+ T().renderDraws[plan.profile].fetch_add(1,std::memory_order_relaxed);
+ return true;
 }
 struct TintDraw {
  VkPipelineLayout layout{};VkDescriptorSet original{},replacement{};
@@ -1444,6 +1834,7 @@ ms::LogicDriver::LiveDraw skinLogicDraw(TintDevice& device,const SharedSkin& pro
 }
 TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},uint32_t firstInstance=0){
  using ms::vkcap::SkinMiss;
+ using ms::vkcap::SkinPhase;
  TintDraw result;tintObserve([&](auto& s){auto i=s.commands.find(c);if(i==s.commands.end())return;const auto& state=i->second.second;
   auto j=s.devices.find(i->second.first);if(j==s.devices.end())return;auto& d=j->second;
   auto miss=[&](SkinMiss why){if(shared&&T().skinActive(shared.profile))T().noteSkinMiss(why);};
@@ -1490,12 +1881,16 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
     if(!skinFits(profile,observed->second,shared.profile))return;
     auto& profiles=s.sourceProfiles[{source->rest,source->weights}];const uint64_t bit=uint64_t(1)<<shared.profile;
     if(!(profiles&bit)){profiles|=bit;T().skinMatches.fetch_add(1,std::memory_order_relaxed);}
+    T().noteSkinTime(shared.profile,SkinPhase::Association);
     if(!T().skinActive(shared.profile))return;
     const auto currentKey=std::make_pair(state.vertex[0],shared.profile);auto current=s.sharedOutput.find(currentKey);
     const auto recorded=state.sharedProduced.find(currentKey);
     poseReady=current!=s.sharedOutput.end()&&current->second.revision==source->revision&&
        (current->second.queued||(recorded!=state.sharedProduced.end()&&recorded->second==current->second.revision));
-    if(poseReady){plan.newVertex[0]=plan.newVertex[2]=current->second.buffer.buffer;}
+    if(poseReady){
+     T().noteSkinTime(shared.profile,SkinPhase::Pose);
+     plan.newVertex[0]=plan.newVertex[2]=current->second.buffer.buffer;
+    }
     if(poseReady&&(plan.bindings&4)&&!state.vertexOffset[2]){
      auto previous=s.sharedOutput.find({state.vertex[2],shared.profile});
      if(previous!=s.sharedOutput.end()&&previous->second.queued)plan.newVertex[2]=previous->second.buffer.buffer;
@@ -1635,9 +2030,11 @@ VkResult onBeginCommandBuffer(void* c,const void* info){
 }
 void onCmdDrawIndexed(void* c,uint32_t count,uint32_t instances,uint32_t first,int32_t baseVertex,uint32_t firstInstance){
  [[maybe_unused]] int part=-1;[[maybe_unused]] ms::vkcap::SkinHit shared;
- try{part=T().drawIndexed(reinterpret_cast<uintptr_t>(c),count,instances,first,baseVertex,firstInstance,&shared);}catch(...){}
+ ms::vkcap::RenderDraw render{true,count,instances,first,firstInstance,baseVertex};
+ try{part=T().drawIndexed(reinterpret_cast<uintptr_t>(c),count,instances,first,baseVertex,firstInstance,&shared,T().renderTextures?&render.indices:nullptr);}catch(...){}
  auto draw=cmdDrawIndexed.load();
 #ifdef GIBOX_VK_TINT
+ if(shared&&T().skinActive(shared.profile)){T().noteSkinTime(shared.profile,ms::vkcap::SkinPhase::Index);}
  if((part>=0||shared)&&T().tintHooks){const auto command=static_cast<VkCommandBuffer>(c);auto plan=tintDraw(command,shared?shared.slot:unsigned(part),shared,firstInstance);
   const bool active=shared?T().skinActive(shared.profile):T().tintOn.load(std::memory_order_relaxed);
   if(active&&plan.skip){T().sharedDraws.fetch_add(1,std::memory_order_relaxed);T().profileDraws[shared.profile].fetch_add(1,std::memory_order_relaxed);return;}
@@ -1679,13 +2076,14 @@ void onCmdDrawIndexed(void* c,uint32_t count,uint32_t instances,uint32_t first,i
     bindGeometry(false);
    }else{bindMaterial(plan.replacement);draw(c,count,instances,first,baseVertex,firstInstance);}
    bindMaterial(plan.original);
-   if(shared){T().sharedDraws.fetch_add(1,std::memory_order_relaxed);T().profileDraws[shared.profile].fetch_add(1,std::memory_order_relaxed);
+   if(shared){T().noteSkinTime(shared.profile,ms::vkcap::SkinPhase::FirstDraw);T().sharedDraws.fetch_add(1,std::memory_order_relaxed);T().profileDraws[shared.profile].fetch_add(1,std::memory_order_relaxed);
     if(plan.textures&2)T().lightMapDraws.fetch_add(1,std::memory_order_relaxed);
     if(plan.textures&4)T().normalMapDraws.fetch_add(1,std::memory_order_relaxed);}
    else T().tintDraws[part].fetch_add(1,std::memory_order_relaxed);
    return;}
   if(shared){if(active)T().sharedMisses.fetch_add(1,std::memory_order_relaxed);}else T().tintMisses[part].fetch_add(1,std::memory_order_relaxed);
  }
+ if(T().renderTextures&&renderTextureDraw(static_cast<VkCommandBuffer>(c),render))return;
 #endif
  draw(c,count,instances,first,baseVertex,firstInstance);
 }
@@ -1710,8 +2108,9 @@ PFN wrapped(const char* name,PFN real){if(!real||!name||!T().enabled)return real
   if(n=="vkCmdDrawIndexed")return wrap(cmdDrawIndexed,real,&onCmdDrawIndexed);
  }
 #ifdef GIBOX_VK_TINT
- if(T().allSkins&&n=="vkQueuePresentKHR")return wrap(logicQueuePresent,real,&logicOnQueuePresent);
+ if((T().allSkins||T().renderTextures)&&n=="vkQueuePresentKHR")return wrap(logicQueuePresent,real,&logicOnQueuePresent);
 #define RESOURCE_WRAP(F) if(n=="vk" #F)return wrap(gpu##F,real,&resourceOn##F);
+ if(T().renderTextures){RESOURCE_WRAP(CmdDraw) RESOURCE_WRAP(QueueSubmit2) RESOURCE_WRAP(QueueSubmit2KHR)}
  if(T().gpuEnabled()){RESOURCE_HOOKS(RESOURCE_WRAP)}
  if(T().gpuBuffersEnabled()){RESOURCE_BUFFER_HOOKS(RESOURCE_WRAP)}
 #undef RESOURCE_WRAP
@@ -1721,7 +2120,7 @@ PFN wrapped(const char* name,PFN real){if(!real||!name||!T().enabled)return real
   TINT_WRAP(UpdateDescriptorSetWithTemplate)
   TINT_WRAP(UpdateDescriptorSetWithTemplateKHR)
 #undef TINT_WRAP
-  if(!T().paimonTextureMod.empty()||T().allSkins){
+  if(!T().paimonTextureMod.empty()||T().allSkins||T().renderTextures){
 #define UPLOAD_WRAP(F) if(n=="vk" #F)return wrap(up##F,real,&uploadOn##F);
    UPLOAD_HOOKS(UPLOAD_WRAP)
 #undef UPLOAD_WRAP
@@ -1781,6 +2180,182 @@ bool patch(uint32_t* island,std::initializer_list<Redirect*> rs,std::string& why
 namespace ms::vkhook {
 #ifdef GIBOX_VK_TINT
 namespace {
+TextureRoute textureRoute(const Json& j,bool ui){
+ TextureRoute r;
+ r.first=texdiag::num(j,"first",-1);r.count=texdiag::num(j,"indexCount",-1);
+ r.firstVertex=texdiag::num(j,"firstVertex",-1);r.vertices=texdiag::num(j,"vertexCount",-1);
+ for(auto n:{r.first,r.count,r.firstVertex,r.vertices}){require(n>=-1&&n<=UINT32_MAX,"绘制范围无效");}
+ require(r.count!=0&&r.vertices!=0&&((r.first<0&&r.count<0)||(r.firstVertex<0&&r.vertices<0)),"绘制类型或数量无效");
+ if(auto match=vkcap::resourceMatches(texdiag::str(j,"matchVulkan"))){
+  r.terms=std::move(*match);
+  unsigned textureCount=0;bool context=false;
+  for(const auto& term:r.terms){
+   if(term.slot.kind==vkcap::ResourceKind::Texture){
+    ++textureCount;
+    if(!term.slot.element&&term.slot.binding<tintBindings){r.thisSet=term.slot.set;r.thisBinding=term.slot.binding;}
+   }else{context=true;}
+  }
+  if(textureCount!=1){r.thisBinding=~0u;}
+  if(ui){require(context&&r.thisBinding!=~0u&&(r.count>0||r.vertices>0),"UI 需要单一纹理、Shader 或网格和精确绘制数量");}
+ }else{
+  require(!ui&&texdiag::str(j,"matchVulkan").empty(),"缺少有效的 Vulkan 绘制上下文");
+  const auto kind=texdiag::str(j,"kind");
+  require(kind=="segment"||kind=="whole-ib","需要已验证的安卓贴图或绘制映射");
+  r.ib=vkcap::drawHash(texdiag::str(j,"hash"));
+  require(bool(r.ib)&&r.firstVertex<0&&r.vertices<0,"无效的 INI 索引规则");
+  r.semantic=true;
+ }
+ return r;
+}
+void appendTextureRule(TextureProgram& program,TextureRoute route,const std::string& body){
+ require(program.rules.size()<256&&!body.empty(),"纯贴图没有可执行的绑定");
+ route.check=uint32_t(program.rules.size()+1);
+ char hash[9];std::snprintf(hash,sizeof hash,"%08x",route.check);
+ program.ini+="[TextureOverrideGibox"+std::to_string(route.check)+"]\nhash = "+hash+"\n"+body;
+ program.rules.push_back(std::move(route));
+}
+struct TextureImport {
+ TextureProgram program;
+ std::vector<SkinImage> pending;
+ std::shared_ptr<const SkinImageFile> file;
+ std::map<std::pair<std::string,bool>,std::string> resources;
+ TextureImport(const std::string& shared,const std::string& name,const std::string& dir,const std::string& manifest,const Json& doc):
+  file(std::make_shared<SkinImageFile>(SkinImageFile{dir,jstr(doc,"generation",64),0,manifest})){
+  program.persistFile=logicPersistFile(shared,name);
+ }
+ std::string image(const std::string& path,unsigned w,unsigned h,bool linear,bool circle=false,float aspect=0){
+  if(!aspect){
+   auto found=resources.find({path,linear});
+   if(found!=resources.end())return found->second;
+  }
+  const auto name="resourcegibox"+std::to_string(program.images.size());
+  std::array<unsigned,3> ids{};
+  for(unsigned i=0;i<(aspect?3u:1u);i++){
+   ids[i]=unsigned(sharedImages.size()+pending.size());
+   const auto edge=std::max(w,h);
+   const auto bytes=aspect?textureBytes(edge,edge,textureMipCount(edge,edge)):textureBytes(w,h,textureMipCount(w,h));
+   pending.push_back({file,TexRef{w,h,0,bytes},linear,path,circle,aspect,int(i)});
+  }
+  if(!aspect){ids.fill(ids[0]);resources.emplace(std::make_pair(path,linear),name);}
+  program.images[name].push_back(ids);
+  return name;
+ }
+ void textureOnly(const Json& doc,const pcdb::Db& pc,const pcdb::DeviceMap& android){
+  auto parsed=texdiag::parseMod(text(file->dir+"/texture.json"),file->dir);
+  require(parsed.generation==file->generation,"读取时纯贴图包已变化");
+  if(!pc.empty()){texdiag::annotate(parsed.doc,pc);}
+  program.vars=parsed.vars;program.defaults=parsed.defaults;
+  if(!program.defaults.empty()){
+   program.ini+="[Constants]\n";
+   for(const auto& entry:program.defaults){
+    require(migoto::validVariableName(entry.first),"INI 变量名无效");
+    bool persist=false;
+    for(const auto& source:doc.at("diag").at("variables").array){
+     if(texdiag::str(source,"name")==entry.first){persist=source.at("persist").boolean;break;}
+    }
+    program.ini+=std::string(persist?"global persist ":"global ")+entry.first+" = "+std::to_string(entry.second)+"\n";
+   }
+  }
+  auto rules=parsed.doc.rules;
+  std::stable_sort(rules.begin(),rules.end(),[](const auto& a,const auto& b){return std::tie(a.priority,a.section)<std::tie(b.priority,b.section);});
+  for(const auto& rule:rules){
+   if(rule.textures.empty())continue;
+   require(rule.draws.empty(),"纯贴图段含几何绘制");
+   const auto& descriptors=doc.at("diag").at("rules").array;
+   const auto entry=std::find_if(descriptors.begin(),descriptors.end(),[&](const auto& source){return texdiag::str(source,"section")==rule.section;});
+   require(entry!=descriptors.end(),"纯贴图绘制规则缺失");
+   TextureRoute route;
+   if(rule.gpu.empty()&&rule.kind=="hash-unknown"){
+    require(!rule.pcHasIb&&rule.pcTextures.size()==1&&std::all_of(rule.textures.begin(),rule.textures.end(),
+            [](const auto& texture){return texture.slot=="this";}),"需要已验证的安卓贴图或绘制映射");
+    const auto& match=rule.pcTextures.front();
+    const auto* found=android.find(match.ib);
+    require(found&&match.submesh<match.counts.size()&&match.indexes.size()==match.counts.size()&&found->subs.size()==match.counts.size(),
+            "PC 贴图缺少经核对的安卓索引布局");
+    for(size_t i=0;i<found->subs.size();i++){
+     require(found->subs[i].first==match.indexes[i]&&found->subs[i].second==match.counts[i],"PC 贴图对应的安卓绘制布局不同");
+    }
+    route.ib=vkcap::drawHash(match.ib);
+    route.semantic=true;route.first=match.indexes[match.submesh];route.count=match.counts[match.submesh];
+    const auto end=match.indexes.back()+match.counts.back();
+    require(route.ib&&route.count>0&&end<=UINT32_MAX,"PC 贴图的绘制布局无效");
+    route.total=uint32_t(end);
+   }else{route=textureRoute(*entry,false);}
+   require(rule.kind!="glider-owner"||!route.terms.empty(),"按角色换翼需要已验证的 Vulkan 绘制上下文");
+   if(route.ib&&route.first>=0){
+    for(const auto& other:rules){
+     if(other.hash==rule.hash&&other.first>route.first&&(route.limit<0||other.first<route.limit)){route.limit=other.first;}
+    }
+   }
+   std::string body;
+   for(const auto& binding:rule.textures){
+    require(binding.condition.find_first_of("\r\n")==binding.condition.npos,"INI 条件中有换行");
+    std::string target=binding.slot;
+    if(route.semantic||target.rfind("resource",0)==0){
+     const auto role=binding.role=="diffuse"?0:binding.role=="lightmap"?1:binding.role=="normal"?2:-1;
+     require(role>=0,"贴图角色没有可用的安卓着色器绑定");
+     target="ps-t"+std::to_string(20+role);
+    }else if(target=="this"){require(route.thisBinding!=~0u,"this 缺少唯一的采样纹理");}
+    else{
+     require(target.rfind("ps-t",0)==0,"纯贴图只接受像素纹理绑定");
+     unsigned n=~0u;const auto result=std::from_chars(target.data()+4,target.data()+target.size(),n);
+     require(result.ec==std::errc{}&&result.ptr==target.data()+target.size()&&n<tintBindings,"纹理 binding 超限");
+    }
+    std::string resource="null";
+    if(!binding.resource.empty()){
+     const auto at=std::find_if(parsed.textures.begin(),parsed.textures.end(),[&](const auto& entry){return entry.resource==binding.resource;});
+     require(at!=parsed.textures.end(),"转换包缺少贴图 "+binding.resource);
+     resource=image(at->file,at->width,at->height,binding.role=="lightmap"||binding.role=="normal");
+    }
+    if(!binding.condition.empty()){body+="if "+binding.condition+"\n";}
+    body+=target+" = "+resource+"\n";
+    if(!binding.condition.empty()){body+="endif\n";}
+   }
+   appendTextureRule(program,std::move(route),body);
+  }
+ }
+ void uiImage(const Json& doc){
+  require(jstr(doc,"format",64)=="gibox-profile-images"&&juint(doc,"version",1,1)==1,"头像和名片格式无效");
+  for(const auto* role:profileRoles){
+   const auto& row=doc.at(role);if(row.type==Json::Null)continue;
+   const std::string path=std::string("images/")+role+".rgba";
+   require(jstr(row,"file",64)==path,"头像或名片路径无效");
+   auto route=textureRoute(row.at("vulkan"),true);
+   auto ref=image(path,juint(row,"width",1,2048),juint(row,"height",1,2048),jbool(row,"linear",false),std::strcmp(role,"avatar")==0);
+   appendTextureRule(program,std::move(route),"this = "+ref+"\n");
+  }
+ }
+ void loading(const Json& doc){
+  require(jstr(doc,"format",64)=="gibox-loading-images"&&juint(doc,"version",1,1)==1,"加载图片格式无效");
+  require(!jbool(doc,"hideUi",false),"隐藏加载提示需要单独的已验证绘制规则");
+  const auto& vk=doc.at("vulkan");
+  auto route=textureRoute(vk,true);
+  const auto& ratio=vk.at("aspect");
+  require(ratio.type==Json::Number&&ratio.number>=.25&&ratio.number<=4,"加载背景比例无效");
+  const float aspect=float(ratio.number);
+  std::vector<std::array<unsigned,3>> frames;
+  std::string resource;
+  for(const auto& row:jarr(doc,"images",1,64)){
+   const auto path=jstr(row,"file",64);
+   require(path.size()>12&&path.rfind("images/",0)==0&&path.substr(path.size()-5)==".rgba"&&
+           path.find_first_not_of("0123456789",7)==path.size()-5,"加载图片路径无效");
+   if(resource.empty()){
+    resource=image(path,juint(row,"width",1,2048),juint(row,"height",1,2048),false,false,aspect);
+    frames=std::move(program.images.at(resource));
+   }else{
+    const auto w=unsigned(juint(row,"width",1,2048)),h=unsigned(juint(row,"height",1,2048)),edge=std::max(w,h);
+    std::array<unsigned,3> ids{};
+    for(unsigned i=0;i<ids.size();i++){
+     ids[i]=unsigned(sharedImages.size()+pending.size());
+     pending.push_back({file,TexRef{w,h,0,textureBytes(edge,edge,textureMipCount(edge,edge))},false,path,false,aspect,int(i)});
+    }
+    frames.push_back(ids);
+   }
+  }
+  program.images[resource]=std::move(frames);program.loading=true;
+  appendTextureRule(program,std::move(route),"this = "+resource+"\n");
+ }
+};
 bool pcDrawLayout(const pcdb::Component& pc,unsigned avatar,const pcdb::Mesh& mesh){
  if(avatar==1||pc.avatar!=avatar||!pcdb::startsEqual(mesh.subs,pc.indexes))return false;
  if(pc.counts.empty())return true;
@@ -1944,6 +2519,82 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
 }
 }
 #endif
+std::vector<std::string> prepareVulkanTextures(const std::string& shared,const std::vector<std::string>& selected,std::vector<uint32_t>& probes){
+ std::vector<std::string> notes;
+#ifdef GIBOX_VK_TINT
+ std::set<std::string> visited;
+ pcdb::Db pc;
+ pcdb::DeviceMap android,learned;learned.base=&android;
+ bool readMaps=false;
+ for(const auto& name:selected){
+  if(name.empty()||name=="."||name==".."||name.find_first_of("/\\")!=name.npos||!visited.insert(name).second)continue;
+  const auto dir=shared+"/models/"+name;
+  if(exists(dir+"/model.json"))continue;
+  const auto manifest=exists(dir+"/texture.json")?"texture.json":exists(dir+"/profile.json")?"profile.json":exists(dir+"/loading.json")?"loading.json":nullptr;
+  if(!manifest)continue;
+  try{
+   require(texturePrograms.size()<64,"Vulkan 贴图 MOD 数量超限");
+   const auto doc=JsonParser(text(dir+"/"+manifest)).parse();
+   TextureImport in(shared,name,dir,manifest,doc);
+   if(std::strcmp(manifest,"texture.json")==0){
+    if(!readMaps&&std::any_of(doc.at("diag").at("rules").array.begin(),doc.at("diag").at("rules").array.end(),
+       [](const auto& row){return !row.at("textures").array.empty()&&texdiag::str(row,"kind")=="hash-unknown"&&texdiag::str(row,"matchVulkan").empty();})){
+     readMaps=true;
+     try{pc=pcdb::parse(text(shared+"/pc-hashes.json"));}catch(const std::exception&){}
+     if(!pc.empty()){
+      auto readMap=[&](const char* name,size_t limit){
+       const auto bytes=read(shared+"/"+name,limit);
+       return pcdb::parseMap(std::string(bytes.begin(),bytes.end()));
+      };
+      try{android=readMap("device-hashes.json",32u<<20);}catch(const std::exception&){}
+      try{learned=readMap("hash-map.json",16u<<20);learned.base=&android;}catch(const std::exception&){}
+     }
+    }
+    in.textureOnly(doc,pc,learned);
+   }
+   else if(std::strcmp(manifest,"profile.json")==0){in.uiImage(doc);}
+   else{in.loading(doc);}
+   require(!in.program.rules.empty()&&!in.pending.empty(),"没有可用的 Vulkan 贴图规则");
+   for(const auto& image:in.pending){
+    std::error_code ec;
+    const auto size=std::filesystem::file_size(dir+"/"+image.raw,ec);
+    require(!ec&&size==4ull*image.ref.w*image.ref.h,"RGBA 贴图尚未就绪："+image.raw);
+   }
+   for(const auto& resource:in.program.images){in.program.ini+="["+resource.first+"]\n";}
+   migoto::Engine checker;checker.load({{"",in.program.ini}});
+   require(!checker.diag.count(migoto::Diagnostic::Warning),"INI 贴图命令无法完整执行");
+   auto registered=probes;
+   auto add=[&](uint32_t hash){
+    if(std::find(registered.begin(),registered.end(),hash)==registered.end()){registered.push_back(hash);}
+   };
+   for(const auto& rule:in.program.rules){
+    if(rule.ib){add(*rule.ib);}
+    for(const auto& term:rule.terms){if(term.slot.kind==vkcap::ResourceKind::Index){add(term.hash);}}
+   }
+   require(registered.size()<=vkcap::Tracker::maxDrawHashes,"Vulkan 索引探针超限");
+   try{T().rememberLogic(in.program.persistFile,{"",readLogicPersist(in.program.persistFile,"")},false);}catch(const std::exception&){}
+   probes.swap(registered);
+   const auto bit=uint64_t(1)<<texturePrograms.size();
+   for(const auto& rule:in.program.rules){
+    if(rule.ib){
+     textureIBPrograms[*rule.ib]|=bit;T().renderIndexPrograms[*rule.ib]|=bit;
+     if(rule.total){T().renderIndexLengths[*rule.ib]=rule.total;}
+    }
+    else{
+     explicitTexturePrograms|=bit;T().renderResourceContexts=true;
+     for(const auto& term:rule.terms){if(term.slot.kind==vkcap::ResourceKind::Index){T().renderIndexPrograms[term.hash]|=bit;}}
+    }
+   }
+   sharedImages.insert(sharedImages.end(),in.pending.begin(),in.pending.end());
+   T().renderMods.push_back(name);texturePrograms.push_back(std::move(in.program));
+   notes.push_back(name+"：已登记 "+std::to_string(texturePrograms.back().rules.size())+" 条 Vulkan 贴图规则");
+  }catch(const std::exception& e){notes.push_back(name+"："+e.what()+"，使用原兼容路径");}
+ }
+#else
+ (void)shared;(void)selected;(void)probes;
+#endif
+ return notes;
+}
 std::vector<std::string> prepareVulkanSkins(const std::string& shared,const std::vector<std::string>& selected,std::vector<uint32_t>& probes,
                                           const std::vector<std::string>& compatibility){
  std::vector<std::string> notes;
@@ -2137,18 +2788,19 @@ bool install(std::string& detail){
  if(vkcap::tracker().probing()&&(!beginCommandBuffer.load()||!cmdDrawIndexed.load())){detail="libvulkan.so 没有导出绘制探针入口";vkcap::tracker().installed(false,detail);return false;}
 #ifdef GIBOX_VK_TINT
  if(vkcap::tracker().tintHooks||vkcap::tracker().gpuEnabled()){
-  if(vkcap::tracker().allSkins){get(logicQueuePresent,"vkQueuePresentKHR");}
+  if(vkcap::tracker().allSkins||vkcap::tracker().renderTextures){get(logicQueuePresent,"vkQueuePresentKHR");}
 #define TINT_LOAD(F) get(tint##F,"vk" #F);if(vkcap::tracker().tintHooks&&!tint##F.load()){detail="Vulkan 替换缺少 vk" #F;vkcap::tracker().installed(false,detail);return false;}
   TINT_FUNCTIONS(TINT_LOAD)
   TINT_LOAD(CreateDescriptorPool)
 #undef TINT_LOAD
   get(tintUpdateDescriptorSetWithTemplate,"vkUpdateDescriptorSetWithTemplate");
   get(tintUpdateDescriptorSetWithTemplateKHR,"vkUpdateDescriptorSetWithTemplateKHR");
-  if(!vkcap::tracker().paimonTextureMod.empty()||vkcap::tracker().allSkins){
+  if(!vkcap::tracker().paimonTextureMod.empty()||vkcap::tracker().allSkins||vkcap::tracker().renderTextures){
 #define UPLOAD_LOAD(F) get(up##F,"vk" #F);if(!up##F.load()){detail="派蒙贴图上传缺少 vk" #F;vkcap::tracker().installed(false,detail);return false;}
    UPLOAD_API(UPLOAD_LOAD)
    UPLOAD_HOOKS(UPLOAD_LOAD)
    if(vkcap::tracker().skinnedModel){SKIN_HOOKS(UPLOAD_LOAD)}
+   else if(vkcap::tracker().renderTextures){UPLOAD_LOAD(CmdBindVertexBuffers)}
 #undef UPLOAD_LOAD
   }
   else if(vkcap::tracker().gpuEnabled()){

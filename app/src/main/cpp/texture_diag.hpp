@@ -36,7 +36,7 @@ namespace ms::texdiag {
 struct Binding {std::string slot,resource,role,condition,via;};
 // What the PC database says a rule's hash is (annotate): a component's index buffer, or a texture of some of its draws.
 struct PcPart {std::string character,component,ib,slot,role;size_t submesh=0;std::vector<uint64_t> indexes,counts;};
-struct Rule {std::string section,part,hint,hash,kind,evidence;int slotLetter=-1;long long first=-1;int priority=0;bool textureName=false;
+struct Rule {std::string section,part,hint,hash,kind,evidence,gpu;int slotLetter=-1;long long first=-1,count=-1,firstVertex=-1,vertices=-1;int priority=0;bool textureName=false;
  unsigned ownerId=0;std::string ownerAvatar;
  std::vector<Binding> textures;std::vector<std::string> external,conditions,draws;
  bool pcHasIb=false;PcPart pcIb;std::vector<PcPart> pcTextures;std::string pcNote;};
@@ -55,6 +55,7 @@ inline Doc parseDoc(const Json& j,const std::string& path){Doc d;d.path=path;
  d.name=str(j,"name");d.ini=str(j,"ini");d.characterName=str(j,"characterName");auto c=num(j,"character",0);require(c==0||validCharacter(c),"贴图诊断文件的角色无效");d.character=unsigned(c);
  const auto& rules=j.at("rules");require(rules.type==Json::Array&&rules.array.size()<=4096,"贴图诊断文件的规则列表无效");
  for(auto& r:rules.array){require(r.type==Json::Object,"贴图诊断文件的规则无效");Rule x;x.section=str(r,"section");x.part=str(r,"part");x.hint=str(r,"hint");x.hash=str(r,"hash");x.kind=str(r,"kind");x.evidence=str(r,"hashEvidence");
+  x.gpu=str(r,"matchVulkan");x.count=num(r,"indexCount",-1);x.firstVertex=num(r,"firstVertex",-1);x.vertices=num(r,"vertexCount",-1);
   x.slotLetter=int(num(r,"slotLetter",-1));x.first=num(r,"first",-1);x.priority=int(num(r,"priority",0));x.textureName=r.at("textureName").type==Json::Bool&&r.at("textureName").boolean;
   if(x.kind=="glider-owner"){auto id=num(r,"ownerId",0);require(id>=10000000&&id<=10001999,"风之翼角色无效");x.ownerId=unsigned(id);x.ownerAvatar=str(r,"ownerAvatar");require(x.ownerAvatar.empty()||(x.ownerAvatar.size()<=128&&x.ownerAvatar.rfind("avatar_",0)==0),"风之翼衣装无效");}
   require(!x.section.empty()&&!x.kind.empty(),"贴图诊断规则缺少段名或类型");

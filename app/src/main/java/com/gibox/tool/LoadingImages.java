@@ -9,12 +9,35 @@ import java.util.regex.*;
 
 final class LoadingImages {
     static final String FILE="loading.json";
+    private static String value(ModelConverter.Section section,String key){
+        for(String line:section.lines){int at=line.indexOf('=');if(at>0&&line.substring(0,at).trim().equalsIgnoreCase(key))return line.substring(at+1).trim();}
+        return "";
+    }
+    private static Map<String,Object> vulkanRule(ModelConverter.Section section){
+        String match=value(section,"match_vulkan");
+        if(match.isEmpty())return null;
+        Map<String,Object> rule=Json.of("matchVulkan",match.toLowerCase(Locale.ROOT));
+        String[] keys={"match_first_index","match_index_count","match_first_vertex","match_vertex_count"};
+        String[] fields={"first","indexCount","firstVertex","vertexCount"};
+        for(int i=0;i<keys.length;i++){
+            String number=value(section,keys[i]);
+            if(!number.isEmpty())rule.put(fields[i],Long.parseLong(number));
+        }
+        String aspect=value(section,"match_aspect");
+        if(!aspect.isEmpty())rule.put("aspect",Double.parseDouble(aspect));
+        return rule;
+    }
     static boolean is(File dir){return new File(dir,FILE).isFile();}
     static File ini(File mod){if(mod==null||!mod.isDirectory())return null;for(File f:ModConfig.allInis(mod))if(Pattern.compile("(?im)^\\s*\\[ResourceLS\\.\\d+\\]\\s*$").matcher(ModConfig.source(f)).find())return f;return null;}
     static Importer.Result install(File mod,File dest,ModelConverter.TextureDecoder decoder,StringBuilder log)throws Exception{
         File ini=ini(mod);Json.check(ini!=null,"没有找到加载图片列表（ResourceLS.0 等），请选择对应的加载背景 MOD");
         ModelConverter.Ini parsed=new ModelConverter.Ini(ini.getParentFile(),ini);Map<Integer,File> images=new TreeMap<>();
+        Map<String,Object> vulkan=null;
         for(ModelConverter.Section s:parsed.sections.values()){
+            if(!value(s,"match_aspect").isEmpty()){
+                Map<String,Object> rule=vulkanRule(s);
+                if(rule!=null){Json.check(vulkan==null,"加载图有多条 Vulkan 背景规则");vulkan=rule;}
+            }
             Matcher m=Pattern.compile("(?i)^ResourceLS\\.(\\d+)$").matcher(s.name);if(!m.matches())continue;
             int index=Integer.parseInt(m.group(1));Json.check(index<64,"加载图片最多 64 张");
             for(String line:s.lines){String[] kv=line.split("=",2);if(kv.length==2&&kv[0].trim().equalsIgnoreCase("filename"))images.put(index,TextureDiag.resolve(ini.getParentFile(),kv[1].trim()));}
@@ -28,6 +51,7 @@ final class LoadingImages {
                 total+=new File(tmp,file).length();Json.check(total<=256L<<20,"加载图片总计超过 256 MiB");rows.add(row);
             }
             Map<String,Object> doc=Json.of("format","gibox-loading-images","version",1,"name",dest.getName(),"generation","l"+System.currentTimeMillis(),"images",rows,"hideUi",hide,"source",Json.of("path",mod.getAbsolutePath(),"signature",ModLibrary.signature(mod)));
+            if(vulkan!=null)doc.put("vulkan",vulkan);
             Files.write(new File(tmp,FILE).toPath(),Json.write(doc).getBytes(StandardCharsets.UTF_8));Files.write(new File(tmp,"conversion.log").toPath(),log.toString().getBytes(StandardCharsets.UTF_8));
             ModelConverter.commit(tmp,dest,true);Importer.Result result=new Importer.Result();result.id=Characters.LOADING;result.model=dest;result.summary="加载图片："+rows.size()+" 张，每次加载随机切换；在 MOD 详情中可切换是否隐藏加载提示";return result;
         }finally{if(tmp.exists())ModelConverter.remove(tmp);}
@@ -76,12 +100,9 @@ final class LoadingImages {
             for(File f:ModConfig.allInis(mod))if(RULE.matcher(ModConfig.source(f)).find())return f;
             return null;
         }
-        private static String value(ModelConverter.Section section,String key){
-            for(String line:section.lines){int at=line.indexOf('=');if(at>0&&line.substring(0,at).trim().equalsIgnoreCase(key))return line.substring(at+1).trim();}
-            return "";
-        }
         static Importer.Result install(File mod,File ini,File dest,ModelConverter.TextureDecoder decoder,StringBuilder log)throws Exception {
             ModelConverter.Ini parsed=new ModelConverter.Ini(ini.getParentFile(),ini);Map<String,File> images=new LinkedHashMap<>();
+            Map<String,Map<String,Object>> vk=new HashMap<>();
             String avatarColorSpace="";
             for(ModelConverter.Section s:parsed.sections.values()){
                 String section=s.name.toLowerCase(Locale.ROOT),hash=value(s,"hash").toLowerCase(Locale.ROOT),role;
@@ -94,6 +115,8 @@ final class LoadingImages {
                 String path=value(resource,"filename");
                 if(!path.isEmpty()){
                     images.put(role,TextureDiag.resolve(ini.getParentFile(),path.replace("\"","")));
+                    Map<String,Object> rule=vulkanRule(s);
+                    if(rule!=null)vk.put(role,rule);else vk.remove(role);
                     if(role.equals("avatar"))avatarColorSpace=value(resource,"override_color_space");
                 }
             }
@@ -106,7 +129,9 @@ final class LoadingImages {
                 for(Map.Entry<String,File> entry:images.entrySet()){
                     String kind=entry.getKey(),label=kind.equals("avatar")?"头像":"名片";File image=entry.getValue();
                     if(!image.isFile()){missing.add(image.getName());continue;}
-                    doc.put(kind,writeImage(image,tmp,"images/"+kind+".rgba",decoder,log,kind.equals("avatar")?avatarColorSpace:null));installed.add(label);
+                    Map<String,Object> row=writeImage(image,tmp,"images/"+kind+".rgba",decoder,log,kind.equals("avatar")?avatarColorSpace:null);
+                    if(vk.containsKey(kind))row.put("vulkan",vk.get(kind));
+                    doc.put(kind,row);installed.add(label);
                 }
                 Json.check(!installed.isEmpty(),"没有可导入的头像或名片图片"+(missing.isEmpty()?"":"，缺少 "+String.join("、",missing)));
                 Files.write(new File(tmp,FILE).toPath(),Json.write(doc).getBytes(StandardCharsets.UTF_8));

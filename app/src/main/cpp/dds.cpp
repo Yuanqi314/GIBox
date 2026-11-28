@@ -119,6 +119,19 @@ Bytes filterMip(const uint8_t* src,unsigned w,unsigned h,bool srgb){
 }
 }
 Texture decodeDds(const Bytes& b){const auto d=ddsInfo(b);return {d.w,d.h,ddsLevel(b,d,d.w,d.h,0,d.offset)};}
+void buildTextureMips(Texture& texture,bool roleLinear){
+ require(texture.w&&texture.h&&texture.mips==1&&texture.pixels.size()==4ull*texture.w*texture.h,"RGBA 贴图数据无效");
+ const bool srgb=!texture.linear(roleLinear);
+ unsigned w=texture.w,h=texture.h;size_t last=0;
+ texture.pixels.reserve(textureBytes(w,h,textureMipCount(w,h)));
+ while(w>1||h>1){
+  auto mip=filterMip(texture.pixels.data()+last,w,h,srgb);
+  last=texture.pixels.size();
+  texture.pixels.insert(texture.pixels.end(),mip.begin(),mip.end());
+  ++texture.mips;
+  w=std::max(1u,w/2);h=std::max(1u,h/2);
+ }
+}
 Texture decodeModelDds(const Bytes& b,bool roleLinear,TextureColor overrideColor){
  const auto d=ddsInfo(b);require(d.levels<=textureMipCount(d.w,d.h),"DDS mipmap 数超出尺寸允许的范围");
  const bool canOverride=d.format<=DdsFormat::BC3||d.format==DdsFormat::BC7;
