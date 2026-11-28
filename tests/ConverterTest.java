@@ -169,9 +169,19 @@ public final class ConverterTest {
   put(src,"mod.ini",nested);outputs.addAll(ModelConverter.convert(src,bones,new File(root,"nested"),10000107,"",false,dds->rgba,new StringBuilder()));
   // Official GIMI shape: a hash-level auto draw and per-part IB resources.
   String resourceDefs=ini.substring(ini.indexOf("[ResourcePosition]"));
-  String inherited="[TextureOverrideHeroPosition]\nvb0 = ResourcePosition\n[TextureOverrideHeroBlend]\nvb1 = ResourceBlend\n[TextureOverrideHeroTexcoord]\nvb1 = ResourceTexcoord\n[TextureOverrideHeroIB]\nhash = aabbccdd\nhandling = skip\ndrawindexed = auto\n[TextureOverrideHeroBodyA]\nhash = aabbccdd\nmatch_first_index = 9000\nib = ResourceIndex\nps-t0 = ResourceDiffuse\n"+resourceDefs;
+  String inherited="[TextureOverrideHeroPosition]\nvb0 = ResourcePosition\n[TextureOverrideHeroBlend]\nvb1 = ResourceBlend\n[TextureOverrideHeroTexcoord]\nvb1 = ResourceTexcoord\n[TextureOverrideHeroIB]\nhash = aabbccdd\nhandling = skip\ndrawindexed = auto\n[TextureOverrideHeroBodyA]\nhash = aabbccdd\nmatch_first_index = 9000\nmatch_index_count = 1200\nib = ResourceIndex\nps-t0 = ResourceDiffuse\n"+resourceDefs;
   put(src,"mod.ini",inherited);File inheritedOut=new File(root,"inherited");outputs.addAll(ModelConverter.convert(src,bones,inheritedOut,10000107,"",false,dds->rgba,new StringBuilder()));
   ok(Fixtures.number(Fixtures.part(inheritedOut,0),"indices")==6,"auto uses all split IB indices, not match_first_index offset");
+  List<Object> source=Json.arr(Fixtures.part(inheritedOut,0).get("sourceDraws"),"sourceDraws",1,1);
+  Map<String,Object> original=Json.obj(source.get(0),"source draw");
+  ok(source.size()==1&&"aabbccdd".equals(original.get("ib"))&&Fixtures.number(original,"slot")==0&&
+     Fixtures.number(original,"first")==9000&&Fixtures.number(original,"count")==1200,"preserve the original INI draw conditions: "+source);
+  File iniOnly=new File(root,"indexed_ini");
+  ModelConverter.convert(src,null,iniOnly,10000107,new ModelConverter.Options(),dds->rgba,new StringBuilder());
+  Map<String,Object> indexed=Fixtures.part(iniOnly,0);
+  ok(!indexed.containsKey("skeleton")&&!indexed.containsKey("target")&&indexed.get("sourceDraws").equals(source)&&
+     Fixtures.number(Json.obj(Fixtures.draws(iniOnly,0,new HashMap<>()).get(0),"draw"),"sourceSlot")==0,
+     "export INI rules and the MOD's own palette with no skeleton or mesh database");
   // Shenhe Frost Flower: the default $vision=1 has no active geometry override. Enumerate the enabled state before
   // rejecting the mod, preserve its initial switch, and distinguish original-model mode from an intentional hide.
   {File guarded=new File(root,"guarded");guarded.mkdirs();for(String f:new String[]{"Position.buf","Blend.buf","Texcoord.buf","Index.buf","Diffuse.dds"})Files.copy(new File(src,f).toPath(),new File(guarded,f).toPath());
@@ -241,7 +251,7 @@ public final class ConverterTest {
   Object previousTarget=Fixtures.part(dest,0).get("target");ModelConverter.Options recovered=new ModelConverter.Options().variants(true).replace(true).names(Collections.singletonList("citlali"));StringBuilder recoveredLog=new StringBuilder();
   ModelConverter.convert(src,null,dest,10000107,recovered,dds->rgba,recoveredLog);
   ok(recovered.reusedSkeleton&&Fixtures.part(dest,0).get("skeleton")!=null&&Objects.equals(Fixtures.part(dest,0).get("target"),previousTarget)&&new File(dest,"learned.json").isFile()&&new File(dest,"bonemap-Part0.tsv").isFile()&&recoveredLog.toString().contains("骨骼复用"),"missing library: preserve the existing complete palette and identity across alias changes: "+recoveredLog);
-  byte[] savedBlob=Files.readAllBytes(new File(dest,"model.bin").toPath());byte[] damaged=savedBlob.clone();damaged[0]^=1;put(dest,"model.bin",damaged);bad=false;try{ModelConverter.previousBones(dest,10000107);}catch(IllegalArgumentException ex){bad=ex.getMessage().contains("校验失败");}ok(bad,"corrupt source data cannot prove a reusable skeleton");put(dest,"model.bin",savedBlob);
+  byte[] savedBlob=Files.readAllBytes(new File(dest,"model.bin").toPath());byte[] damaged=savedBlob.clone();damaged[0]^=1;put(dest,"model.bin",damaged);bad=false;try{ModelConverter.previousBones(dest,10000107,null);}catch(IllegalArgumentException ex){bad=ex.getMessage().contains("校验失败");}ok(bad,"corrupt source data cannot prove a reusable skeleton");put(dest,"model.bin",savedBlob);
   // Converted again for another character (here: without the skeleton library), what was learned for the old one goes.
   File swapped=new File(root,"swapped");ModelConverter.convert(src,bones,swapped,10000107,new ModelConverter.Options(),dds->rgba,new StringBuilder());put(swapped,"learned.json","{}");put(swapped,"bonemap-Part0.tsv","x");
   ModelConverter.convert(src,null,swapped,10000046,new ModelConverter.Options().replace(true).names(Collections.singletonList("hutao")),dds->rgba,new StringBuilder());ok(!new File(swapped,"learned.json").exists()&&!new File(swapped,"bonemap-Part0.tsv").exists()&&ModelManifest.read(swapped).id==10000046,"another character: runtime files dropped");

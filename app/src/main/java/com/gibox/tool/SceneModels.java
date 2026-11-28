@@ -107,16 +107,24 @@ final class SceneModels {
         opt.rehearsal(request->{try{return NativeBridge.rehearse(request);}catch(UnsatisfiedLinkError e){throw new IllegalStateException(e.getMessage());}});
         File library=null;boolean other=false;
         if(!ModelConverter.textureOnly(new ModelConverter.Ini(src,ini))) {
-            Selection s=select(shared,ModelConverter.overrideHashes(src,ini));opt.sceneTargets=s.targets;opt.deviceRenderers(s.hashes);other=otherTargets(s.targets);
-            if(other)opt.core(null);
-            File folder=new File(shared,"skeletons-scene");Json.check(folder.isDirectory()||folder.mkdirs(),"无法创建场景骨骼缓存");
-            library=File.createTempFile("scene-",".json",folder);
-            Files.write(library.toPath(),Json.write(Json.of("format","gibox-skeleton","version",1,"id",Characters.SCENE,"root","Scene","renderers",s.renderers)).getBytes(StandardCharsets.UTF_8));
-            log.append("场景网格：按 ").append(s.hashes.size()).append(" 个索引缓冲 hash 匹配目标 ").append(s.renderers.size()).append(" 个网格\n");
+            Collection<String> hashes=ModelConverter.overrideHashes(src,ini);Selection s=null;
+            try{s=select(shared,hashes);}catch(Exception e){
+                if(otherHashes(hashes))throw e;
+                log.append("场景网格使用 INI 索引规则和实时骨骼。Unity 兼容资料不可用：").append(e.getMessage()).append('\n');
+            }
+            if(s==null){opt.gpuScene=true;opt.indexedVulkan=true;}
+            else {
+                opt.sceneTargets=s.targets;opt.deviceRenderers(s.hashes);other=otherTargets(s.targets);
+                if(other)opt.core(null);
+                File folder=new File(shared,"skeletons-scene");Json.check(folder.isDirectory()||folder.mkdirs(),"无法创建场景骨骼缓存");
+                library=File.createTempFile("scene-",".json",folder);
+                Files.write(library.toPath(),Json.write(Json.of("format","gibox-skeleton","version",1,"id",Characters.SCENE,"root","Scene","renderers",s.renderers)).getBytes(StandardCharsets.UTF_8));
+                log.append("场景网格：按 ").append(s.hashes.size()).append(" 个索引缓冲 hash 匹配目标 ").append(s.renderers.size()).append(" 个网格\n");
+            }
         }
         try{Importer.Result result=new Importer.Result();result.id=other?Characters.LOADING:Characters.SCENE;result.library=library!=null;
             result.model=ModelConverter.convert(src,library,dest,Characters.SCENE,opt,decoder,log);
-            result.summary=other?"目标出现时自动替换网格":library==null?"场景纯贴图 MOD：目标出现时按 hash 匹配":"场景网格 MOD：按 hash 匹配网格，目标出现时自动替换";return result;
+            result.summary=other?"目标出现时自动替换网格":opt.gpuScene?"场景网格 MOD：启用 Vulkan 模型替换后按 INI 哈希匹配":library==null?"场景纯贴图 MOD：目标出现时按 hash 匹配":"场景网格 MOD：按 hash 匹配网格，目标出现时自动替换";return result;
         }finally{if(library!=null)library.delete();}
     }
 }

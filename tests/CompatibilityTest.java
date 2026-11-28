@@ -203,13 +203,18 @@ public final class CompatibilityTest {
         ok("gibox-texture-mod".equals(tj.get("format"))&&!new File(texOut,"model.json").exists()&&new File(texOut,"textures/0.rgba").length()==4&&ModelManifest.exists(texOut)&&mm.textureMod&&mm.id==10000107
             &&mm.vars.get("$colour").equals(Arrays.asList(0,1))&&mm.defaults.get("$colour")==0&&Variants.read(texOut).values.containsKey("$colour")&&!TextureDiag.file(diagDir,"texture-mod-out").exists()
             &&String.valueOf(tj.get("diag")).contains("TextureOverrideBodyA")&&ml.toString().contains("纯贴图 MOD：2 / 2 条规则有可写入的贴图")&&ml.toString().contains("完成："),"a texture-only mod imports as one: "+ml+"\n"+tj);
-        // For NPCs and monsters (1.0.3): the same folder with character 1; a mod with its own mesh is refused for them.
+        // NPC and monster mods retain the scene classification, including meshes with only Vulkan draw rules.
         File sceneOut=new File(base,"texture-scene-out");StringBuilder sl=new StringBuilder();
         ModelConverter.convert(texVar,null,sceneOut,Characters.SCENE,new ModelConverter.Options().variants(true).textureMods(true),DECODE,sl);
         Map<String,Object> sj=Json.obj(Json.read(new File(sceneOut,"texture.json"),4L<<20),"texture.json");ModelManifest sm=ModelManifest.read(sceneOut);
         ok(sm.textureMod&&sm.id==Characters.SCENE&&String.valueOf(((Map<?,?>)sj.get("character")).get("id")).matches("1(\\.0)?")&&String.valueOf(((Map<?,?>)sj.get("diag")).get("character")).matches("1(\\.0)?"),"an NPC / monster texture mod: "+sj.get("character")+" "+((Map<?,?>)sj.get("diag")).get("character"));
         String sceneMesh="";try{ModelConverter.convert(src,null,new File(base,"scene-mesh-out"),Characters.SCENE,new ModelConverter.Options().textureMods(true),DECODE,new StringBuilder());}catch(IllegalArgumentException e){sceneMesh=e.getMessage();}
         ok(sceneMesh.contains("场景网格 MOD 需要先按 hash 匹配目标和内置骨骼")&&!new File(base,"scene-mesh-out").exists(),"a mesh mod for NPC / monster refused: "+sceneMesh);
+        File gpuScene=new File(base,"scene-gpu-out");ModelConverter.Options gpuSceneOpt=new ModelConverter.Options();
+        gpuSceneOpt.gpuScene=true;gpuSceneOpt.indexedVulkan=true;
+        ModelConverter.convert(src,null,gpuScene,Characters.SCENE,gpuSceneOpt,DECODE,new StringBuilder());
+        ok(ModelManifest.read(gpuScene).id==Characters.SCENE&&!Fixtures.part(gpuScene,0).containsKey("skeleton")&&
+            Fixtures.part(gpuScene,0).containsKey("sourceDraws"),"scene mesh imports by its INI without database entries");
         File sceneBones=new File(base,"scene-bones");Map<String,Object> sceneTarget=Fixtures.target("NpcBody",6,2,2);
         Fixtures.skeleton(sceneBones,Characters.SCENE,"NPC_Test",new String[]{"Scene0"},new String[]{"Root","Spine"},Collections.singletonMap("Scene0",sceneTarget));
         ModelConverter.Options sceneOpt=new ModelConverter.Options().textureMods(true).deviceRenderers(Collections.singletonMap("44444444","Scene0"));

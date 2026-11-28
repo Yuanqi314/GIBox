@@ -13,6 +13,27 @@ extern "C" int DobbyCodePatch(void* address,uint8_t* buffer,uint32_t size){std::
 static uintptr_t target(uint32_t w,uintptr_t at){int64_t imm=int64_t(w&0x03FFFFFFu);if(imm&0x02000000)imm-=0x04000000;return uintptr_t(int64_t(at)+imm*4);}
 #ifdef GIBOX_VK_TINT
 template<class H>static H fake(uintptr_t id){return reinterpret_cast<H>(id);}
+static void pcRouteTrial(){
+ using namespace ms;
+ pcdb::Mesh mesh;mesh.mesh="Body";mesh.avatar="avatar_test";mesh.vertices=100;mesh.subs={{0,120},{120,240}};
+ pcdb::DeviceMap device;pcdb::Db db;pcdb::Component component;
+ component.avatar=10000107;component.indexes={0,120};component.counts={120,240};
+ db.byIb["11223344"]={0};db.comps.push_back(component);
+ PartSummary part;part.sourceDraws={{"11223344",0,0,120},{"11223344",1,120,240}};
+ assert(ms::vkhook::pcSkinHashes(part,{},mesh,device,db,10000107)==std::set<uint32_t>{0x11223344});
+ part.sourceDraws[1].count=239;
+ assert(ms::vkhook::pcSkinHashes(part,{},mesh,device,db,10000107).empty());
+ part.sourceDraws[1].count=240;
+ device.byIb["11223344"]=mesh;device.byIb["11223344"].avatar="avatar_other";
+ assert(ms::vkhook::pcSkinHashes(part,{},mesh,device,db,10000107).empty());
+ device.byIb["11223344"]=mesh;part.sourceDraws.clear();
+ LogicSpec legacy;legacy.passes={{"BodyA",{{"ib",0x11223344}},{},{{"first_index",0}}},
+                                 {"BodyB",{{"ib",0x11223344}},{},{{"first_index",120}}}};
+ assert(ms::vkhook::pcSkinHashes(part,legacy,mesh,device,db,10000107)==std::set<uint32_t>{0x11223344});
+ assert(ms::vkhook::pcSkinHashes(part,legacy,mesh,pcdb::DeviceMap{},db,10000107).empty());
+ legacy.passes.pop_back();
+ assert(ms::vkhook::pcSkinHashes(part,legacy,mesh,device,db,10000107).empty());
+}
 static void tintTrial(){
  const auto d=fake<VkDevice>(1);const auto c=fake<VkCommandBuffer>(2);const auto p=fake<VkPipeline>(3);
  const auto layout=fake<VkPipelineLayout>(4);const auto original=fake<VkDescriptorSet>(5);const auto a=fake<VkImageView>(6),b=fake<VkImageView>(7);
@@ -88,10 +109,46 @@ static void tintTrial(){
   state.vertex[0]=fake<VkBuffer>((i+1)*100);state.vertex[2]=fake<VkBuffer>((i+1)*100+1);
   const auto rest=fake<VkBuffer>((i+1)*100+2),weights=fake<VkBuffer>((i+1)*100+3);
   skin.seenOutputs[state.vertex[0]]={rest,weights,profile.originalVertices,profile.bones};
-  assert(!tintDraw(c,0,{i,0}).replacement&&skin.sourceProfiles.at({rest,weights})==i);
+  assert(!tintDraw(c,0,{i,0}).replacement&&skin.sourceProfiles.at({rest,weights})==(1ull<<i));
   skin.sharedOutput[{state.vertex[0],i}]={{fake<VkBuffer>((i+1)*100+4),{},120},true};
   auto plan=tintDraw(c,0,{i,0});assert(plan.replacement==original&&plan.slot.count==120+i*3&&plan.newIndex==gpu.input[Indices].buffer);
  }
+ auto& profile=sharedSkins[1];profile.originalVertices=0;profile.bones=0;profile.mesh.requiredBones=21;
+ profile.iniDraws={{{{8,6},{},{}},{{14,9},{},{}}}};
+ for(auto& row:profile.iniDraws[0])row.images={~0u,~0u,~0u};
+ profile.variants.vars={{"$vision",{0,1}}};profile.variants.defaults={{"$vision",1}};
+ profile.replaceWhen.vars={"$vision"};profile.replaceWhen.allow={{0}};
+ assert(!tintDraw(c,0,{1,0}).replacement);
+ assert(T().skinBoneErrors[1]==(21u<<16|11u));
+ skin.seenOutputs[state.vertex[0]].bones=21;
+ assert(!tintDraw(c,0,{1,0}).replacement); // Default keeps the game's draw.
+ T().setSkinChoices({{"Beta",{{"$vision",0}}}});
+ auto generic=tintDraw(c,0,{1,0});assert(generic.replacement==original&&generic.draws.size()==2&&generic.draws[0].first.start==8&&generic.draws[1].first.count==9);
+ const auto output=state.vertex[0],bones=fake<VkBuffer>(901);
+ const auto seen=skin.seenOutputs.at(output);
+ const std::array<VkDescriptorBufferInfo,4> job{{{seen.rest,0,40ull*seen.vertices},{seen.weights,0,32ull*seen.vertices},
+                                                {bones,0,64ull*seen.bones},{output,0,40ull*seen.vertices}}};
+ skin.storage=fake<VkDescriptorSetLayout>(906);skin.uniform=fake<VkDescriptorSetLayout>(907);skin.pool=fake<VkDescriptorPool>(908);
+ auto& gpu=skin.profiles[1];gpu.count=fake<VkDescriptorSet>(902);
+ skin.sharedRemaps[{output,bones,1}]=fake<VkDescriptorSet>(909);
+ upCmdPipelineBarrier=+[](VkCommandBuffer,VkPipelineStageFlags,VkPipelineStageFlags,VkDependencyFlags,uint32_t,const VkMemoryBarrier*,uint32_t,const VkBufferMemoryBarrier*,uint32_t,const VkImageMemoryBarrier*){};
+ static unsigned dispatches=0;
+ upCmdDispatch=+[](VkCommandBuffer,uint32_t x,uint32_t y,uint32_t z){assert(x==1&&y==1&&z==1);++dispatches;};
+ tintCmdBindDescriptorSets=+[](VkCommandBuffer,VkPipelineBindPoint,VkPipelineLayout,uint32_t,uint32_t,const VkDescriptorSet*,uint32_t,const uint32_t*){};
+ profile.mesh.vertices=30;
+ sharedSkinDispatch(d,c,state,dev,job,(seen.vertices+63)/64);
+ assert(dispatches==1&&skin.sharedOutput.at({output,1}).revision==skin.seenOutputs.at(output).revision);
+ T().iniSkinRules[ms::vkcap::paimonBodyHash]={{1,0,0,26226}};
+ upCmdBindVertexBuffers=+[](VkCommandBuffer,uint32_t,uint32_t n,const VkBuffer* buffers,const VkDeviceSize*){
+  assert(n==3);call.push_back(reinterpret_cast<uintptr_t>(buffers[0]));};
+ cmdBindIndexBuffer=+[](void*,uint64_t b,uint64_t o,int32_t){assert(!o);call.push_back(b);};
+ cmdDrawIndexed=+[](void*,uint32_t count,uint32_t,uint32_t first,int32_t,uint32_t){call.push_back(first+count);};
+ call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
+ assert((call==std::vector<uintptr_t>{204,2000,14,23,101,200})&&dispatches==1);
+ auto shortJob=job;shortJob[2].range=20*64;
+ sharedSkinDispatch(d,c,state,dev,shortJob,(seen.vertices+63)/64);
+ call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
+ assert((call==std::vector<uintptr_t>{26226})&&dispatches==1);
  std::cout<<"Vulkan draw replacement: PASS (scoped textures, skinned vertex and index rebind, queue ownership, restoration and master switch)\n";
 }
 #endif
@@ -112,6 +169,7 @@ int main(){
  code[128]=0xA9BF7BFDu;code[129]=0x910003FDu;Redirect c;assert(!prepare(reinterpret_cast<uintptr_t>(code+128),&hook,island+16,c,why)&&why.find("不是 [bti] + b 形式的入口，开头为 a9bf7bfd 910003fd")==0&&code[128]==0xA9BF7BFDu);
  std::cout<<"Vulkan stub redirect: PASS (landing pad kept, direct b to our page and back, both ready before writing, other shapes refused)\n";
 #ifdef GIBOX_VK_TINT
+ pcRouteTrial();
  tintTrial();
 #endif
 }

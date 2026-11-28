@@ -102,7 +102,8 @@ struct FrameLoop {AnimationSpec spec;float counter=0;size_t current=0,step=0;uin
   for(uint32_t n=0;n<elapsed;n++){if(std::fmod(counter,spec.period)==0){int value=spec.frames[current].value;value=value<spec.last?value+spec.step:spec.first;size_t next=spec.index(value);changed|=next!=current;current=next;advances++;}counter+=spec.counterStep;require(std::isfinite(counter),"动画计数器溢出");}return changed;}};
 
 // ---------------------------------------------------------------- manifest summary (what the runtime scans every second)
-struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false,indexedBones=false;Fingerprint target;};
+struct SourceDraw {std::string ib;unsigned slot=0;int64_t first=-1,count=-1;};
+struct PartSummary {std::string name,renderer;unsigned bones=0;bool hasTarget=false,indexedBones=false;Fingerprint target;std::vector<SourceDraw> sourceDraws{};};
 // outfit (model.json character.outfit, 0.7.94): the prefab of the outfit (original look or skin) the model was converted for,
 // as the runtime reads it from a renderer ("avatar_lady_pole_shenhecostumedai"); "" for a model made before outfits.
 struct SceneTarget {Fingerprint target;std::vector<std::string> owners;uint32_t bindposeCrc=0;};
@@ -114,15 +115,25 @@ inline void characterOf(const Json& m,unsigned& id,std::vector<std::string>& nam
  const auto& n=c.at("names");if(n.type!=Json::Null){require(n.type==Json::Array&&n.array.size()<=16,"角色名称列表无效");for(auto& x:n.array){require(x.type==Json::String&&nameToken(x.string),"角色名称无效");names.push_back(x.string);}}
  require(id!=0||!names.empty(),"模型须指定角色 ID 或角色名称");}
 inline ModelSummary summaryOf(const Json& m){checkFormat(m);ModelSummary s;s.animated=animationOf(m).present();s.name=jstr(m,"name",512);s.generation=jstr(m,"generation",64);characterOf(m,s.id,s.names);std::set<std::string> seen;
- if(s.id==1){for(const auto& row:jarr(m.at("character"),"targets",1,64)){SceneTarget t;t.target=fingerprintOf(row.at("target"));
+ const auto& gpuScene=m.at("character").at("gpuScene");
+ const bool iniScene=s.id==1&&gpuScene.type==Json::Bool&&gpuScene.boolean;
+ if(s.id==1){for(const auto& row:jarr(m.at("character"),"targets",iniScene?0:1,iniScene?0:64)){SceneTarget t;t.target=fingerprintOf(row.at("target"));
   if(row.at("bindposeCrc32").type!=Json::Null){require(loginDoorMesh(t.target),"只有已核实的天空门可按绑定矩阵校验骨骼索引");t.bindposeCrc=uint32_t(juint(row,"bindposeCrc32",1,0xffffffffu));}
   for(const auto& owner:jarr(row,"owners",1,20000)){require(owner.type==Json::String&&!owner.string.empty()&&owner.string.size()<=256,"场景目标名称无效");
    const auto& n=owner.string;require(n.compare(0,4,"npc_")==0||n.compare(0,8,"monster_")==0||n.compare(0,11,"monsterobj_")==0||n.compare(0,9,"flycloak_")==0||n.compare(0,10,"@renderer:")==0,"场景目标类型无效");t.owners.push_back(n);}s.sceneTargets.push_back(std::move(t));}}
  auto version=unsigned(juint(m,"version",1,4));s.variants=variantsOf(m.at("variants"),version);require(version>=3||m.at("replaceWhen").type==Json::Null,"replaceWhen 需要模型格式版本 3");s.replaceWhen=whenOf(m.at("replaceWhen"),s.variants,"replacement");
  {const auto& o=m.at("character").at("outfit");if(o.type!=Json::Null){require(o.type==Json::String&&o.string.size()<=128&&o.string.compare(0,7,"avatar_")==0&&o.string.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_")==std::string::npos,"角色外观名称无效");s.outfit=o.string;}}
  for(auto& p:jarr(m,"parts",1,model::maxParts)){PartSummary ps;ps.name=jstr(p,"name",64);require(safeName(ps.name)&&seen.insert(ps.name).second,"部件名称无效或重复："+ps.name);ps.renderer=jstr(p,"renderer",256);
-  ps.bones=unsigned(juint(p,"bones",1,model::maxBones));ps.indexedBones=p.at("skeleton").type==Json::Null;if(p.at("target").type!=Json::Null){ps.target=fingerprintOf(p.at("target"));require(ps.target.bones>0||s.id==1,"静态目标仅用于场景模型");ps.hasTarget=true;}s.parts.push_back(ps);}
+  ps.bones=unsigned(juint(p,"bones",1,model::maxBones));ps.indexedBones=p.at("skeleton").type==Json::Null;if(p.at("target").type!=Json::Null){ps.target=fingerprintOf(p.at("target"));require(ps.target.bones>0||s.id==1,"静态目标仅用于场景模型");ps.hasTarget=true;}
+  if(p.at("sourceDraws").type!=Json::Null)for(const auto& x:jarr(p,"sourceDraws",0,256)){
+   SourceDraw d;d.ib=jstr(x,"ib",8);require(d.ib.size()==8&&d.ib.find_first_not_of("0123456789abcdef")==d.ib.npos,"原绘制索引哈希无效");
+   d.slot=unsigned(juint(x,"slot",0,model::maxSlot-1));
+   if(x.at("first").type!=Json::Null)d.first=int64_t(juint(x,"first",0,0xffffffffu));
+   if(x.at("count").type!=Json::Null)d.count=int64_t(juint(x,"count",1,0xffffffffu));
+   ps.sourceDraws.push_back(std::move(d));}
+  s.parts.push_back(std::move(ps));}
  if(s.id==1){for(const auto& p:s.parts){
+  if(iniScene){require(!s.animated&&p.indexedBones&&!p.hasTarget&&!p.sourceDraws.empty(),"Vulkan 场景部件须有 INI 绘制记录和原始骨骼索引");continue;}
   bool found=false;
   for(const auto& t:s.sceneTargets){
    bool bonesMatch=t.bindposeCrc?(p.indexedBones&&p.bones<=t.target.bones):!p.indexedBones;
@@ -138,7 +149,7 @@ inline ModelSummary readSummary(const std::string& dir){return summaryOf(JsonPar
 struct Geometry {unsigned n=0,ni=0;Bytes positions,normals,uvs,indices;
  const uint8_t* pos()const{return positions.data();}const uint8_t* norm()const{return normals.data();}const uint8_t* uv()const{return uvs.data();}const uint8_t* idx()const{return indices.data();}};
 // One draw of a part: an index range, the material in a renderer slot, and when it is drawn.
-struct DrawSpec {Submesh sub;Material row;When when;};
+struct DrawSpec {Submesh sub;Material row;When when;int sourceSlot=-1;};
 // The draws in effect for an assignment, in file order; none: one empty draw, so the part shows nothing (at most 64).
 inline void activeDraws(const std::vector<DrawSpec>& draws,const Assignment& a,std::vector<Submesh>& subs,std::vector<Material>& rows){subs.clear();rows.clear();
  for(auto& d:draws)if(drawn(d.when,a)){subs.push_back(d.sub);rows.push_back(d.row);}
@@ -346,7 +357,10 @@ inline std::shared_ptr<ModelFile> loadModelFile(const std::string& dir,bool allT
     for(size_t i=0;i<pa.size();i++){int x=jint(pa[i],ps.name+" 的父骨骼");require(x>=-1&&x<int(ps.bones)&&x!=int(i),ps.name+"：父骨骼编号超出范围");f.sourceParents.push_back(x);}
     for(size_t i=0;i<f.sourceParents.size();i++){size_t steps=0;for(int k=int(i);k>=0;k=f.sourceParents[size_t(k)])require(++steps<=ps.bones,ps.name+"：父骨骼形成循环");}}}
   auto drawOf=[&](const Json& dr){auto start=unsigned(juint(dr,"start",0,ni));auto count=unsigned(juint(dr,"count",0,ni));require(count<=ni-start&&count%3==0,ps.name+"：绘制范围无效");
-   auto mat=jstr(dr,"material",64);require(out->materials.count(mat),ps.name+"：未知材质 "+mat);return DrawSpec{{start,count},{mat,unsigned(juint(dr,"slot",0,model::maxSlot-1))},{}};};
+   auto mat=jstr(dr,"material",64);require(out->materials.count(mat),ps.name+"：未知材质 "+mat);
+   DrawSpec d{{start,count},{mat,unsigned(juint(dr,"slot",0,model::maxSlot-1))},{}};
+   if(dr.at("sourceSlot").type!=Json::Null)d.sourceSlot=int(juint(dr,"sourceSlot",0,model::maxSlot-1));
+   return d;};
   if(version==1){
    // One draw list per combination; read as draws that each know the combinations they belong to.
    const auto& lists=jarr(p,"draws",out->variants.combos.size(),out->variants.combos.size());std::vector<std::string> names;for(auto& y:out->variants.vars)names.push_back(y.first);
@@ -377,9 +391,9 @@ inline std::set<std::string> materialsNeeded(const ModelFile& m,const Assignment
 // The verified Vulkan skinning shader takes the same weight and joint layout already produced by the
 // converter. The two vertex streams follow the captured Unity Vulkan layouts, not the imported DX bindings.
 struct VulkanSkinPayload {
- uint32_t vertices=0,indexBytes=2;Bytes rest,weights,attributes,indices;std::vector<Submesh> slots{Submesh{},Submesh{}};
+ uint32_t vertices=0,indexBytes=2,requiredBones=0;Bytes rest,weights,attributes,indices;std::vector<Submesh> slots{Submesh{},Submesh{}};
 };
-inline VulkanSkinPayload packVulkanSkin(const PartFile& part,const Assignment& defaults,unsigned slots,const std::vector<int>& mapping={}){
+inline VulkanSkinPayload packVulkanSkin(const PartFile& part,const Assignment& defaults,unsigned slots,const std::vector<int>& mapping={},bool keepDrawRanges=false){
  const auto& g=part.geo;const auto n=g.n;
  require(n&&n<=model::maxVertices&&slots&&slots<=model::maxSlot,"Vulkan：网格或槽位数超限");
  const Bytes *color=nullptr,*tangent=nullptr,*uv2=nullptr;
@@ -392,12 +406,24 @@ inline VulkanSkinPayload packVulkanSkin(const PartFile& part,const Assignment& d
  for(size_t i=0;i<n;i++){
   auto* p=out.rest.data()+40*i;std::memcpy(p,g.pos()+12*i,12);std::memcpy(p+12,g.norm()+12*i,12);std::memcpy(p+24,tangent->data()+16*i,16);
   auto* a=out.attributes.data()+20*i;std::memcpy(a,color->data()+4*i,4);std::memcpy(a+4,g.uv()+8*i,8);if(uv2)std::memcpy(a+12,uv2->data()+8*i,8);
+  auto* w=out.weights.data()+32*i;
+  for(size_t k=0;k<4;k++){
+   if(f32(w+4*k)>0)out.requiredBones=std::max(out.requiredBones,u32(w+16+4*k)+1);
+   else std::memset(w+16+4*k,0,4);
+  }
  }
+ auto copyIndices=[&](uint32_t start,uint32_t count){
+  require(start<=g.ni&&count<=g.ni-start,"Vulkan：绘制范围无效");
+  for(uint32_t j=0;j<count;j++){
+   const auto v=u32(g.idx()+4ull*(start+j));require(v<n,"Vulkan：索引越界");
+   for(unsigned b=0;b<out.indexBytes;b++)out.indices.push_back(uint8_t(v>>(b*8)));
+  }
+ };
+ if(keepDrawRanges){out.indices.reserve(size_t(g.ni)*out.indexBytes);copyIndices(0,g.ni);return out;}
  std::vector<Submesh> subs;std::vector<Material> rows;activeDraws(part.draws,defaults,subs,rows);
  for(size_t slot=0;slot<out.slots.size();slot++){
   auto& range=out.slots[slot];range.start=unsigned(out.indices.size()/out.indexBytes);
-  for(size_t i=0;i<subs.size();i++)if(rows[i].slot==slot){const auto& sub=subs[i];require(sub.start<=g.ni&&sub.count<=g.ni-sub.start,"Vulkan：绘制范围无效");
-   for(uint32_t j=0;j<sub.count;j++){const auto v=u32(g.idx()+4ull*(sub.start+j));require(v<n,"Vulkan：索引越界");for(unsigned b=0;b<out.indexBytes;b++)out.indices.push_back(uint8_t(v>>(b*8)));}
+  for(size_t i=0;i<subs.size();i++)if(rows[i].slot==slot){const auto& sub=subs[i];copyIndices(sub.start,sub.count);
    range.count+=sub.count;}
   require(range.count%3==0,"Vulkan：绘制必须为三角形");
  }

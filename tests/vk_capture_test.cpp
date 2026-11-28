@@ -95,6 +95,37 @@ int main(){
   assert(a&&a.profile==0&&a.slot==0&&!probe.skinActive(a.profile));
   assert(b&&b.profile==1&&b.slot==1&&probe.skinActive(b.profile)&&!shortDraw);
   probe.skinRoutes[hs[2].value]={hs[2].value,6,1,{{0,3},{3,3}}};
+  probe.setSkinReplacement(true,true,{"First","Second"});
   SkinHit conflict;probe.drawIndexed(1,3,1,0,0,0,&conflict);assert(!conflict);
+ }
+ {Tracker probe;probe.allForms=false;probe.probeOnly=true;probe.allSkins=true;
+  const auto pc32=hs[5].value,pc16=hs[1].value;
+  probe.skinRoutes[pc32]={pc32,6,0,{{0,3},{3,3}},true};
+  probe.skinRoutes[pc16]={pc16,6,0,{{0,3},{3,3}},true};
+  probe.setDrawHashes({pc32,pc16});
+  probe.created(1,sizeof idx,0x40);probe.bound(1,1,0);probe.mapped(1,0,sizeof idx,idx);
+  probe.created(2,sizeof wide,0x40);probe.bound(2,2,0);probe.mapped(2,0,sizeof wide,wide);
+  probe.indexBound(1,0,1,0);probe.indexBound(1,0,2,1);probe.indexBound(2,0,3,1);
+  SkinHit a,b,wrongWidth,wrongCount;
+  probe.drawIndexed(1,3,1,3,0,0,&a);probe.drawIndexed(3,3,1,0,0,0,&b);
+  probe.drawIndexed(2,3,1,0,0,0,&wrongWidth);probe.drawIndexed(1,2,1,3,0,0,&wrongCount);
+  assert(a&&a.slot==1&&b&&b.slot==0&&!wrongWidth&&!wrongCount);
+  auto draws=probe.takeDraws();
+  assert(std::any_of(draws.begin(),draws.end(),[&](const auto& d){return d.hash==pc32&&d.buffer==1&&d.indexBits==16;}));
+  assert(std::any_of(draws.begin(),draws.end(),[&](const auto& d){return d.hash==pc16&&d.buffer==2&&d.indexBits==32;}));
+ }
+ {Tracker probe;probe.allForms=false;probe.probeOnly=true;probe.allSkins=true;
+  const auto pc=hs[2].value;probe.iniSkinRules[pc]={{0,2,3,3}};probe.setDrawHashes({pc});
+  probe.created(1,sizeof idx,0x1);probe.bound(1,1,0);probe.mapped(1,0,sizeof idx,idx);
+  probe.created(2,52,0x40);const Copy region{0,16,sizeof idx};probe.copied(1,2,&region,1);probe.bound(2,2,0);
+  probe.indexBound(2,22,1,0);
+  SkinHit hit;probe.drawIndexed(1,3,1,0,0,0,&hit);
+  assert(hit&&hit.slot==2&&hit.first==3&&hit.count==3);
+  SkinHit narrow,shifted;
+  probe.drawIndexed(1,2,1,0,0,0,&narrow);probe.drawIndexed(1,3,1,1,0,0,&shifted);
+  assert(!narrow&&!shifted);
+  probe.iniSkinRules[pc].push_back({1,0,3,-1});
+  SkinHit ambiguous;probe.drawIndexed(1,3,1,0,0,0,&ambiguous);
+  assert(!ambiguous&&probe.skinMisses[unsigned(SkinMiss::Ambiguous)]==1);
  }
  std::cout<<"Vulkan index-buffer hashes and draw probe: PASS (hash variants, staging and mapped buffers, targeted draws and offsets, overwrite and command buffer reuse)\n";}

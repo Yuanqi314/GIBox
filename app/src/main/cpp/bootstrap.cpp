@@ -130,13 +130,22 @@ extern "C" JNIEXPORT void JNICALL Java_com_gibox_tool_NativeBridge_start(JNIEnv*
  // Install before device creation when either hash capture or the targeted draw probe was requested at startup.
  {auto mode=ms::vkcap::Mode::Off;std::vector<uint32_t> probes;std::vector<std::string> selected;bool paimonTint=false,master=false,skinned=false,sharedSkins=false;std::string paimonTextureMod;
   try{auto c=ms::JsonParser(ms::text(sharedDir(pkg)+"/control.json")).parse();const auto& t=c.at("textureMods");
-   if(t.type==ms::Json::Object){auto flag=[&](const char* k){return t.at(k).type==ms::Json::Bool&&t.at(k).boolean;};
+   if(t.type==ms::Json::Object||t.type==ms::Json::Null){auto flag=[&](const char* k){return t.at(k).type==ms::Json::Bool&&t.at(k).boolean;};
     mode=ms::vkcap::modeFrom(t.at("hashMode").type==ms::Json::String?t.at("hashMode").string:std::string(),flag("ibHash"),flag("capture"));
     master=c.at("enabled").type==ms::Json::Bool&&c.at("enabled").boolean;
     for(const auto& m:c.at("selected").array)if(m.type==ms::Json::String&&selected.size()<128)selected.push_back(m.string);
-    if(flag("vulkanSkinModels"))try{
-     for(const auto& note:ms::vkhook::prepareVulkanSkins(sharedDir(pkg),selected,probes))bootLog(pkg,"vulkan-skin-model",note);
+    const auto& configured=t.at("vulkanSkinModels");
+    const bool legacyProbe=flag("vulkanPaimonTint")||!t.at("vulkanPaimonTextures").string.empty()||!t.at("vulkanPaimonModel").string.empty();
+    if(configured.type==ms::Json::Bool?configured.boolean:!legacyProbe)try{
+     std::vector<std::string> compatibility;
+     for(const auto& m:t.at("vulkanSkinCompatibility").array)if(m.type==ms::Json::String&&compatibility.size()<128)compatibility.push_back(m.string);
+     for(const auto& note:ms::vkhook::prepareVulkanSkins(sharedDir(pkg),selected,probes,compatibility))bootLog(pkg,"vulkan-skin-model",note);
      sharedSkins=!ms::vkcap::tracker().skinMods.empty();
+     ms::vkcap::SkinChoices choices;
+     for(const auto& model:c.at("variables").object)for(const auto& var:model.second.object)
+      if(var.second.type==ms::Json::Number&&std::abs(var.second.number)<=1000000&&var.second.number==std::floor(var.second.number))
+       choices[model.first][var.first]=int(var.second.number);
+     ms::vkcap::tracker().setSkinChoices(choices);
     }catch(const std::exception& e){bootLog(pkg,"vulkan-skin-disabled",e.what());}
     paimonTint=flag("vulkanPaimonTint");
     const auto& skin=t.at("vulkanPaimonModel");skinned=skin.type==ms::Json::String&&!skin.string.empty();

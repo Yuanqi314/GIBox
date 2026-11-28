@@ -442,7 +442,10 @@ public final class ModelConverter {
     static List<Object> drawTable(Group g,Variation var,int[] sigOf,int signatures,Set<String> shown){
         List<String> keys=new ArrayList<>();Map<String,String[]> fields=new HashMap<>();List<Set<String>> present=new ArrayList<>();
         for(int c=0;c<signatures;c++){Set<String> on=new HashSet<>();ComboRows cr=g.combos.get(c);
-            if(cr!=null){check(cr.subs.size()<=64,"子网格超过 64");for(int i=0;i<cr.subs.size();i++){String k=cr.subs.get(i)[0]+","+cr.subs.get(i)[1]+","+cr.rows.get(i)[0]+","+cr.rows.get(i)[1];if(!fields.containsKey(k)){keys.add(k);fields.put(k,new String[]{Integer.toString(cr.subs.get(i)[0]),Integer.toString(cr.subs.get(i)[1]),cr.rows.get(i)[0],cr.rows.get(i)[1]});}on.add(k);}}
+            if(cr!=null){check(cr.subs.size()<=64,"子网格超过 64");for(int i=0;i<cr.subs.size();i++){
+                String[] row=cr.rows.get(i);String source=row.length>2?row[2]:"";
+                String k=cr.subs.get(i)[0]+","+cr.subs.get(i)[1]+","+row[0]+","+row[1]+","+source;
+                if(!fields.containsKey(k)){keys.add(k);fields.put(k,new String[]{Integer.toString(cr.subs.get(i)[0]),Integer.toString(cr.subs.get(i)[1]),row[0],row[1],source});}on.add(k);}}
             present.add(on);}
         check(!keys.isEmpty()&&keys.size()<=1024,"部件绘制段数量："+keys.size());
         List<Object> out=new ArrayList<>();
@@ -453,6 +456,7 @@ public final class ModelConverter {
                     if(depends){deps.add(kk);varies.add(gr);depGroup=gr;}}}
             if(varies.size()>1)throw new Entangled(varies);
             String[] f=fields.get(k);Map<String,Object> d=Json.of("start",Integer.parseInt(f[0]),"count",Integer.parseInt(f[1]),"material",f[2],"slot",Integer.parseInt(f[3]));
+            if(!f[4].isEmpty())d.put("sourceSlot",Integer.parseInt(f[4]));
             if(!deps.isEmpty()){List<Integer> vs=var.groups.get(depGroup);LinkedHashSet<List<Integer>> allow=new LinkedHashSet<>();
                 for(int i=0;i<var.size(depGroup);i++)if(present.get(sigOf[var.run(depGroup,i)]).contains(k)){List<Integer> t=new ArrayList<>();for(int kk:deps)t.add(var.values.get(vs.get(kk)).get(var.digit(depGroup,i,kk)));allow.add(t);}
                 List<Object> names=new ArrayList<>();for(int kk:deps){String n=var.names.get(vs.get(kk));names.add(n);shown.add(n);}
@@ -490,8 +494,9 @@ public final class ModelConverter {
         }
         return out;}
     /** A re-conversion can reuse this model's complete source palette when the separate library is unavailable. */
-    static List<Bones> previousBones(File dir,int id)throws Exception {
+    static List<Bones> previousBones(File dir,int id,String outfit)throws Exception {
         if(!ModelManifest.exists(dir)||id==0)return null;ModelManifest summary=ModelManifest.read(dir);if(summary.id!=id)return null;
+        if(!summary.outfit.equals(outfit==null?"":outfit))return null;
         Map<String,Object> model=Json.obj(Json.read(new File(dir,"model.json"),4L<<20),"model.json");List<Object> parts=Json.arr(model.get("parts"),"parts",1,64);
         for(Object raw:parts){Map<String,Object> p=Json.obj(raw,"part");if(!(p.get("skeleton") instanceof Map))return null;}
         Map<String,Object> blob=Json.obj(model.get("blob"),"blob");check("model.bin".equals(blob.get("file")),"已有模型 blob.file 无效");long size=Json.integer(blob.get("size"),"blob.size",1,768L<<20),expected=Json.integer(blob.get("crc32"),"blob.crc32",0,0xffffffffL);
@@ -527,7 +532,7 @@ public final class ModelConverter {
             if(!o.sceneTargets.isEmpty()&&indexed&&h!=null)check(o.deviceRenderers.containsKey(h),"场景部件 "+s.name+" 的 hash "+h+" 没有可用的内置骨骼，不能套用其他网格");
             String r=h==null?null:o.deviceRenderers.get(h),part=s.name.substring(15);if(r==null||map.containsKey(lower(part)))continue;
             Bones have=null;for(Bones b:bones)if(b.name.equalsIgnoreCase(r))have=b;
-            if(have==null&&synthetic){have=new Bones(r);bones.add(have);}
+            if(have==null&&(synthetic||o.indexedVulkan&&o.sceneTargets.isEmpty())){have=new Bones(r);bones.add(have);}
             if(have!=null){if(rigid(have))ini.rigidHashes.add(h);map.put(lower(part),have.name);if(draws)log.append(part).append(" -> ").append(have.name).append("（IB hash ").append(h).append(" 在设备 hash 表中是游戏的 ").append(have.name).append("）\n");}
             else{map.put(lower(part),"skip");if(draws)log.append(part).append("：IB hash ").append(h).append(" 在设备 hash 表中是游戏的 ").append(r).append("，骨骼库中没有它的记录，此部件不转换（让角色出场一次更新骨骼库后重新转换）\n");}}
     }
@@ -567,9 +572,11 @@ public final class ModelConverter {
     /** Submeshes and material rows of one renderer part in one variant combination. */
     static final class ComboRows {final List<int[]> subs=new ArrayList<>();final List<String[]> rows=new ArrayList<>();String key(){StringBuilder s=new StringBuilder();for(int i=0;i<subs.size();i++)s.append(subs.get(i)[0]).append(',').append(subs.get(i)[1]).append(':').append(rows.get(i)[0]).append('#').append(rows.get(i)[1]).append(';');return s.toString();}}
     /** One renderer: union of every combination's vertices and index ranges, plus per-combination submeshes. */
-    static final class Group {Bones bones;String name;PackedVertices vertices=new PackedVertices();IntList indices=new IntList();Map<String,int[]> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();List<Object> draws;final ExtraBoneFallback extraBones=new ExtraBoneFallback();Group(Bones b,String n){bones=b;name=n;} }
+    static final class Group {Bones bones;String name;PackedVertices vertices=new PackedVertices();IntList indices=new IntList();Map<String,int[]> compact=new LinkedHashMap<>();Map<String,int[]> ranges=new HashMap<>();Map<Integer,ComboRows> combos=new HashMap<>();List<Object> draws;
+        final Map<String,Integer> sourceSlots=new HashMap<>(), sectionSlots=new HashMap<>();final List<Object> sourceDraws=new ArrayList<>();
+        final ExtraBoneFallback extraBones=new ExtraBoneFallback();Group(Bones b,String n){bones=b;name=n;} }
     static final class MaterialDef {String name;Resource diffuse,light,normal;boolean flipRows=true;}
-    static final class Build {boolean animationBoneFallback=false;final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final BufferCache cache=new BufferCache();}
+    static final class Build {boolean animationBoneFallback=false,indexedVulkan=false;final LinkedHashMap<String,Group> groups=new LinkedHashMap<>();final LinkedHashMap<String,MaterialDef> materials=new LinkedHashMap<>();final BufferCache cache=new BufferCache();}
     /** Explicit, lossy import experiment for baked geometry animation, never the default or a PC-equivalence claim.
      * Keep each vertex's own supported associations; refuse a vertex with no supported association instead of
      * inventing a bone, borrowing a neighbour, or dropping the vertex. tidy() then normalizes the retained weights. */
@@ -758,6 +765,26 @@ public final class ModelConverter {
             if(h.equals(d.hash)&&first!=null)parts.put(first,lower(s.name.substring(15)));}
         int i=0;for(String n:parts.values()){if(n.equals(lower(d.part)))return checkedSlot(i);i++;}return 0;}
     private static int checkedSlot(int s){check(s<64,"材质槽越界");return s;}
+    /** Draw conditions refer to the original draw, never to drawindexed's replacement range. Keep only exact rules. */
+    private static int sourceDraw(Ini ini,Group g,Draw draw){
+        return g.sectionSlots.computeIfAbsent(lower(draw.part)+"|"+draw.hash,k->readSourceDraw(ini,g,draw));
+    }
+    private static int readSourceDraw(Ini ini,Group g,Draw draw){
+        if(!draw.hash.matches("[0-9a-f]{8}"))return -1;
+        Section s=ini.sections.get("textureoverride"+lower(draw.part));if(s==null)return -1;
+        Long first=null,count=null;
+        try{for(String line:s.lines){String[] a=kv(line);if(a==null)continue;
+            if(a[0].equals("match_first_index"))first=Long.parseLong(a[1].trim());
+            if(a[0].equals("match_index_count"))count=Long.parseLong(a[1].trim());
+            if(a[0].startsWith("match_")&&!a[0].equals("match_first_index")&&!a[0].equals("match_index_count")&&!a[0].equals("match_priority"))return -1;}}
+        catch(NumberFormatException e){return -1;}
+        if((first!=null&&(first<0||first>0xffffffffL))||(count!=null&&(count<=0||count>0xffffffffL)))return -1;
+        String key=draw.hash+"|"+first+"|"+count;Integer existing=g.sourceSlots.get(key);if(existing!=null)return existing;
+        int slot=g.sourceDraws.size();if(slot>=64)return -1;
+        Map<String,Object> rule=Json.of("ib",draw.hash,"slot",slot);
+        if(first!=null)rule.put("first",first);if(count!=null)rule.put("count",count);
+        g.sourceSlots.put(key,slot);g.sourceDraws.add(rule);return slot;
+    }
     /** What a combination draws, without reading buffers: used to find the variables that actually change the model. */
     private static String signature(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,String fallback)throws Exception{
         Map<String,Resource> rs=resources(ini,src,vars);LinkedHashMap<Draw,Bones> resolved=resolve(ini,src,boneRecords,mapping,vars,rs,null,fallback);
@@ -768,7 +795,8 @@ public final class ModelConverter {
     private static void collect(Ini ini,File src,List<Bones> boneRecords,Map<String,String> mapping,Map<String,Integer> vars,int combo,Build b,StringBuilder log,String fallback)throws Exception {
         Map<String,Resource> rs=resources(ini,src,vars);LinkedHashMap<Draw,Bones> targets=resolve(ini,src,boneRecords,mapping,vars,rs,combo==0?log:null,fallback);
         for(Map.Entry<Draw,Bones> entry:targets.entrySet()){Draw d=entry.getKey();Bones target=entry.getValue();Group g=b.groups.computeIfAbsent(lower(target.name),k->new Group(target,"Part"+b.groups.size()));
-            boolean rigid=rigid(target);
+            boolean rigid=rigid(target);int sourceSlot=sourceDraw(ini,g,d);
+            int boneLimit=b.indexedVulkan&&sourceSlot>=0&&!rigid?512:target.count;
             Resource pos=stream(rs,d.bindings,0),blend=rigid?new Resource(pos.file,32,""):stream(rs,d.bindings,1),tex=stream(rs,d.bindings,2),indices=resource(rs,d.bindings.get("ib"));check(indices!=null,"缺少索引流");
             if(combo==0)log.append(d.part).append(": Position=").append(pos.file.getName()).append(", Blend=").append(blend.file.getName()).append(", Texcoord=").append(tex.file.getName()).append('\n');
             byte[] p=b.cache.get(pos.file),bl=rigid?null:b.cache.get(blend.file),t=b.cache.get(tex.file),ix=b.cache.get(indices.file);if(p==null){p=read(pos.file);b.cache.put(pos.file,p);}if(rigid){check(pos.stride>=40||pos.stride==28,"静态武器 Position 顶点布局尚不支持：stride="+pos.stride);bl=new byte[p.length/pos.stride*32];ByteBuffer weights=buf(bl);for(int v=0;v<bl.length;v+=32)weights.putFloat(v,1f);}else if(bl==null){bl=read(blend.file);b.cache.put(blend.file,bl);}if(t==null){t=read(tex.file);b.cache.put(tex.file,t);}if(ix==null){ix=read(indices.file);b.cache.put(indices.file,ix);}
@@ -789,7 +817,7 @@ public final class ModelConverter {
                     int compact=remap[old]-1;
                     if(compact<0){
                         compact=g.vertices.size();check(compact<500000,"顶点数超限");remap[old]=compact+1;
-                        g.vertices.add(vertex(pos,blend,tex,p,bl,t,old,target.count,b.animationBoneFallback?g.extraBones:null,flipV));
+                        g.vertices.add(vertex(pos,blend,tex,p,bl,t,old,boneLimit,b.animationBoneFallback?g.extraBones:null,flipV));
                     }
                     g.indices.add(compact);
                 }
@@ -799,7 +827,8 @@ public final class ModelConverter {
             if("8b268d05".equals(d.hash)&&!"nnfix".equals(d.bindings.get("texture-role:layout"))&&tx[0]!=null&&tx[1]!=null&&tx[2]!=null)
                 ini.compatibility.add("已按纳西妲 IB 8b268d05 识别贴图：ps-t0 为法线，ps-t1 为颜色，ps-t2 为光照遮罩（优先于文件名）");
             MaterialDef m=b.materials.get(materialKey);if(m==null){m=new MaterialDef();m.name="Material"+b.materials.size();m.diffuse=tx[0];m.light=tx[1];m.normal=tx[2];m.flipRows=flipV;b.materials.put(materialKey,m);}
-            rows.rows.add(new String[]{m.name,Integer.toString(slot(ini,d))});rows.subs.add(range);
+            int materialSlot=slot(ini,d);
+            rows.rows.add(new String[]{m.name,Integer.toString(materialSlot),sourceSlot<0?"":Integer.toString(sourceSlot)});rows.subs.add(range);
         }
     }
     /**
@@ -831,7 +860,8 @@ public final class ModelConverter {
             for(Group g:b.groups.values()){
                 int n=g.vertices.size(),ni=g.indices.size();
                 check(n>0&&n<=500000&&ni>0&&ni<=15000000&&ni%3==0,"部件尺寸越界");for(ComboRows c:g.combos.values())check(c.subs.size()<=64,"子网格超过 64");
-                int bones=g.bones.synthetic?g.vertices.requiredBones:g.bones.count;
+                boolean indexed=g.bones.synthetic||g.vertices.requiredBones>g.bones.count;
+                int bones=indexed?g.vertices.requiredBones:g.bones.count;
                 Map<String,Object> data=new LinkedHashMap<>();
                 data.put("positions",blob.put(g.vertices.column(12,0)));data.put("normals",blob.put(g.vertices.column(12,12)));data.put("uv",blob.put(g.vertices.column(8,24)));
                 ByteBuffer ix=buf(new byte[4*ni]);for(int i=0;i<ni;i++)ix.putInt(g.indices.data[i]);data.put("indices",blob.put(ix.array()));
@@ -839,8 +869,9 @@ public final class ModelConverter {
                 data.put("colors",blob.put(g.vertices.column(4,64)));data.put("tangents",blob.put(g.vertices.column(16,68)));
                 for(int e=0;e<g.vertices.extras;e++)data.put("uv"+(e+2),blob.put(g.vertices.column(8,84+8*e)));
                 Map<String,Object> part=Json.of("name",g.name,"renderer",g.bones.name,"bones",bones,"vertices",n,"indices",ni,"data",data);
-                if(!g.bones.synthetic){Map<String,Object> sk=Json.of("bones",g.bones.names,"bindposes",blob.put(g.bones.binds));if(g.bones.parents!=null)sk.put("parents",new ArrayList<Object>(g.bones.parents));part.put("skeleton",sk);}
-                if(g.bones.target!=null)part.put("target",g.bones.target);
+                if(!indexed){Map<String,Object> sk=Json.of("bones",g.bones.names,"bindposes",blob.put(g.bones.binds));if(g.bones.parents!=null)sk.put("parents",new ArrayList<Object>(g.bones.parents));part.put("skeleton",sk);}
+                if(g.bones.target!=null&&(!indexed||g.bones.synthetic))part.put("target",g.bones.target);
+                if(!g.sourceDraws.isEmpty())part.put("sourceDraws",new ArrayList<>(g.sourceDraws));
                 // A part not drawn at all with the initial values (only possible after falling back to them) shows nothing.
                 part.put("draws",g.draws!=null?g.draws:Collections.singletonList(Json.of("start",0,"count",0,"material",b.materials.values().iterator().next().name,"slot",0)));parts.add(part);
             }
@@ -1279,8 +1310,9 @@ public final class ModelConverter {
         /** pc-hashes.json's texture hashes, for "this =" texture replacements (DeviceHashes.pcTextures). */
         public Options pcTextures(Map<String,List<String[]>> m){pcTextures=m==null?new HashMap<>():m;return this;}
         public Options deviceRenderers(Map<String,String> m){deviceRenderers=new HashMap<>();if(m!=null)for(Map.Entry<String,String> e:m.entrySet())deviceRenderers.put(lower(e.getKey()),e.getValue());return this;}
-        public List<Object> sceneTargets=new ArrayList<>();
-        Map<String,Object> character(int id){Map<String,Object> c=Json.of("id",id,"names",new ArrayList<Object>(names));if(outfit!=null&&!outfit.isEmpty())c.put("outfit",outfit);if(Characters.isScene(id))c.put("targets",sceneTargets);return c;}
+        public List<Object> sceneTargets=new ArrayList<>();boolean gpuScene=false,indexedVulkan=false;
+        Map<String,Object> character(int id){Map<String,Object> c=Json.of("id",id,"names",new ArrayList<Object>(names));if(outfit!=null&&!outfit.isEmpty())c.put("outfit",outfit);
+            if(Characters.isScene(id)){c.put("targets",sceneTargets);if(gpuScene)c.put("gpuScene",true);}return c;}
         /** Where a texture-only mod's read-only diagnostic goes (GIBox/texture-diag, TextureDiag); null: none. */
         public File textureDiag=null;
         public Options textureDiag(File dir){textureDiag=dir;return this;}
@@ -1302,20 +1334,20 @@ public final class ModelConverter {
         // A mod that converts (or fails for another reason) leaves no texture-only diagnostic of an earlier import behind.
         if(o.textureDiag!=null&&(!textureOnly(ini)||o.textureMods))TextureDiag.remove(o.textureDiag,dest.getName());
         if(o.textureMods&&textureOnly(ini))return TextureMod.install(src,ini,id,dest,o,decoder,log);
-        check(!Characters.isScene(id)||!o.sceneTargets.isEmpty(),"场景网格 MOD 需要先按 hash 匹配目标和内置骨骼");
+        check(!Characters.isScene(id)||!o.sceneTargets.isEmpty()||o.gpuScene,"场景网格 MOD 需要先按 hash 匹配目标和内置骨骼");
         log.append("模型主 INI：").append(ini.file.getName()).append('\n');
         for(File sibling:ModConfig.allInis(src))if(!sibling.getCanonicalFile().equals(ini.file.getCanonicalFile()))log.append("未导入辅助 INI：").append(src.toPath().relativize(sibling.toPath())).append("（帮助、菜单或独立贴图配置；不包含在本次模型转换中）\n");
         if(o.variants)for(Map.Entry<String,TreeSet<Integer>> e:ini.excludedChoices.entrySet())
             log.append("款式 ").append(e.getKey()).append(" 按按键列出的值和初始值取 ").append(ini.choices.get(e.getKey())).append("；仅在条件中出现的值不作为可选款式：").append(e.getValue()).append('\n');
         check(o.names.size()<=16,"角色名过多");for(String n:o.names)check(n.matches("[a-z0-9]{3,40}"),"角色名格式："+n);
-        o.reusedSkeleton=false;List<Bones> saved=null;if(boneDir==null&&o.replace)try{saved=previousBones(dest,id);}catch(Exception ex){log.append("未复用已有骨骼记录：").append(ex.getMessage()).append('\n');}
+        o.reusedSkeleton=false;List<Bones> saved=null;if(boneDir==null&&o.replace&&!o.gpuScene)try{saved=previousBones(dest,id,o.outfit);}catch(Exception ex){log.append("未复用已有骨骼记录：").append(ex.getMessage()).append('\n');}
         if(saved!=null){bones=saved;o.reusedSkeleton=true;log.append("骨骼复用：独立骨骼库不可用，保留本 MOD 已有转换中的完整骨骼和目标网格记录\n");}
-        else if(boneDir==null){check((id==0&&!o.names.isEmpty())||(id>=10000000&&id<=10001999),"没有骨骼目录时需要角色 ID 或角色名");bones=new ArrayList<>();for(String r:DEFAULT_RENDERERS)bones.add(new Bones(r));if(o.fallback==null)o.fallback="Body";}
+        else if(boneDir==null){check(o.gpuScene||(id==0&&!o.names.isEmpty())||(id>=10000000&&id<=10001999),"没有骨骼目录时需要角色 ID 或角色名");bones=new ArrayList<>();for(String r:DEFAULT_RENDERERS)bones.add(new Bones(r));if(o.fallback==null)o.fallback="Body";}
         else{check(Characters.isScene(id)||(id>=10000000&&id<=10001999),"角色 ID 越界");bones=bones(boneDir,id);}Map<String,String> map=new LinkedHashMap<>();
         if(!o.mapping.trim().isEmpty())for(String row:o.mapping.split(";")){String[] a=row.trim().split("=",-1);check(a.length==2&&!a[0].trim().isEmpty()&&!a[1].trim().isEmpty(),"映射格式：部件=渲染器;部件=skip");check(map.put(lower(a[0].trim()),a[1].trim())==null,"重复映射");}
         deviceParts(ini,bones,map,o,log);
         Animation animation;String driven=null;try{animation=Animation.parse(ini,src,o.rehearsal);}catch(Driven d){animation=null;driven=d.getMessage();}
-        if(animation!=null)return convertAnimation(ini,src,bones,map,dest,id,o,decoder,log,animation);
+        if(animation!=null){check(!o.gpuScene,"场景逐帧网格仍需要内置目标");return convertAnimation(ini,src,bones,map,dest,id,o,decoder,log,animation);}
         // Variants: every assignment of the variables that an if of a drawing section reads (not the ones only key or
         // Present sections use), one signature each; the distinct signatures are built, and each draw keeps the values of
         // the variables it depends on.
@@ -1349,9 +1381,16 @@ public final class ModelConverter {
         File tmp=Files.createTempDirectory(parent.toPath(),".model-convert-").toFile();
         try{
             if(o.core!=null)coreDraws(ini,src,kept,map,o.core,log);
-            memoryBudget(ini,src,bones,map,kept,o.fallback,log);Build b=new Build();for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
+            memoryBudget(ini,src,bones,map,kept,o.fallback,log);Build b=new Build();b.indexedVulkan=o.indexedVulkan&&driven==null;
+            for(int c=0;c<kept.size();c++)collect(ini,src,bones,map,kept.get(c),c,b,log,o.fallback);
             if(b.groups.isEmpty()&&textureOnly(ini))check(false,"所选 INI "+ini.file.getName()+" 是纯贴图 MOD：只把贴图换到游戏自己的模型上，没有自己的网格（IB 和顶点缓冲）。GIBox 还不支持纯贴图 MOD；脸部贴图（FaceHeadDiffuse）目前只在带网格的 MOD 里随网格一起替换"+textureDiag(src,ini,id,dest,o,log));
             check(!b.groups.isEmpty(),"所选 INI "+ini.file.getName()+" 没有可转换的模型绘制："+(o.variants?"已开启款式枚举；请检查是否为纯贴图配置、部件全部跳过或依赖未支持的外部绘制命令":"当前只转换默认款式；可在手动转换中开启‘转换全部款式’，并检查部件映射及外部绘制命令"));
+            if(o.gpuScene)for(Group g:b.groups.values()){
+                check(!g.sourceDraws.isEmpty()&&g.combos.values().stream().allMatch(c->c.rows.stream().allMatch(row->row.length>2&&!row[2].isEmpty())),
+                    "场景网格缺少可直接匹配的 INI 索引规则");
+            }
+            for(Group g:b.groups.values())if(!g.bones.synthetic&&g.vertices.requiredBones>g.bones.count)
+                log.append(g.name).append("：保留 MOD 原始骨骼索引，Vulkan 将按实时矩阵范围检查\n");
             Set<String> shown=new LinkedHashSet<>();
             Object replaceWhen=null;
             try{for(Group g:b.groups.values())g.draws=drawTable(g,var,sigOf,kept.size(),shown);

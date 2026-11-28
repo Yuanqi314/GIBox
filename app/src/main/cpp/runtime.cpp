@@ -59,7 +59,7 @@ struct KeyPress {long long seq=0;size_t file=0;std::string section;bool back=fal
 // full / migrate, test rounds.
 // auto (0.7.60): the game's own per-renderer instance is written in place (its effects keep running on it); a loaded asset
 // or a material another renderer shows is copied first, and the game's instance made from that copy is followed in place.
-struct TexModControl {std::string strategy="auto",lod="full",paimonTextureMod,paimonMeshMod;bool capture=false,paimonTint=false,sharedSkins=false;vkcap::Mode hash=vkcap::Mode::Off;long long testRequest=0;std::vector<std::string> testStrategies{"auto","direct","clone"};int observeMs=4000;};
+struct TexModControl {std::string strategy="auto",lod="full",paimonTextureMod,paimonMeshMod;bool capture=false,paimonTint=false,sharedSkins=true;vkcap::Mode hash=vkcap::Mode::Off;long long testRequest=0;std::vector<std::string> testStrategies{"auto","direct","clone"};int observeMs=4000;};
 struct ControlState {std::string loadingFit="original";cameraFade::Mode cameraFadeMode=cameraFade::Mode::Original;TexModControl tex;Experiments exp;bool sharedChoices=false,enabled=false,lodPin=true,hideUid=false,npcModels=false,synthesisButton=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;std::map<std::string,std::vector<KeyPress>> keys;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"control.json 不是对象");ControlState s;
@@ -93,7 +93,8 @@ ControlState parseControl(const std::string& raw){
   s.tex.paimonTint=t.at("vulkanPaimonTint").type==Json::Bool&&t.at("vulkanPaimonTint").boolean;
   if(t.at("vulkanPaimonTextures").type==Json::String)s.tex.paimonTextureMod=t.at("vulkanPaimonTextures").string;
   if(t.at("vulkanPaimonModel").type==Json::String)s.tex.paimonMeshMod=t.at("vulkanPaimonModel").string;
-  s.tex.sharedSkins=t.at("vulkanSkinModels").type==Json::Bool&&t.at("vulkanSkinModels").boolean;
+  const auto& configured=t.at("vulkanSkinModels");
+  s.tex.sharedSkins=configured.type==Json::Bool?configured.boolean:!s.tex.paimonTint&&s.tex.paimonTextureMod.empty()&&s.tex.paimonMeshMod.empty();
   const auto& ts=t.at("testStrategies");if(ts.type==Json::Array){s.tex.testStrategies.clear();for(auto& v:ts.array)if(v.type==Json::String&&(v.string=="auto"||v.string=="direct"||v.string=="clone")&&s.tex.testStrategies.size()<4)s.tex.testStrategies.push_back(v.string);if(s.tex.testStrategies.empty())s.tex.testStrategies={"auto","direct","clone"};}
   auto ms=integerOf(t.at("observeMs"));if(ms)s.tex.observeMs=int(std::min<long long>(60000,std::max<long long>(1000,ms)));}
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
@@ -1191,16 +1192,26 @@ struct Runtime::Impl {
    for(const auto& p:capture.drawStats()){targets+=(targets.empty()?"":"，")+hex8(p.hash)+"：上传 "+std::to_string(p.uploads)+" / 绘制样本 "+std::to_string(p.draws);}
    log("vulkan-draw-status","索引上传 "+std::to_string(stats.uploads)+" 次，哈希命中 "+std::to_string(stats.drawProbeUploads)+" 次，vkCmdDrawIndexed "+std::to_string(stats.indexedDraws)+" 次；"+targets);
    if(capture.allSkins){auto upload=capture.textureUpload.load(std::memory_order_relaxed);
-    std::map<std::string,uint64_t> draws;for(size_t i=0;i<capture.skinMods.size();i++)draws[capture.skinMods[i]]+=capture.profileDraws[i].load(std::memory_order_relaxed);
+    std::map<std::string,uint64_t> draws;for(size_t i=0;i<capture.skinMods.size();i++){
+     draws[capture.skinMods[i]]+=capture.profileDraws[i].load(std::memory_order_relaxed);
+     if(const auto bones=capture.skinBoneErrors[i].exchange(0,std::memory_order_relaxed))
+      log("vulkan-skin-bounds",capture.skinMods[i]+"：MOD 骨骼索引至少需要 "+std::to_string(bones>>16)+" 根，实时矩阵只有 "+std::to_string(bones&0xffffu)+" 根，保留原版绘制");
+    }
     std::string models;for(const auto& entry:draws)models+=(models.empty()?"；":"，")+entry.first+" "+std::to_string(entry.second);
+    static constexpr const char* reasons[]={"绘制范围或实例不符","INI 规则冲突","顶点格式或图形管线不兼容","未识别原版蒙皮输出","骨骼超出实时矩阵","资源未就绪","等待姿势"};
+    for(size_t i=0;i<std::size(reasons);i++){
+     const auto n=capture.skinMisses[i].load(std::memory_order_relaxed);if(n)models+="；"+std::string(reasons[i])+" "+std::to_string(n);
+    }
     log("vulkan-skin-status",std::string(capture.activeSkins.load(std::memory_order_relaxed)?"开启":"关闭")+
      (upload==1?"，资源已排入队列":upload<0?"，资源准备失败":"，等待上传")+"，识别 "+std::to_string(capture.skinMatches.load(std::memory_order_relaxed))+
-     "，蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed))+"，换绑 "+std::to_string(capture.sharedDraws.load(std::memory_order_relaxed))+
+     "，已匹配原版蒙皮 "+std::to_string(capture.originalSkinJobs.load(std::memory_order_relaxed))+
+     "，MOD 蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed))+"，换绑 "+std::to_string(capture.sharedDraws.load(std::memory_order_relaxed))+
      "，保持原样 "+std::to_string(capture.sharedMisses.load(std::memory_order_relaxed))+models);
    }else if(capture.tintHooks){std::string line=capture.tintOn.load(std::memory_order_relaxed)?"开启":"关闭";const bool textured=!capture.paimonTextureMod.empty();
     if(textured){const int upload=capture.textureUpload.load(std::memory_order_relaxed);line+=upload==1?"，贴图已排入队列":upload<0?"，贴图准备失败":"，等待贴图上传";}
     for(size_t i=0;i<2;i++)line+=(textured?(i==0?"，槽 0":"，槽 1"):(i==0?"，绿":"，紫"))+std::string("：换绑 ")+std::to_string(capture.tintDraws[i].load(std::memory_order_relaxed))+"，保持原样 "+std::to_string(capture.tintMisses[i].load(std::memory_order_relaxed));
-    if(capture.skinnedModel)line+="，Vulkan 蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed))+" 次";
+    if(capture.skinnedModel)line+="，已匹配原版蒙皮 "+std::to_string(capture.originalSkinJobs.load(std::memory_order_relaxed))+
+     "，MOD 蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed));
     log(capture.skinnedModel?"vulkan-skin-status":textured?"vulkan-texture-status":"vulkan-tint-status",line);
    }}
  }
@@ -3291,9 +3302,13 @@ struct Runtime::Impl {
   if(c&&c->npcModels!=ctl.npcModels){skipped.clear();bindingRejected.clear();texQuickNo.clear();texWaitUntil.clear();npcTextureAt=0;discoverAt=0;}
   if(c){bool diagnosticOnly=c->enabled==ctl.enabled&&c->selected==ctl.selected&&c->variables==ctl.variables&&c->exportBones==ctl.exportBones&&c->refreshBones==ctl.refreshBones&&c->refreshBonesCharacter==ctl.refreshBonesCharacter&&(c->renderMark!=ctl.renderMark||c->logLevel!=ctl.logLevel||c->keys!=ctl.keys);
    if(!(c->exp==ctl.exp))log("experiments",c->exp.text());
+   auto previousVars=ctl.variables==c->variables;
    ctl=*c;synthesis.setEnabled(ctl.synthesisButton);
    auto& capture=vkcap::tracker();
-   if(capture.allSkins)capture.setSkinReplacement(ctl.enabled,ctl.tex.sharedSkins,ctl.selected);
+   if(capture.allSkins){
+    capture.setSkinReplacement(ctl.enabled,ctl.tex.sharedSkins,ctl.selected);
+    if(!previousVars||!std::atomic_load(&capture.skinChoices))capture.setSkinChoices(ctl.variables);
+   }
    else capture.setPaimonReplacement(ctl.enabled,ctl.tex.paimonTint,capture.skinnedModel?ctl.tex.paimonMeshMod:ctl.tex.paimonTextureMod);
    if(!diagnosticOnly){failed.clear();attempts.clear();skipped.clear();notes.clear();findOff=false;findFails=0;findAt=0;discoverAt=0;staleNote.clear();bindingRejected.clear();bindingStamp.clear();}}
 
