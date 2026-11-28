@@ -28,6 +28,7 @@
 #include <map>
 #include <string>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <type_traits>
 #include <unistd.h>
 #include <vector>
@@ -80,13 +81,13 @@ ms::vkcap::Tracker& T(){return ms::vkcap::tracker();}
  X(CreateImageView) X(DestroyImageView) X(DestroyImage) X(CreateSampler) X(DestroySampler) X(CreateDescriptorSetLayout) X(DestroyDescriptorSetLayout) \
  X(CreatePipelineLayout) X(DestroyPipelineLayout) X(CreateShaderModule) X(DestroyShaderModule) X(CreateGraphicsPipelines) X(DestroyPipeline) \
  X(AllocateDescriptorSets) X(UpdateDescriptorSets) X(FreeDescriptorSets) X(ResetDescriptorPool) X(DestroyDescriptorPool) \
- X(AllocateCommandBuffers) X(FreeCommandBuffers) X(ResetCommandPool) X(DestroyCommandPool) X(DestroyDevice) \
+ X(AllocateCommandBuffers) X(FreeCommandBuffers) X(ResetCommandBuffer) X(ResetCommandPool) X(DestroyCommandPool) X(DestroyDevice) \
  X(CmdBindPipeline) X(CmdBindDescriptorSets)
 #define UPLOAD_HOOKS(X) X(CreateDevice) X(GetDeviceQueue) X(GetDeviceQueue2) X(CreateCommandPool) X(QueueSubmit)
 #define UPLOAD_API(X) X(GetPhysicalDeviceMemoryProperties) X(GetPhysicalDeviceQueueFamilyProperties) X(GetPhysicalDeviceFormatProperties) \
  X(CreateImage) X(GetImageMemoryRequirements) X(BindImageMemory) X(AllocateMemory) X(FreeMemory) X(CreateBuffer) X(DestroyBuffer) \
  X(GetBufferMemoryRequirements) X(BindBufferMemory) X(MapMemory) X(UnmapMemory) X(BeginCommandBuffer) X(EndCommandBuffer) \
- X(CmdCopyBufferToImage) X(CmdPipelineBarrier) X(CreateFence) X(GetFenceStatus) X(DestroyFence)
+ X(CmdCopyBufferToImage) X(CmdPipelineBarrier) X(CreateFence) X(GetFenceStatus) X(DestroyFence) X(DeviceWaitIdle)
 #define SKIN_HOOKS(X) X(CreateComputePipelines) X(CmdDispatch) X(CmdBindVertexBuffers)
 #define RESOURCE_HOOKS(X) X(CreateImage) X(CmdCopyBufferToImage) X(CmdCopyBufferToImage2) X(CmdCopyBufferToImage2KHR) X(CmdDraw) \
  X(CmdCopyImage) X(CmdBlitImage) X(CmdResolveImage) X(CmdClearColorImage)
@@ -168,6 +169,7 @@ void resourceOnCmdFillBuffer(VkCommandBuffer c,VkBuffer b,VkDeviceSize o,VkDevic
 }
 bool renderTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw& draw);
 void resourceOnCmdDraw(VkCommandBuffer c,uint32_t n,uint32_t i,uint32_t first,uint32_t instance){
+ std::shared_lock<std::shared_mutex> catalog(T().registryMutex);
  if(T().inspectResources)T().observeResources(gpuHandle(c),false);
  if(T().renderTextures&&renderTextureDraw(c,{false,n,i,first,instance,0}))return;
  gpuCmdDraw.load()(c,n,i,first,instance);
@@ -190,23 +192,27 @@ void resourceOnCmdClearColorImage(VkCommandBuffer c,VkImage i,VkImageLayout l,co
  if(p&&T().gpuEnabled())for(uint32_t j=0;j<n;j++)T().imageChanged(gpuHandle(c),gpuHandle(i),p[j].baseMipLevel,p[j].levelCount,p[j].baseArrayLayer,p[j].layerCount);
  gpuCmdClearColorImage.load()(c,i,l,v,n,p);
 }
+void trackExecutedResources(VkCommandBuffer c,uint32_t n,const VkCommandBuffer* p);
 void resourceOnCmdExecuteCommands(VkCommandBuffer c,uint32_t n,const VkCommandBuffer* p){
  if(T().gpuBuffersEnabled()&&p)for(uint32_t i=0;i<n;i++)T().executeCommands(gpuHandle(c),gpuHandle(p[i]));
+ if(T().hotReload&&p){trackExecutedResources(c,n,p);}
  gpuCmdExecuteCommands.load()(c,n,p);
 }
-::VkResult resourceSubmitted2(::VkResult result,uint32_t n,const VkSubmitInfo2* p){
- if(result==VK_SUCCESS&&T().gpuBuffersEnabled()&&p)for(uint32_t i=0;i<n;i++)for(uint32_t j=0;j<p[i].commandBufferInfoCount;j++)
-  T().submitted(gpuHandle(p[i].pCommandBufferInfos[j].commandBuffer));
+void submittedCommand(VkQueue queue,VkCommandBuffer command);
+::VkResult resourceSubmitted2(VkQueue queue,::VkResult result,uint32_t n,const VkSubmitInfo2* p){
+ if(result==VK_SUCCESS&&p)for(uint32_t i=0;i<n;i++)for(uint32_t j=0;j<p[i].commandBufferInfoCount;j++){
+  submittedCommand(queue,p[i].pCommandBufferInfos[j].commandBuffer);
+ }
  return result;
 }
 void serviceUploads(VkQueue queue);
 ::VkResult resourceOnQueueSubmit2(VkQueue q,uint32_t n,const VkSubmitInfo2* p,VkFence f){
  if(T().renderTextures){serviceUploads(q);}
- return resourceSubmitted2(gpuQueueSubmit2.load()(q,n,p,f),n,p);
+ return resourceSubmitted2(q,gpuQueueSubmit2.load()(q,n,p,f),n,p);
 }
 ::VkResult resourceOnQueueSubmit2KHR(VkQueue q,uint32_t n,const VkSubmitInfo2* p,VkFence f){
  if(T().renderTextures){serviceUploads(q);}
- return resourceSubmitted2(gpuQueueSubmit2KHR.load()(q,n,p,f),n,p);
+ return resourceSubmitted2(q,gpuQueueSubmit2KHR.load()(q,n,p,f),n,p);
 }
 
 constexpr size_t tintBindings=12,tintSetLimit=256;
@@ -234,7 +240,7 @@ struct MixedLayout {MixedBindings bindings;uint32_t writtenMask,imageMask;};
 struct TintSet {
  VkDescriptorPool pool{};uint32_t shape=0,written=0;
  std::array<VkDescriptorImageInfo,tintBindings> images{};
- struct Cache {VkDescriptorSet set{};uint64_t generation=0;};std::array<Cache,2> cache{};
+ struct Cache {VkDescriptorSet set{};uint64_t generation=0,serial=0;};std::array<Cache,2> cache{};
  std::map<std::pair<TintViews,TintSamplers>,Cache> textureCache{};
  std::shared_ptr<const MixedLayout> mixed{};
  std::map<unsigned,VkDescriptorBufferInfo> buffers{};
@@ -247,17 +253,30 @@ struct TintCmd {
  VkBuffer index{};VkDeviceSize indexOffset=0;VkIndexType indexType=VK_INDEX_TYPE_MAX_ENUM;
  std::set<VkBuffer> skinProduced{};
  std::map<std::pair<VkBuffer,unsigned>,uint64_t> sharedProduced{};
+ uint64_t producedCatalog=0;
+ std::set<uint64_t> skinCatalogs{};
+ std::set<VkBuffer> gpuBuffers{};
+ std::set<VkDescriptorSet> gpuSets{};
 };
-struct TextureGpu {VkImage image{};VkDeviceMemory memory{};VkImageView view{};};
+struct TextureGpu {VkImage image{};VkDeviceMemory memory{};VkImageView view{};uint64_t bytes=0;};
 struct SkinImageFile {std::string dir,generation;uint64_t size=0;std::string manifest{};};
 struct SkinImage {
  std::shared_ptr<const SkinImageFile> file;ms::TexRef ref;bool linear=false;
  std::string raw{};bool circle=false;float aspect=0;int fit=-1;
 };
+using ImageKey=std::tuple<std::string,std::string,std::string,std::string,uint64_t,uint64_t,unsigned,unsigned,
+                          bool,bool,float,int>;
+ImageKey imageKey(const SkinImage& image){
+ return {image.file->dir,image.file->generation,image.file->manifest,image.raw,image.ref.off,image.ref.len,
+         image.ref.w,image.ref.h,image.linear,image.circle,image.aspect,image.fit};
+}
+struct ResidentImage {TextureGpu gpu;uint64_t used=0;};
 struct TextureRoute {
  uint32_t check=0;std::optional<uint32_t> ib;
  std::vector<ms::vkcap::ResourceMatch> terms;
  int64_t first=-1,count=-1,firstVertex=-1,vertices=-1,limit=-1;
+ int64_t instances=-1,firstInstance=-1;
+ std::optional<int32_t> baseVertex;
  uint32_t total=0;
  unsigned thisSet=0,thisBinding=~0u;
  bool semantic=false;
@@ -268,26 +287,32 @@ struct TextureProgram {
  std::map<std::string,std::vector<int>> vars;
  std::map<std::string,int> defaults;
  std::map<std::string,std::vector<std::array<unsigned,3>>> images;
+ std::map<std::string,std::string> linearAlternative;
  std::string persistFile;
  bool loading=false;
 };
 using UploadPixels=std::vector<std::pair<std::shared_ptr<ms::Texture>,bool>>;
-constexpr uint64_t maxResidentSkinTextures=192ull<<20,skinTextureBatch=16ull<<20;
+constexpr uint64_t maxResidentSkinTextures=192ull<<20,skinTextureBatch=16ull<<20,gpuBudget=256ull<<20;
 constexpr uint64_t startupSkinTextureBudget=64ull<<20;
 struct TextureUpload {
  VkPhysicalDeviceMemoryProperties memory{};std::set<uint32_t> families;
  bool attempted=false,queued=false;uint32_t usedFamily=0;
  std::vector<TextureGpu> images{TextureGpu{},TextureGpu{}};
+ std::vector<ImageKey> imageKeys;
+ std::map<ImageKey,ResidentImage> resident;
+ std::map<VkImageView,ResidentImage*> residentViews;
  VkCommandPool pool{};VkBuffer staging{};VkDeviceMemory stagingMemory{};VkFence fence{};
  uint64_t imageBytes=0;
+ uint64_t version=0,clock=0,readVersion=0,nextAttempt=0,meshDemand=0;
+ UploadPixels decoded;
  std::set<unsigned> requested,warm,unavailable;
  std::vector<unsigned> readingIds;
  std::future<UploadPixels> reading;
 };
-struct SkinBuffer {VkBuffer buffer{};VkDeviceMemory memory{};VkDeviceSize size=0;};
+struct SkinBuffer {VkBuffer buffer{};VkDeviceMemory memory{};VkDeviceSize size=0,allocation=0;};
 enum SkinStream {Rest=0,Weights,Attributes,Indices,Count,SkinStreamCount};
 struct SkinSet {VkDescriptorPool pool{};uint32_t shape=0,bits=0;std::array<VkDescriptorBufferInfo,4> buffers{};};
-struct SkinOutput {SkinBuffer buffer;bool queued=false;uint64_t revision=0;};
+struct SkinOutput {SkinBuffer buffer;bool queued=false;uint64_t revision=0,used=0;};
 struct SharedSkinDraw {ms::Submesh range;ms::When when;SkinTextureSlots images{~0u,~0u,~0u};};
 struct SkinLogicPass {
  const ms::LogicSpec::Pass* pass=nullptr;
@@ -354,7 +379,8 @@ void indexLogicRows(SkinLogicPass& route,const ms::LogicSpec& logic,const std::v
  }
 }
 struct SharedSkin {
- ms::VulkanSkinPayload mesh;unsigned originalVertices=0,bones=0;std::vector<unsigned> images;
+ std::shared_ptr<ms::VulkanSkinPayload> mesh=std::make_shared<ms::VulkanSkinPayload>();
+ unsigned originalVertices=0,bones=0;std::vector<unsigned> images;
  std::vector<std::vector<SharedSkinDraw>> iniDraws;ms::Variants variants;ms::When replaceWhen;
  std::shared_ptr<const ms::LogicSpec> logic;
  std::string persistFile;
@@ -385,47 +411,56 @@ struct SharedGpuSkin {
 struct SkinSource {VkBuffer rest{},weights{};unsigned vertices=0,bones=0;uint64_t revision=0;};
 constexpr uint32_t skinStorage=0x40000000,skinUniform=0x40000001;
 constexpr size_t maxSkinOutputs=40,maxSkinSets=128;
-struct SkinDevice {
+struct SkinAllocations {
  std::array<SkinBuffer,SkinStreamCount> input{};bool ready=false;
+ std::map<VkBuffer,SkinOutput> output;
+ std::vector<SkinBuffer> retired;
+ std::vector<VkDescriptorSet> retiredSets;
+ std::map<std::pair<VkBuffer,VkBuffer>,VkDescriptorSet> remaps;
+ std::vector<SharedGpuSkin> profiles;
+ std::map<std::pair<VkBuffer,unsigned>,SkinOutput> sharedOutput;
+ std::map<std::tuple<VkBuffer,VkBuffer,unsigned>,VkDescriptorSet> sharedRemaps;
+ VkDescriptorPool pool{};VkDescriptorSetLayout storage{},uniform{};VkDescriptorSet count{};size_t allocated=0;
+};
+struct SkinDevice : SkinAllocations {
  std::set<VkShaderModule> kernels;
  std::map<VkShaderModule,uint32_t> vertexCodes;
  std::map<VkShaderModule,std::array<uint8_t,32>> vertexSemantics;
  std::map<VkPipeline,unsigned> graphics;
  std::map<VkPipeline,SkinDrawLayout> drawLayouts;
  std::map<VkPipeline,std::string> rejectedLayouts;
- std::map<VkPipeline,uint64_t> layoutSamples;
+ std::map<VkPipeline,ms::vkcap::Profiles> layoutSamples;
  std::set<VkPipelineLayout> layouts;
  std::map<VkPipeline,VkPipelineLayout> compute;
  std::map<VkDescriptorSet,SkinSet> sets;
- std::map<VkBuffer,SkinOutput> output;
- std::vector<SkinBuffer> retired;
- std::map<std::pair<VkBuffer,VkBuffer>,VkDescriptorSet> remaps;
- std::vector<SharedGpuSkin> profiles;
  std::map<VkBuffer,SkinSource> seenOutputs;
  uint64_t poseRevision=0;
- std::map<std::pair<VkBuffer,VkBuffer>,uint64_t> sourceProfiles;
- std::map<std::pair<VkBuffer,unsigned>,SkinOutput> sharedOutput;
- std::map<std::tuple<VkBuffer,VkBuffer,unsigned>,VkDescriptorSet> sharedRemaps;
- VkDescriptorPool pool{};VkDescriptorSetLayout storage{},uniform{};VkDescriptorSet count{};size_t allocated=0;
+ std::map<std::pair<VkBuffer,VkBuffer>,ms::vkcap::Profiles> sourceProfiles;
 };
 struct TintDevice {
  struct Layout {uint32_t shape=0;std::array<uint32_t,8> sets{};};
  std::map<VkDescriptorSetLayout,uint32_t> layouts;
  std::map<uint32_t,std::shared_ptr<const MixedLayout>> mixedLayouts;
  std::map<VkPipelineLayout,Layout> pipelineLayouts;
- std::map<VkShaderModule,SkinTextureSlots> materialShaders;
+ std::map<VkShaderModule,std::array<unsigned,4>> materialShaders;
  std::map<VkPipeline,VkPipelineLayout> pipelines;
- std::map<VkPipeline,SkinTextureSlots> textureSlots;
+ std::map<VkPipeline,std::array<unsigned,4>> textureSlots;
  std::map<VkDescriptorSet,TintSet> sets;
  std::map<VkImageView,TintImg> images;
+ std::map<VkImageView,VkFormat> sampledFormats;
  std::vector<std::pair<VkImage,VkImageView>> ownedViews;
  std::map<uint32_t,VkDescriptorSetLayout> ownedLayouts;
  std::map<VkSampler,VkSamplerCreateInfo> samplers;
  std::map<VkSampler,VkSampler> clamped;
  std::vector<VkSampler> ownedSamplers;
  VkDescriptorPool pool{};size_t allocated=0;uint64_t generation=0;
+ struct Clone {TintViews views;uint64_t serial,used;TintSamplers samplers{};};
+ std::map<VkDescriptorSet,Clone> clones;
+ uint64_t cloneSerial=0;
  TextureUpload upload;std::map<VkCommandPool,uint32_t> families;
  SkinDevice skin;
+ uint64_t catalogVersion=0,skinVersion=0;
+ std::map<uint64_t,SkinAllocations> retiredSkins;
  std::map<const ms::LogicSpec*,SkinLogic> logic;
  struct TextureLogic {
   migoto::Engine engine;
@@ -450,14 +485,36 @@ ms::VulkanSkinPayload paimonSkin; // immutable after startup
 std::vector<SharedSkin> sharedSkins;
 std::vector<SkinImage> sharedImages;
 std::vector<TextureProgram> texturePrograms;
-std::map<uint32_t,uint64_t> textureIBPrograms;
-uint64_t explicitTexturePrograms=0;
-void warmSkinImages(TintDevice& device,uint64_t profiles,bool startup,bool request=true);
+using ms::vkcap::Profiles;
+std::map<uint32_t,Profiles> textureIBPrograms;
+Profiles explicitTexturePrograms;
+Profiles selectedProfiles(const Profiles& candidates,const Profiles& selected){
+ Profiles out;
+ std::set_intersection(candidates.begin(),candidates.end(),selected.begin(),selected.end(),std::inserter(out,out.end()));
+ return out;
+}
+struct Catalog : ms::vkcap::Registration {
+ std::vector<SharedSkin> skins;
+ std::vector<SkinImage> images;
+ std::vector<TextureProgram> textures;
+ std::map<uint32_t,Profiles> textureIB;
+ Profiles textureExplicit;
+ std::vector<uint32_t> probes;
+ std::vector<std::string> notes;
+ std::vector<std::string> selected,compatibility;
+};
+std::mutex catalogBuildMutex;
+std::vector<uint32_t> configuredProbes;
+std::vector<std::string> catalogSignature;
+std::shared_ptr<Catalog> stagedCatalog;
+struct CachedPackage {std::vector<std::string> signature;Catalog content;};
+std::map<std::string,CachedPackage> parsedPackages;
+void warmSkinImages(TintDevice& device,const Profiles& profiles,bool startup);
 VkImageView skinImage(TextureUpload& upload,unsigned id);
-void warmRenderImages(TextureUpload& upload,uint64_t profiles,bool startup){
+void warmRenderImages(TextureUpload& upload,const Profiles& profiles,bool startup){
  uint64_t budget=startupSkinTextureBudget;
- for(;profiles;profiles&=profiles-1){
-  const auto& program=texturePrograms.at(unsigned(__builtin_ctzll(profiles)));
+ for(unsigned profile:profiles){
+  const auto& program=texturePrograms.at(profile);
   const auto mode=program.loading?unsigned(T().renderLoadingFit.load(std::memory_order_relaxed)):0u;
   for(const auto& resource:program.images){
    const auto id=resource.second.front()[mode];
@@ -528,13 +585,19 @@ void releaseUploadStaging(VkDevice d,TextureUpload& u){
  if(u.stagingMemory)upFreeMemory.load()(d,u.stagingMemory,nullptr);
  u.fence={};u.pool={};u.staging={};u.stagingMemory={};
 }
+void destroyGpuImage(VkDevice d,const TextureGpu& image){
+ if(image.view){tintDestroyImageView.load()(d,image.view,nullptr);}
+ if(image.image){tintDestroyImage.load()(d,image.image,nullptr);}
+ if(image.memory){upFreeMemory.load()(d,image.memory,nullptr);}
+}
 void releaseUpload(VkDevice d,TextureUpload& u){
  releaseUploadStaging(d,u);
- for(auto& x:u.images){if(x.view)tintDestroyImageView.load()(d,x.view,nullptr);
-  if(x.image)tintDestroyImage.load()(d,x.image,nullptr);
-  if(x.memory)upFreeMemory.load()(d,x.memory,nullptr);
-  x={};}
- u.queued=false;
+ if(u.imageKeys.empty()&&u.resident.empty()){
+  for(const auto& image:u.images){destroyGpuImage(d,image);}
+ }else{
+  for(const auto& entry:u.resident){destroyGpuImage(d,entry.second.gpu);}
+ }
+ u.resident.clear();u.residentViews.clear();u.imageKeys.clear();u.images.clear();u.imageBytes=0;u.queued=false;
 }
 bool uploadMemory(VkDevice d,const TextureUpload& u,const VkMemoryRequirements& req,VkMemoryPropertyFlags flags,VkDeviceMemory& memory){
  for(uint32_t i=0;i<u.memory.memoryTypeCount;i++)if((req.memoryTypeBits&(1u<<i))&&(u.memory.memoryTypes[i].propertyFlags&flags)==flags){
@@ -552,7 +615,7 @@ bool makeSkinBuffer(VkDevice d,const TextureUpload& u,SkinBuffer& b,VkDeviceSize
   upBindBufferMemory.load()(d,b.buffer,b.memory,0)!=VK_SUCCESS){releaseSkinBuffer(d,b);return false;}
  if(data){void* dest=nullptr;if(upMapMemory.load()(d,b.memory,0,size,0,&dest)!=VK_SUCCESS){releaseSkinBuffer(d,b);return false;}
   std::memcpy(dest,data,size_t(size));upUnmapMemory.load()(d,b.memory);}
- b.size=size;return true;
+ b.size=size;b.allocation=req.size;return true;
 }
 bool prepareSkinInput(VkDevice d,const TextureUpload& upload,const ms::VulkanSkinPayload& p,std::array<SkinBuffer,SkinStreamCount>& dst,bool rigid=false){
  auto make=[&](SkinStream binding,const ms::Bytes& bytes,VkBufferUsageFlags flags){return !bytes.empty()&&makeSkinBuffer(d,upload,dst[binding],bytes.size(),flags,bytes.data());};
@@ -566,7 +629,7 @@ bool prepareSkinInput(VkDevice d,const TextureUpload& upload,const ms::VulkanSki
 bool prepareSkinBuffers(VkDevice d,TintDevice& dev){
  auto& skin=dev.skin;if(!T().allSkins)return skin.ready=prepareSkinInput(d,dev.upload,paimonSkin,skin.input);
  skin.profiles.resize(sharedSkins.size());
- for(size_t i=0;i<sharedSkins.size();i++)skin.profiles[i].ready=prepareSkinInput(d,dev.upload,sharedSkins[i].mesh,skin.profiles[i].input,sharedSkins[i].rigid);
+ for(size_t i=0;i<sharedSkins.size();i++)skin.profiles[i].ready=prepareSkinInput(d,dev.upload,*sharedSkins[i].mesh,skin.profiles[i].input,sharedSkins[i].rigid);
  return std::any_of(skin.profiles.begin(),skin.profiles.end(),[](const auto& p){return p.ready;});
 }
 ms::Bytes packSkinAttributes(const ms::VulkanSkinPayload& mesh,const SkinAttributeLayout& layout){
@@ -585,7 +648,7 @@ VkBuffer skinAttributes(VkDevice device,const TextureUpload& upload,SharedGpuSki
  makeSkinBuffer(device,upload,b,bytes.size(),VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,bytes.data());
  return b.buffer;
 }
-void releaseSkin(VkDevice d,SkinDevice& s){
+void releaseSkin(VkDevice d,SkinAllocations& s){
  if(s.pool)tintDestroyDescriptorPool.load()(d,s.pool,nullptr);
  if(s.storage)tintDestroyDescriptorSetLayout.load()(d,s.storage,nullptr);
  if(s.uniform)tintDestroyDescriptorSetLayout.load()(d,s.uniform,nullptr);
@@ -595,6 +658,39 @@ void releaseSkin(VkDevice d,SkinDevice& s){
  for(auto& kv:s.sharedOutput)releaseSkinBuffer(d,kv.second.buffer);
  for(auto& b:s.retired)releaseSkinBuffer(d,b);
  s.pool={};s.storage={};s.uniform={};s.ready=false;
+}
+uint64_t skinBytes(const SkinAllocations& allocated){
+ uint64_t bytes=0;
+ for(const auto& b:allocated.input){bytes+=b.allocation;}
+ for(const auto& output:allocated.output){bytes+=output.second.buffer.allocation;}
+ for(const auto& output:allocated.sharedOutput){bytes+=output.second.buffer.allocation;}
+ for(const auto& b:allocated.retired){bytes+=b.allocation;}
+ for(const auto& profile:allocated.profiles){
+  for(const auto& b:profile.input){bytes+=b.allocation;}
+  for(const auto& b:profile.attributeBuffers){bytes+=b.second.allocation;}
+ }
+ return bytes;
+}
+uint64_t skinBytes(const TintDevice& device){
+ auto total=skinBytes(device.skin);
+ for(const auto& allocation:device.retiredSkins){total+=skinBytes(allocation.second);}
+ return total;
+}
+bool geometryRoom(TintDevice& device,uint64_t bytes){
+ if(!T().hotReload)return true;
+ const auto used=skinBytes(device)+device.upload.imageBytes;
+ if(bytes<=gpuBudget&&used<=gpuBudget-bytes){device.upload.meshDemand=0;return true;}
+ device.upload.meshDemand=std::max(device.upload.meshDemand,bytes);return false;
+}
+bool ensureSkinInputs(VkDevice d,TintDevice& device,unsigned profile){
+ if(profile>=device.skin.profiles.size()||profile>=sharedSkins.size())return false;
+ auto& gpu=device.skin.profiles[profile];
+ if(!gpu.ready&&T().hotReload){
+  const auto& skin=sharedSkins[profile];
+  const auto bytes=skin.mesh->rest.size()+skin.mesh->weights.size()+skin.mesh->attributes.size()+skin.mesh->indices.size()+65536;
+  if(geometryRoom(device,bytes)){gpu.ready=prepareSkinInput(d,device.upload,*skin.mesh,gpu.input,skin.rigid);}
+ }
+ return gpu.ready;
 }
 bool stageSkinImages(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u,const UploadPixels& lookup,uint64_t budget){
  if(lookup.empty()||std::any_of(lookup.begin(),lookup.end(),[](const auto& p){return !p.first;}))return false;
@@ -609,7 +705,7 @@ bool stageSkinImages(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u,c
   if(upCreateImage.load()(d,&ci,nullptr,&x.image)!=VK_SUCCESS){x.image={};return false;}
   VkMemoryRequirements req{};upGetImageMemoryRequirements.load()(d,x.image,&req);
   if(req.size>budget-u.imageBytes)return false;
-  u.imageBytes+=req.size;
+  u.imageBytes+=req.size;x.bytes=req.size;
   if(!uploadMemory(d,u,req,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,x.memory)||upBindImageMemory.load()(d,x.image,x.memory,0)!=VK_SUCCESS)return false;
   const VkImageViewCreateInfo v{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,nullptr,0,x.image,VK_IMAGE_VIEW_TYPE_2D,ci.format,{}, {VK_IMAGE_ASPECT_COLOR_BIT,0,p.mips,0,1}};
   if(tintCreateImageView.load()(d,&v,nullptr,&x.view)!=VK_SUCCESS){x.view={};return false;}
@@ -651,11 +747,11 @@ bool stageSkinImages(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u,c
  u.usedFamily=family;u.queued=true;return true;
 }
 
-UploadPixels readSkinImages(const std::vector<unsigned>& indices){
- UploadPixels out(indices.size());
+UploadPixels readSkinImages(const std::vector<SkinImage>& images){
+ UploadPixels out(images.size());
  std::map<const SkinImageFile*,std::vector<size_t>> grouped;
- for(size_t i=0;i<indices.size();i++){
-  const auto& image=sharedImages.at(indices[i]);
+ for(size_t i=0;i<images.size();i++){
+  const auto& image=images[i];
   if(image.raw.empty()){grouped[image.file.get()].push_back(i);continue;}
   try{
    const auto& owner=*image.file;
@@ -688,61 +784,205 @@ UploadPixels readSkinImages(const std::vector<unsigned>& indices){
   const auto& file=*group.first;
   std::map<std::string,ms::MaterialFile> materials;std::set<std::string> names;
   for(size_t i:group.second){
-   const auto& image=sharedImages[indices[i]];
+   const auto& image=images[i];
    const auto key=std::to_string(i);auto& material=materials[key];material.original=false;material.mainRef=image.ref;
    names.insert(key);
   }
   try{
    ms::readTextures(file.dir,file.generation,file.size,materials,names);
    ms::require(ms::jstr(ms::JsonParser(ms::manifestText(file.dir)).parse(),"generation",64)==file.generation,"读取 Vulkan 贴图时转换结果发生变化");
-   for(size_t i:group.second){out[i]={std::move(materials.at(std::to_string(i)).main),sharedImages[indices[i]].linear};}
+   for(size_t i:group.second){out[i]={std::move(materials.at(std::to_string(i)).main),images[i].linear};}
   }catch(const std::exception&){}
  }
  return out;
 }
-void serviceSkinImages(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u){
+struct CommandPins {
+ std::set<VkDescriptorSet> sets;
+ std::set<VkBuffer> buffers;
+ std::set<uint64_t> catalogs;
+};
+void freeClone(VkDevice device,TintDevice& dev,std::map<VkDescriptorSet,TintDevice::Clone>::iterator it){
+ const auto set=it->first;
+ if(tintFreeDescriptorSets.load()(device,dev.pool,1,&set)==VK_SUCCESS){
+  dev.clones.erase(it);--dev.allocated;
+ }
+}
+void evictImages(VkDevice device,TintDevice& dev,const CommandPins& pins,uint64_t demand,uint64_t limit,bool idle=false){
+ auto& u=dev.upload;
+ if(u.fence)return; // The current batch may still be writing an image.
+ std::set<VkImageView> pinned;
+ for(auto set:pins.sets){
+  if(auto clone=dev.clones.find(set);clone!=dev.clones.end()){
+   for(auto view:clone->second.views){if(view){pinned.insert(view);}}
+  }
+ }
+ for(;;){
+  const bool pressure=u.imageBytes>limit||demand>limit-u.imageBytes;
+  if(!pressure&&!idle)return;
+  auto victim=u.resident.end();
+  for(auto it=u.resident.begin();it!=u.resident.end();++it){
+   if(pinned.count(it->second.gpu.view))continue;
+   if(!pressure&&u.clock-it->second.used<300)continue;
+   if(victim==u.resident.end()||it->second.used<victim->second.used){victim=it;}
+  }
+  if(victim==u.resident.end())return;
+  const auto& image=victim->second.gpu;
+  for(auto it=dev.clones.begin();it!=dev.clones.end();){
+   const auto current=it++;
+   if(std::find(current->second.views.begin(),current->second.views.end(),image.view)!=current->second.views.end()){
+    freeClone(device,dev,current);
+   }
+  }
+  for(auto& alias:u.images){if(alias.view==image.view){alias={};}}
+  u.residentViews.erase(image.view);destroyGpuImage(device,image);
+  u.imageBytes-=image.bytes;u.resident.erase(victim);
+  T().gpuEvictions.fetch_add(1,std::memory_order_relaxed);
+ }
+}
+void serviceSkinImages(VkDevice device,VkQueue queue,uint32_t family,TintDevice& dev,const CommandPins& pins,uint64_t limit){
+ auto& u=dev.upload;
  if(u.fence)return;
  if(u.reading.valid()){
   if(u.reading.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
-  auto ids=std::move(u.readingIds);u.readingIds.clear();
-  UploadPixels loaded;
-  try{loaded=u.reading.get();}catch(const std::exception&){}
-  UploadPixels pixels;std::vector<unsigned> ready;
-  for(size_t i=0;i<ids.size();i++){
-   if(i<loaded.size()&&loaded[i].first){ready.push_back(ids[i]);pixels.push_back(std::move(loaded[i]));}
-   else{u.unavailable.insert(ids[i]);}
-  }
-  if(pixels.empty())return;
-  TextureUpload batch;batch.memory=u.memory;
-  if(!stageSkinImages(d,queue,family,batch,pixels,maxResidentSkinTextures-u.imageBytes)){
-   releaseUpload(d,batch);u.unavailable.insert(ready.begin(),ready.end());return;
-  }
-  for(size_t i=0;i<ready.size();i++){u.images[ready[i]]=batch.images[i];}
-  u.imageBytes+=batch.imageBytes;
-  u.pool=batch.pool;u.staging=batch.staging;u.stagingMemory=batch.stagingMemory;u.fence=batch.fence;
-  return;
+  try{u.decoded=u.reading.get();}catch(const std::exception&){u.decoded.clear();}
+  if(u.readVersion!=u.version){u.decoded.clear();u.readingIds.clear();}
  }
+ if(!u.readingIds.empty()){
+  if(u.clock<u.nextAttempt)return;
+  UploadPixels pixels;std::vector<unsigned> ready;
+  uint64_t bytes=0;
+  for(size_t i=0;i<u.readingIds.size();i++){
+   const auto id=u.readingIds[i];
+   if(i<u.decoded.size()&&u.decoded[i].first){
+    ready.push_back(id);pixels.push_back(u.decoded[i]);
+    bytes+=u.decoded[i].first->pixels.size()+65536;
+   }else{u.unavailable.insert(id);}
+  }
+  if(!pixels.empty()){
+   evictImages(device,dev,pins,bytes,limit);
+   const auto available=u.imageBytes<limit?limit-u.imageBytes:0;
+   if(!available){u.nextAttempt=u.clock+8;return;}
+   TextureUpload batch;batch.memory=u.memory;
+   if(!stageSkinImages(device,queue,family,batch,pixels,available)){
+    releaseUpload(device,batch);u.nextAttempt=u.clock+8;return;
+   }
+   for(size_t i=0;i<ready.size();i++){
+    const auto id=ready[i];
+    auto& image=u.resident.emplace(u.imageKeys[id],ResidentImage{batch.images[i],u.clock}).first->second;
+    u.residentViews.emplace(image.gpu.view,&image);
+    u.images[id]=image.gpu;
+   }
+   u.imageBytes+=batch.imageBytes;
+   u.pool=batch.pool;u.staging=batch.staging;u.stagingMemory=batch.stagingMemory;u.fence=batch.fence;
+  }
+  u.decoded.clear();u.readingIds.clear();return;
+ }
+ std::vector<SkinImage> inputs;
+ std::set<ImageKey> inBatch;
  uint64_t bytes=0;
  auto& waiting=u.requested.empty()?u.warm:u.requested;
  for(auto at=waiting.begin();at!=waiting.end();){
-  const auto id=*at;const auto size=sharedImages.at(id).ref.len;
-  if(size>maxResidentSkinTextures-u.imageBytes){u.unavailable.insert(id);}
-  else{
-   if(bytes&&(bytes+size>skinTextureBatch||bytes+size>maxResidentSkinTextures-u.imageBytes))break;
-   bytes+=size;u.readingIds.push_back(id);
-  }
+  const auto id=*at;
+  if(auto cached=u.resident.find(u.imageKeys[id]);cached!=u.resident.end()){
+   cached->second.used=u.clock;u.images[id]=cached->second.gpu;
+  }else if(inBatch.insert(u.imageKeys[id]).second){
+   const auto size=sharedImages.at(id).ref.len;
+   if(bytes&&bytes+size>skinTextureBatch)break;
+   bytes+=size;inputs.push_back(sharedImages[id]);u.readingIds.push_back(id);
+  }else{++at;continue;}
   at=waiting.erase(at);
  }
- if(u.readingIds.empty())return;
- try{u.reading=std::async(std::launch::async,readSkinImages,u.readingIds);}
+ if(inputs.empty())return;
+ u.readVersion=u.version;
+ try{u.reading=std::async(std::launch::async,readSkinImages,std::move(inputs));}
  catch(const std::exception&){u.requested.insert(u.readingIds.begin(),u.readingIds.end());u.readingIds.clear();}
+}
+void synchronizeCatalog(TintDevice& dev){
+ if(!T().hotReload||dev.catalogVersion==T().registryVersion)return;
+ auto& u=dev.upload;
+ if(dev.skinVersion!=T().skinVersion){
+  if(skinBytes(dev.skin)||dev.skin.pool){dev.retiredSkins.emplace(dev.skinVersion,std::move(static_cast<SkinAllocations&>(dev.skin)));}
+  static_cast<SkinAllocations&>(dev.skin)=SkinAllocations{};
+  dev.skin.profiles.resize(sharedSkins.size());
+  dev.skin.sourceProfiles.clear();dev.skin.layoutSamples.clear();dev.logic.clear();
+  dev.skinVersion=T().skinVersion;
+ }
+ dev.textureLogic.clear();
+ dev.catalogVersion=T().registryVersion;u.version=dev.catalogVersion;
+ u.requested.clear();u.warm.clear();u.unavailable.clear();u.nextAttempt=0;u.meshDemand=0;
+ if(!u.reading.valid()){u.readingIds.clear();u.decoded.clear();}
+ u.images.assign(sharedImages.size(),{});u.imageKeys.clear();u.imageKeys.reserve(sharedImages.size());
+ for(size_t i=0;i<sharedImages.size();i++){
+  u.imageKeys.push_back(imageKey(sharedImages[i]));
+  if(auto cached=u.resident.find(u.imageKeys.back());cached!=u.resident.end()){u.images[i]=cached->second.gpu;}
+ }
+ warmSkinImages(dev,*std::atomic_load(&T().activeSkins),true);
+ warmRenderImages(u,*std::atomic_load(&T().activeRenderMods),true);
+}
+void collectGpuResources(VkDevice device,TintDevice& dev,const CommandPins& pins){
+ for(auto it=dev.retiredSkins.begin();it!=dev.retiredSkins.end();){
+  if(pins.catalogs.count(it->first)){++it;continue;}
+  releaseSkin(device,it->second);it=dev.retiredSkins.erase(it);
+ }
+ auto& skin=dev.skin;
+ for(auto it=skin.sharedOutput.begin();it!=skin.sharedOutput.end();){
+  const auto age=dev.upload.clock-it->second.used;
+  if(pins.buffers.count(it->second.buffer.buffer)||age<(dev.upload.meshDemand?8u:300u)){++it;continue;}
+  for(auto binding=skin.sharedRemaps.begin();binding!=skin.sharedRemaps.end();){
+   if(std::get<0>(binding->first)!=it->first.first||std::get<2>(binding->first)!=it->first.second){++binding;continue;}
+   if(binding->second){skin.retiredSets.push_back(binding->second);}
+   binding=skin.sharedRemaps.erase(binding);
+  }
+  releaseSkinBuffer(device,it->second.buffer);it=skin.sharedOutput.erase(it);
+ }
+ if(skin.allocated>=maxSkinSets){
+  for(auto it=skin.sharedRemaps.begin();it!=skin.sharedRemaps.end();++it){
+   if(it->second&&!pins.sets.count(it->second)){
+    skin.retiredSets.push_back(it->second);skin.sharedRemaps.erase(it);break;
+   }
+  }
+ }
+ for(auto it=skin.retiredSets.begin();it!=skin.retiredSets.end();){
+  if(pins.sets.count(*it)){++it;continue;}
+  if(tintFreeDescriptorSets.load()(device,skin.pool,1,&*it)==VK_SUCCESS){--skin.allocated;it=skin.retiredSets.erase(it);}
+  else{++it;}
+ }
+ for(auto it=skin.retired.begin();it!=skin.retired.end();){
+  if(pins.buffers.count(it->buffer)){++it;continue;}
+  releaseSkinBuffer(device,*it);it=skin.retired.erase(it);
+ }
+ for(auto it=dev.clones.begin();it!=dev.clones.end();){
+  const auto current=it++;
+  if(!pins.sets.count(current->first)&&(dev.allocated>=tintSetLimit||dev.upload.clock-current->second.used>=120)){
+   freeClone(device,dev,current);
+  }
+ }
+ if(!dev.ownedSamplers.empty()&&dev.upload.clock%60==0){
+  std::set<VkSampler> used;
+  for(const auto& entry:dev.clamped){used.insert(entry.second);}
+  for(const auto& entry:dev.clones){used.insert(entry.second.samplers.begin(),entry.second.samplers.end());}
+  dev.ownedSamplers.erase(std::remove_if(dev.ownedSamplers.begin(),dev.ownedSamplers.end(),[&](auto sampler){
+   if(used.count(sampler))return false;
+   tintDestroySampler.load()(device,sampler,nullptr);return true;
+  }),dev.ownedSamplers.end());
+ }
+ if(T().hotReload&&std::atomic_load(&T().activeSkins)->empty()&&!pins.catalogs.count(dev.skinVersion)){
+  if(skinBytes(skin)||skin.pool){
+   releaseSkin(device,skin);static_cast<SkinAllocations&>(skin)=SkinAllocations{};
+   skin.profiles.resize(sharedSkins.size());
+  }
+  dev.upload.meshDemand=0;
+ }
 }
 VkImageView skinImage(TextureUpload& u,unsigned id){
  if(id>=u.images.size())return {};
- if(auto view=u.images[id].view)return view;
+ if(auto view=u.images[id].view){
+  if(auto at=u.residentViews.find(view);at!=u.residentViews.end()){at->second->used=u.clock;}
+  return view;
+ }
  u.warm.erase(id);
  if(id<sharedImages.size()&&!u.unavailable.count(id)&&
-    std::find(u.readingIds.begin(),u.readingIds.end(),id)==u.readingIds.end()){u.requested.insert(id);}
+    (u.readVersion!=u.version||std::find(u.readingIds.begin(),u.readingIds.end(),id)==u.readingIds.end())){u.requested.insert(id);}
  return {};
 }
 
@@ -775,20 +1015,20 @@ void uploadOnGetDeviceQueue2(VkDevice d,const VkDeviceQueueInfo2* i,VkQueue* q){
  if(r==VK_SUCCESS&&c&&pool)tintObserve([&](auto& s){s.devices[d].families[*pool]=c->queueFamilyIndex;});return r;
 }
 void serviceUploads(VkQueue queue){
+ std::shared_lock<std::shared_mutex> catalog(T().registryMutex);
  T().queueSubmits.fetch_add(1,std::memory_order_relaxed);
  // The application already serializes this queue. On its sole graphics queue, the copy/barrier submission
  // orders all later draws for this family. Retire staging only after our fence signals, without blocking.
  tintObserve([&](auto& s){auto q=s.queues.find(queue);if(q==s.queues.end())return;
   auto [d,family]=q->second;auto it=s.devices.find(d);if(it==s.devices.end())return;auto& u=it->second.upload;
   const bool sharedBackend=T().allSkins||T().renderTextures;
-  if(sharedBackend&&(!T().routesReady.load(std::memory_order_acquire)||(sharedSkins.empty()&&texturePrograms.empty())))return;
+  if(sharedBackend&&!T().routesReady.load(std::memory_order_acquire))return;
   if(!u.attempted){
    u.attempted=true;
-   if(!T().skinnedModel||prepareSkinBuffers(d,it->second)||!texturePrograms.empty()){
+   if(T().hotReload||!T().skinnedModel||prepareSkinBuffers(d,it->second)||!texturePrograms.empty()){
     if(sharedBackend){
      u.images.resize(sharedImages.size());u.usedFamily=family;u.queued=true;
-     warmSkinImages(it->second,T().activeSkins.load(std::memory_order_relaxed),true);
-     warmRenderImages(u,T().activeRenderMods.load(std::memory_order_relaxed),true);
+     synchronizeCatalog(it->second);
     }
     else{stageSkinImages(d,queue,family,u,{{paimonPixels[0],false},{paimonPixels[1],false}},maxResidentSkinTextures);}
    }
@@ -798,30 +1038,53 @@ void serviceUploads(VkQueue queue){
   if(!u.queued||u.usedFamily!=family)return;
   if(u.fence&&upGetFenceStatus.load()(d,u.fence)==VK_SUCCESS){releaseUploadStaging(d,u);}
   if(sharedBackend){
-   const auto seen=T().skinIndexUploads.exchange(0,std::memory_order_relaxed);
-   if(seen){warmSkinImages(it->second,seen&T().activeSkins.load(std::memory_order_relaxed),false);}
-   const auto textured=T().renderIndexUploads.exchange(0,std::memory_order_relaxed);
-   if(textured){warmRenderImages(u,textured&T().activeRenderMods.load(std::memory_order_relaxed),false);}
-   const auto before=u.imageBytes;
-   serviceSkinImages(d,queue,family,u);
-   if(u.imageBytes!=before){warmSkinImages(it->second,T().activeSkins.load(std::memory_order_relaxed),false,false);}
+   synchronizeCatalog(it->second);
+   ++u.clock;
+   CommandPins pins;
+   for(const auto& entry:s.commands){
+    if(entry.second.first!=d)continue;
+    const auto& command=entry.second.second;
+    pins.sets.insert(command.gpuSets.begin(),command.gpuSets.end());
+    pins.buffers.insert(command.gpuBuffers.begin(),command.gpuBuffers.end());
+    pins.catalogs.insert(command.skinCatalogs.begin(),command.skinCatalogs.end());
+   }
+   collectGpuResources(d,it->second,pins);
+   const auto [seen,textured]=T().takeIndexUploads();
+   const auto interested=selectedProfiles(seen,*std::atomic_load(&T().activeSkins));
+   if(!interested.empty()){
+    for(unsigned profile:interested){ensureSkinInputs(d,it->second,profile);}
+    warmSkinImages(it->second,interested,false);
+   }
+   const auto mesh=skinBytes(it->second);
+   const auto free=mesh<gpuBudget?gpuBudget-mesh:0;
+   const auto limit=std::min(maxResidentSkinTextures,free>u.meshDemand?free-u.meshDemand:0);
+   evictImages(d,it->second,pins,0,limit,u.clock%60==0);
+   if(!textured.empty()){warmRenderImages(u,selectedProfiles(textured,*std::atomic_load(&T().activeRenderMods)),false);}
+   serviceSkinImages(d,queue,family,it->second,pins,limit);
+   T().gpuTextureBytes.store(u.imageBytes,std::memory_order_relaxed);
+   T().gpuGeometryBytes.store(mesh,std::memory_order_relaxed);
+   T().gpuDescriptorSets.store(it->second.allocated+it->second.skin.allocated,std::memory_order_relaxed);
   }
  });
 }
 ::VkResult uploadOnQueueSubmit(VkQueue queue,uint32_t n,const VkSubmitInfo* p,VkFence fence){
  serviceUploads(queue);
  const auto result=upQueueSubmit.load()(queue,n,p,fence);
- if(result==VK_SUCCESS&&T().gpuBuffersEnabled())for(uint32_t i=0;p&&i<n;i++)for(uint32_t j=0;j<p[i].commandBufferCount;j++)
-  T().submitted(gpuHandle(p[i].pCommandBuffers[j]));
- if(result==VK_SUCCESS&&T().skinnedModel)tintObserve([&](auto& s){auto q=s.queues.find(queue);if(q==s.queues.end())return;
-  auto& dev=s.devices.at(q->second.first);if(!dev.upload.queued||dev.upload.usedFamily!=q->second.second)return;
-  for(uint32_t i=0;p&&i<n;i++)for(uint32_t j=0;j<p[i].commandBufferCount;j++){
-   auto it=s.commands.find(p[i].pCommandBuffers[j]);if(it==s.commands.end()||it->second.first!=q->second.first)continue;
-   for(auto b:it->second.second.skinProduced){auto o=dev.skin.output.find(b);if(o!=dev.skin.output.end())o->second.queued=true;}
-   for(const auto& b:it->second.second.sharedProduced){auto o=dev.skin.sharedOutput.find(b.first);
-    if(o!=dev.skin.sharedOutput.end()&&o->second.revision==b.second)o->second.queued=true;}
-  }});
+ if(result==VK_SUCCESS)for(uint32_t i=0;p&&i<n;i++)for(uint32_t j=0;j<p[i].commandBufferCount;j++){
+  submittedCommand(queue,p[i].pCommandBuffers[j]);
+ }
  return result;
+}
+void submittedCommand(VkQueue queue,VkCommandBuffer command){
+ if(T().gpuBuffersEnabled()){T().submitted(gpuHandle(command));}
+ if(T().skinnedModel)tintObserve([&](auto& s){auto q=s.queues.find(queue);if(q==s.queues.end())return;
+  auto& dev=s.devices.at(q->second.first);if(!dev.upload.queued||dev.upload.usedFamily!=q->second.second)return;
+  auto it=s.commands.find(command);if(it==s.commands.end()||it->second.first!=q->second.first)return;
+  for(auto b:it->second.second.skinProduced){auto o=dev.skin.output.find(b);if(o!=dev.skin.output.end())o->second.queued=true;}
+  if(T().hotReload&&it->second.second.producedCatalog!=dev.skinVersion)return;
+  for(const auto& b:it->second.second.sharedProduced){auto o=dev.skin.sharedOutput.find(b.first);
+   if(o!=dev.skin.sharedOutput.end()&&o->second.revision==b.second)o->second.queued=true;}
+ });
 }
 
 ::VkResult tintOnCreateImageView(VkDevice d,const VkImageViewCreateInfo* p,const VkAllocationCallbacks* a,VkImageView* out){
@@ -829,6 +1092,9 @@ void serviceUploads(VkQueue queue){
  if(result==VK_SUCCESS&&T().gpuEnabled()&&p&&out&&p->viewType==VK_IMAGE_VIEW_TYPE_2D&&p->subresourceRange.aspectMask==VK_IMAGE_ASPECT_COLOR_BIT)
   T().imageView(gpuHandle(*out),gpuHandle(p->image),p->subresourceRange.baseMipLevel,p->subresourceRange.baseArrayLayer);
  if(result==VK_SUCCESS&&p&&out)tintObserve([&](auto& s){auto& dev=s.devices[d];dev.images.erase(*out);
+  if(T().renderTextures&&p->viewType==VK_IMAGE_VIEW_TYPE_2D&&p->subresourceRange.aspectMask==VK_IMAGE_ASPECT_COLOR_BIT){
+   dev.sampledFormats.insert_or_assign(*out,p->format);
+  }
   const bool fmt=T().allSkins?(p->format==VK_FORMAT_R8G8B8A8_SRGB||(p->format>=VK_FORMAT_ASTC_4x4_SRGB_BLOCK&&p->format<=VK_FORMAT_ASTC_12x12_SRGB_BLOCK&&(int(p->format)-int(VK_FORMAT_ASTC_4x4_SRGB_BLOCK))%2==0)):p->format==VK_FORMAT_ASTC_6x6_SRGB_BLOCK;
   if(!p->pNext&&!p->flags&&fmt&&p->viewType==VK_IMAGE_VIEW_TYPE_2D&&p->subresourceRange.aspectMask==VK_IMAGE_ASPECT_COLOR_BIT&&p->subresourceRange.layerCount==1)
    dev.images.emplace(*out,TintImg{*p,++dev.generation,{}});
@@ -837,7 +1103,7 @@ void serviceUploads(VkQueue queue){
 }
 void tintOnDestroyImageView(VkDevice d,VkImageView v,const VkAllocationCallbacks* a){
  if(T().gpuEnabled())T().viewDestroyed(gpuHandle(v));
- tintObserve([&](auto& s){s.devices[d].images.erase(v);});tintDestroyImageView.load()(d,v,a);
+ tintObserve([&](auto& s){auto& dev=s.devices[d];dev.images.erase(v);dev.sampledFormats.erase(v);});tintDestroyImageView.load()(d,v,a);
 }
 void tintOnDestroyImage(VkDevice d,VkImage image,const VkAllocationCallbacks* a){
  if(T().gpuEnabled())T().imageDestroyed(gpuHandle(image));
@@ -932,7 +1198,7 @@ std::array<uint8_t,32> skinSemantics(const uint32_t* code,size_t n){
    if(T().allSkins||T().renderTextures){
     const auto bindings=ms::vkcap::materialTextureBindings(p->pCode,words);
     if(std::any_of(bindings.begin(),bindings.end(),[](unsigned b){return b!=~0u;}))modules[*out]=bindings;
-   }else if(ms::vkcap::mainTextureBinding(p->pCode,words))modules[*out]={0,~0u,~0u};
+   }else if(ms::vkcap::mainTextureBinding(p->pCode,words))modules[*out]={0,~0u,~0u,~0u};
   }
   if(T().skinnedModel){auto& skin=dev.skin;skin.kernels.erase(*out);skin.vertexCodes.erase(*out);skin.vertexSemantics.erase(*out);
    if(T().allSkins&&p->codeSize%4==0){auto semantics=skinSemantics(p->pCode,p->codeSize/4);if(std::any_of(semantics.begin(),semantics.end(),[](auto s){return s==1;}))skin.vertexSemantics[*out]=semantics;}
@@ -1175,8 +1441,9 @@ void tintOnDestroyDescriptorPool(VkDevice d,VkDescriptorPool pool,const VkAlloca
  return r;
 }
 void tintOnFreeCommandBuffers(VkDevice d,VkCommandPool p,uint32_t n,const VkCommandBuffer* buffers){
+ tintFreeCommandBuffers.load()(d,p,n,buffers);
  if(T().gpuBuffersEnabled()&&buffers)for(uint32_t i=0;i<n;i++)T().beginCommands(gpuHandle(buffers[i]));
- tintObserve([&](auto& s){for(uint32_t i=0;buffers&&i<n;i++)s.commands.erase(buffers[i]);});tintFreeCommandBuffers.load()(d,p,n,buffers);
+ tintObserve([&](auto& s){for(uint32_t i=0;buffers&&i<n;i++)s.commands.erase(buffers[i]);});
 }
 ::VkResult tintOnResetCommandPool(VkDevice d,VkCommandPool p,VkCommandPoolResetFlags f){
  auto r=tintResetCommandPool.load()(d,p,f);
@@ -1186,18 +1453,21 @@ void tintOnFreeCommandBuffers(VkDevice d,VkCommandPool p,uint32_t n,const VkComm
  return r;
 }
 void tintOnDestroyCommandPool(VkDevice d,VkCommandPool p,const VkAllocationCallbacks* a){
+ tintDestroyCommandPool.load()(d,p,a);
  tintObserve([&](auto& s){s.devices[d].families.erase(p);for(auto i=s.commands.begin();i!=s.commands.end();)if(i->second.first==d&&i->second.second.pool==p){
   if(T().gpuBuffersEnabled())T().beginCommands(gpuHandle(i->first));
   i=s.commands.erase(i);
- }else ++i;});tintDestroyCommandPool.load()(d,p,a);
+ }else ++i;});
 }
 void tintOnDestroyDevice(VkDevice d,const VkAllocationCallbacks* a){
  tintObserve([&](auto& s){auto i=s.devices.find(d);if(i!=s.devices.end()){auto& dev=i->second;
+  if(dev.upload.fence&&upGetFenceStatus.load()(d,dev.upload.fence)!=VK_SUCCESS){upDeviceWaitIdle.load()(d);}
   if(dev.pool)tintDestroyDescriptorPool.load()(d,dev.pool,nullptr);
   for(auto sampler:dev.ownedSamplers){tintDestroySampler.load()(d,sampler,nullptr);}
   for(const auto& v:dev.ownedViews)tintDestroyImageView.load()(d,v.second,nullptr);
   for(const auto& l:dev.ownedLayouts)tintDestroyDescriptorSetLayout.load()(d,l.second,nullptr);
   releaseSkin(d,dev.skin);
+  for(auto& allocation:dev.retiredSkins){releaseSkin(d,allocation.second);}
   releaseUpload(d,dev.upload);
   s.devices.erase(i);}
   for(auto q=s.queues.begin();q!=s.queues.end();)if(q->second.first==d)q=s.queues.erase(q);else ++q;
@@ -1205,6 +1475,30 @@ void tintOnDestroyDevice(VkDevice d,const VkAllocationCallbacks* a){
  });tintDestroyDevice.load()(d,a);
 }
 void tintBegin(VkCommandBuffer c){tintObserve([&](auto& s){auto i=s.commands.find(c);if(i!=s.commands.end())i->second.second=TintCmd{i->second.second.pool};});}
+::VkResult tintOnResetCommandBuffer(VkCommandBuffer c,VkCommandBufferResetFlags flags){
+ const auto result=tintResetCommandBuffer.load()(c,flags);
+ if(result==VK_SUCCESS){T().beginCommands(gpuHandle(c));tintBegin(c);}
+ return result;
+}
+void trackExecutedResources(VkCommandBuffer command,uint32_t n,const VkCommandBuffer* buffers){
+ tintObserve([&](auto& state){
+  auto parent=state.commands.find(command);if(parent==state.commands.end())return;
+  auto& to=parent->second.second;
+  for(uint32_t i=0;i<n;i++){
+   const auto child=state.commands.find(buffers[i]);
+   if(child==state.commands.end()||child->second.first!=parent->second.first)continue;
+   const auto& from=child->second.second;
+   if(from.producedCatalog>=to.producedCatalog){
+    if(from.producedCatalog!=to.producedCatalog){to.sharedProduced.clear();}
+    to.producedCatalog=from.producedCatalog;
+    for(const auto& job:from.sharedProduced){to.sharedProduced.insert_or_assign(job.first,job.second);}
+   }
+   to.skinCatalogs.insert(from.skinCatalogs.begin(),from.skinCatalogs.end());
+   to.gpuSets.insert(from.gpuSets.begin(),from.gpuSets.end());
+   to.gpuBuffers.insert(from.gpuBuffers.begin(),from.gpuBuffers.end());
+  }
+ });
+}
 void tintOnCmdBindPipeline(VkCommandBuffer c,VkPipelineBindPoint bp,VkPipeline pipe){
  if(T().gpuEnabled()&&(bp==VK_PIPELINE_BIND_POINT_GRAPHICS||bp==VK_PIPELINE_BIND_POINT_COMPUTE))
   T().bindPipeline(gpuHandle(c),bp==VK_PIPELINE_BIND_POINT_COMPUTE,gpuHandle(pipe));
@@ -1256,8 +1550,16 @@ void skinForgetBuffer(VkDevice d,VkBuffer buffer){tintObserve([&](auto& s){auto 
  for(auto a=x.sharedOutput.begin();a!=x.sharedOutput.end();)if(a->first.first==buffer){x.retired.push_back(a->second.buffer);a=x.sharedOutput.erase(a);}else ++a;
  for(auto a=x.seenOutputs.begin();a!=x.seenOutputs.end();)if(a->first==buffer||a->second.rest==buffer||a->second.weights==buffer)a=x.seenOutputs.erase(a);else ++a;
  for(auto a=x.sourceProfiles.begin();a!=x.sourceProfiles.end();)if(a->first.first==buffer||a->first.second==buffer)a=x.sourceProfiles.erase(a);else ++a;
- for(auto a=x.sharedRemaps.begin();a!=x.sharedRemaps.end();)if(std::get<0>(a->first)==buffer||std::get<1>(a->first)==buffer)a=x.sharedRemaps.erase(a);else ++a;
- for(auto q=x.remaps.begin();q!=x.remaps.end();)if(q->first.first==buffer||q->first.second==buffer)q=x.remaps.erase(q);else ++q;
+ for(auto a=x.sharedRemaps.begin();a!=x.sharedRemaps.end();){
+  if(std::get<0>(a->first)!=buffer&&std::get<1>(a->first)!=buffer){++a;continue;}
+  if(a->second){x.retiredSets.push_back(a->second);}
+  a=x.sharedRemaps.erase(a);
+ }
+ for(auto q=x.remaps.begin();q!=x.remaps.end();){
+  if(q->first.first!=buffer&&q->first.second!=buffer){++q;continue;}
+  if(q->second){x.retiredSets.push_back(q->second);}
+  q=x.remaps.erase(q);
+ }
  for(auto& kv:s.commands)if(kv.second.first==d){auto& cmd=kv.second.second;cmd.skinProduced.erase(buffer);
   for(auto a=cmd.sharedProduced.begin();a!=cmd.sharedProduced.end();)if(a->first.first==buffer)a=cmd.sharedProduced.erase(a);else ++a;}
  });}
@@ -1269,7 +1571,7 @@ bool skinLayouts(VkDevice d,SkinDevice& s,bool legacy=true){
   slot={};return false;};
  if(!create(s.storage,4,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)||!create(s.uniform,1,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER))return false;
  if(!s.pool){const uint32_t uniforms=legacy?1u:uint32_t(s.profiles.size());const VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,uint32_t(4*maxSkinSets)},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,uniforms}};
-  const VkDescriptorPoolCreateInfo p{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,nullptr,0,uint32_t(maxSkinSets+uniforms),2,sizes};
+  const VkDescriptorPoolCreateInfo p{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,nullptr,VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,uint32_t(maxSkinSets+uniforms),2,sizes};
   if(tintCreateDescriptorPool.load()(d,&p,nullptr,&s.pool)!=VK_SUCCESS){s.pool={};return false;}}
  if(legacy&&!s.count){const VkDescriptorSetAllocateInfo a{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,nullptr,s.pool,1,&s.uniform};
   if(tintAllocateDescriptorSets.load()(d,&a,&s.count)!=VK_SUCCESS){s.count={};return false;}
@@ -1293,6 +1595,7 @@ VkDescriptorSet skinSetFor(VkDevice device,SkinDevice& s,VkBuffer original,const
  auto set=writeSkinSet(device,s,s.input,palette,output);if(set)s.remaps.emplace(key,set);return set;
 }
 void issueSkin(VkCommandBuffer cmd,TintCmd& cstate,VkDescriptorSet set,VkDescriptorSet uniform,const SkinBuffer& out,uint32_t vertices){
+ if(T().hotReload){cstate.gpuBuffers.insert(out.buffer);cstate.gpuSets.insert(set);}
  auto barrier=upCmdPipelineBarrier.load();VkBufferMemoryBarrier memory{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,nullptr,VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT,
   VK_ACCESS_SHADER_WRITE_BIT,VK_QUEUE_FAMILY_IGNORED,VK_QUEUE_FAMILY_IGNORED,out.buffer,0,out.size};
  barrier(cmd,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,nullptr,1,&memory,0,nullptr);
@@ -1305,8 +1608,8 @@ void issueSkin(VkCommandBuffer cmd,TintCmd& cstate,VkDescriptorSet set,VkDescrip
  T().skinDispatches.fetch_add(1,std::memory_order_relaxed);
 }
 bool skinFits(const SharedSkin& skin,const SkinSource& source,unsigned profile){
- if(skin.mesh.requiredBones>source.bones){
-  T().skinBoneErrors[profile].store(skin.mesh.requiredBones<<16|source.bones,std::memory_order_relaxed);
+ if(skin.mesh->requiredBones>source.bones){
+  T().skinBoneErrors[profile].store(skin.mesh->requiredBones<<16|source.bones,std::memory_order_relaxed);
   T().noteSkinMiss(ms::vkcap::SkinMiss::Bones);return false;
  }
  if(skin.generic()||(skin.originalVertices==source.vertices&&skin.bones==source.bones))return true;
@@ -1348,12 +1651,11 @@ ms::Assignment warmAssignment(TintDevice& device,const SharedSkin& skin,unsigned
  }
  return values;
 }
-void warmSkinImages(TintDevice& device,uint64_t profiles,bool startup,bool request){
+void warmSkinImages(TintDevice& device,const Profiles& profiles,bool startup){
  auto& upload=device.upload;
  uint64_t budget=startupSkinTextureBudget;
- for(;profiles;profiles&=profiles-1){
-  const auto profile=unsigned(__builtin_ctzll(profiles));
-  if(profile>=sharedSkins.size()||profile>=device.skin.profiles.size()||!device.skin.profiles[profile].ready)continue;
+ for(unsigned profile:profiles){
+  if(profile>=sharedSkins.size()||profile>=device.skin.profiles.size())continue;
   const auto& skin=sharedSkins[profile];
   const auto assignment=warmAssignment(device,skin,profile);
   if(!ms::drawn(skin.replaceWhen,assignment))continue;
@@ -1365,11 +1667,7 @@ void warmSkinImages(TintDevice& device,uint64_t profiles,bool startup,bool reque
   }else{images.insert(skin.images.begin(),skin.images.end());}
   images.erase(~0u);
   if(!startup){
-   const bool ready=!images.empty()&&std::all_of(images.begin(),images.end(),[&](auto id){return id<upload.images.size()&&upload.images[id].view;});
-   if(ready){T().noteSkinTime(profile,ms::vkcap::SkinPhase::Textures);}
-   else if(request){
-    for(auto id:images){skinImage(upload,id);}
-   }
+   for(auto id:images){skinImage(upload,id);}
    continue;
   }
   uint64_t bytes=0;
@@ -1401,16 +1699,17 @@ void syncSkinLogic(SkinLogic& logic,const SharedSkin& skin,unsigned profile){
 }
 ::VkResult logicOnQueuePresent(VkQueue queue,const VkPresentInfoKHR* info){
  const auto result=logicQueuePresent.load()(queue,info);
+ std::shared_lock<std::shared_mutex> catalog(T().registryMutex);
  if(!T().routesReady.load(std::memory_order_acquire)||(result!=VK_SUCCESS&&result!=VK_SUBOPTIMAL_KHR))return result;
  tintObserve([&](auto& state){
   const auto q=state.queues.find(queue);if(q==state.queues.end())return;
   auto& device=state.devices.at(q->second.first);
-  if(!device.upload.queued||device.upload.usedFamily!=q->second.second)return;
+  if(!device.upload.queued||device.upload.usedFamily!=q->second.second||(T().hotReload&&device.catalogVersion!=T().registryVersion))return;
   ++device.renderFrame;
   const auto seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-device.logicEpoch).count();
-  const auto render=T().activeRenderMods.load(std::memory_order_relaxed);
+  const auto render=std::atomic_load(&T().activeRenderMods);
   for(auto it=device.textureLogic.begin();it!=device.textureLogic.end();){
-   if(!(render&(uint64_t(1)<<it->first))){it=device.textureLogic.erase(it);continue;}
+   if(!render->count(it->first)){it=device.textureLogic.erase(it);continue;}
    it->second.engine.frame(seconds);++it;
   }
   auto keys=T().takeSkinKeys();
@@ -1446,9 +1745,9 @@ void issueSharedSkin(VkDevice device,VkCommandBuffer cmd,TintCmd& state,TintDevi
  auto& s=d.skin;const auto& skin=sharedSkins[profile];auto& p=s.profiles[profile];
  const auto output=std::make_pair(v[3].buffer,profile);auto o=s.sharedOutput.find(output);
  if(o==s.sharedOutput.end()){
-  if(s.sharedOutput.size()+s.retired.size()>=maxSkinOutputs)return;
+  if((!T().hotReload&&s.sharedOutput.size()+s.retired.size()>=maxSkinOutputs)||!geometryRoom(d,skin.mesh->rest.size()+65536))return;
   o=s.sharedOutput.try_emplace(output).first;
-  if(!makeSkinBuffer(device,d.upload,o->second.buffer,skin.mesh.rest.size(),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)){s.sharedOutput.erase(o);return;}}
+  if(!makeSkinBuffer(device,d.upload,o->second.buffer,skin.mesh->rest.size(),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)){s.sharedOutput.erase(o);return;}}
  if(!skinLayouts(device,s,false))return;
  if(!p.count){const VkDescriptorSetAllocateInfo a{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,nullptr,s.pool,1,&s.uniform};
   if(tintAllocateDescriptorSets.load()(device,&a,&p.count)!=VK_SUCCESS){p.count={};return;}
@@ -1456,8 +1755,12 @@ void issueSharedSkin(VkDevice device,VkCommandBuffer cmd,TintCmd& state,TintDevi
   const VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,p.count,0,0,1,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,nullptr,&data,nullptr};tintUpdateDescriptorSets.load()(device,1,&w,0,nullptr);}
  auto& set=s.sharedRemaps[{v[3].buffer,v[2].buffer,profile}];if(!set)set=writeSkinSet(device,s,p.input,v[2],o->second.buffer);
  if(!set||!T().skinActive(profile))return;
- o->second.revision=revision;state.sharedProduced[output]=revision;
- issueSkin(cmd,state,set,p.count,o->second.buffer,skin.mesh.vertices);
+ if(T().hotReload){
+  if(state.producedCatalog!=d.skinVersion){state.producedCatalog=d.skinVersion;state.sharedProduced.clear();}
+  state.skinCatalogs.insert(d.skinVersion);
+ }
+ o->second.revision=revision;o->second.used=d.upload.clock;state.sharedProduced[output]=revision;
+ issueSkin(cmd,state,set,p.count,o->second.buffer,skin.mesh->vertices);
 }
 void sharedSkinDispatch(VkDevice device,VkCommandBuffer cmd,TintCmd& state,TintDevice& d,const std::array<VkDescriptorBufferInfo,4>& v,uint32_t groups){
  auto& s=d.skin;
@@ -1467,16 +1770,17 @@ void sharedSkinDispatch(VkDevice device,VkCommandBuffer cmd,TintCmd& state,TintD
  const SkinSource observed{v[0].buffer,v[1].buffer,n,b,++s.poseRevision};
  T().skinOutputCaptures.fetch_add(1,std::memory_order_relaxed);
  if(s.seenOutputs.size()<4096||s.seenOutputs.count(v[3].buffer))s.seenOutputs[v[3].buffer]=observed;
+ if(T().hotReload&&d.skinVersion!=T().skinVersion)return;
  auto stale=s.sharedOutput.lower_bound({v[3].buffer,0});
  while(stale!=s.sharedOutput.end()&&stale->first.first==v[3].buffer){
   stale->second.queued=false;state.sharedProduced.erase(stale->first);++stale;
  }
  auto source=s.sourceProfiles.find({observed.rest,observed.weights});if(source==s.sourceProfiles.end())return;
- auto active=source->second&T().activeSkins.load(std::memory_order_relaxed);if(!active)return;
+ const auto active=std::atomic_load(&T().activeSkins);
  T().originalSkinJobs.fetch_add(1,std::memory_order_relaxed);
- for(;active;active&=active-1){
-  const auto profile=unsigned(__builtin_ctzll(active));
-  if(profile>=s.profiles.size()||!s.profiles[profile].ready)continue;
+ for(unsigned profile:source->second){
+  if(!active->count(profile))continue;
+  if(!ensureSkinInputs(device,d,profile))continue;
   const auto& skin=sharedSkins[profile];auto& gpu=s.profiles[profile];
   if(skin.logic&&skin.logic->driven&&!liveLogic(skin))continue;
   if(skin.generic()&&!liveLogic(skin)&&!ms::drawn(skin.replaceWhen,skinAssignment(gpu,skin,profile)))continue;
@@ -1486,6 +1790,7 @@ void sharedSkinDispatch(VkDevice device,VkCommandBuffer cmd,TintCmd& state,TintD
 }
 void skinOnCmdDispatch(VkCommandBuffer cmd,uint32_t x,uint32_t y,uint32_t z){
  auto dispatch=upCmdDispatch.load();dispatch(cmd,x,y,z);
+ std::shared_lock<std::shared_mutex> catalog(T().registryMutex);
  if(T().inspectResources)T().observeResources(gpuHandle(cmd),true);
  if(!T().skinnedModel)return;
  if(T().allSkins)T().computeDispatches.fetch_add(1,std::memory_order_relaxed);
@@ -1514,11 +1819,17 @@ void skinOnCmdDispatch(VkCommandBuffer cmd,uint32_t x,uint32_t y,uint32_t z){
  });
 }
 
-VkDescriptorSet tintClone(VkDevice d,TintDevice& dev,TintSet& target,TintImg* image,unsigned part,const TintViews& overrides,const TintSamplers& samplers={}){
+VkDescriptorSet tintClone(VkDevice d,TintDevice& dev,TintSet& target,TintImg* image,unsigned part,const TintViews& overrides,const TintSamplers& samplers={},TintCmd* command=nullptr){
  const bool preset=std::any_of(overrides.begin(),overrides.end(),[](auto view){return bool(view);});
  if(!preset&&!image)return {};
  const auto generation=image?image->generation:0;
- auto& saved=preset?target.textureCache[{overrides,samplers}]:target.cache.at(part);if(saved.set&&saved.generation==generation)return saved.set;
+ if(target.textureCache.size()>=tintSetLimit){target.textureCache.clear();}
+ auto& saved=preset?target.textureCache[{overrides,samplers}]:target.cache.at(part);
+ if(auto clone=dev.clones.find(saved.set);clone!=dev.clones.end()&&saved.generation==generation&&clone->second.serial==saved.serial){
+  clone->second.used=dev.upload.clock;
+  if(command){command->gpuSets.insert(saved.set);}
+  return saved.set;
+ }
  const auto count=tintSlotCount(target.shape);
  const auto slots=writtenMask(target),sampled=imageMask(target);
  if(dev.allocated>=tintSetLimit)return {};
@@ -1529,7 +1840,7 @@ VkDescriptorSet tintClone(VkDevice d,TintDevice& dev,TintSet& target,TintImg* im
  if(!dev.pool){
   constexpr auto limit=uint32_t(tintSetLimit*tintBindings);
   const VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,limit},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,limit},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,limit}};
-  const VkDescriptorPoolCreateInfo p{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,nullptr,0,uint32_t(tintSetLimit),T().renderTextures?3u:1u,sizes};
+  const VkDescriptorPoolCreateInfo p{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,nullptr,VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,uint32_t(tintSetLimit),T().renderTextures?3u:1u,sizes};
   if(tintCreateDescriptorPool.load()(d,&p,nullptr,&dev.pool)!=VK_SUCCESS){dev.pool={};return {};}}
  auto& layout=dev.ownedLayouts[target.shape];
  if(!layout){std::array<VkDescriptorSetLayoutBinding,tintBindings> b{};
@@ -1567,7 +1878,13 @@ VkDescriptorSet tintClone(VkDevice d,TintDevice& dev,TintSet& target,TintImg* im
   writes[filled++]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,set,i,0,1,type,hasImage?&images[i]:nullptr,hasImage?nullptr:&target.buffers.at(i),nullptr};
  }
  tintUpdateDescriptorSets.load()(d,filled,writes.data(),0,nullptr);
- saved={set,generation};return set;
+ TintViews views{};TintSamplers usedSamplers{};
+ for(size_t i=0;i<views.size();i++){views[i]=images[i].imageView;usedSamplers[i]=images[i].sampler;}
+ const auto serial=++dev.cloneSerial;
+ dev.clones.insert_or_assign(set,TintDevice::Clone{views,serial,dev.upload.clock,usedSamplers});
+ saved={set,generation,serial};
+ if(command){command->gpuSets.insert(set);}
+ return set;
 }
 TintSet* boundTintSet(TintDevice& device,const TintCmd& state){
  auto p=device.pipelines.find(state.pipeline);
@@ -1591,10 +1908,23 @@ VkSampler clampSampler(VkDevice d,TintDevice& dev,VkSampler sampler){
  return replacement;
 }
 std::string textureCheck(uint32_t value){return "vkcheck"+std::to_string(value);}
+bool srgbSampled(VkFormat f){
+ if(f>=VK_FORMAT_ASTC_4x4_UNORM_BLOCK&&f<=VK_FORMAT_ASTC_12x12_SRGB_BLOCK){return (f-VK_FORMAT_ASTC_4x4_UNORM_BLOCK)%2==1;}
+ switch(f){
+  case VK_FORMAT_R8_SRGB:case VK_FORMAT_R8G8_SRGB:case VK_FORMAT_R8G8B8_SRGB:case VK_FORMAT_B8G8R8_SRGB:
+  case VK_FORMAT_R8G8B8A8_SRGB:case VK_FORMAT_B8G8R8A8_SRGB:case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+  case VK_FORMAT_BC1_RGB_SRGB_BLOCK:case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:case VK_FORMAT_BC2_SRGB_BLOCK:
+  case VK_FORMAT_BC3_SRGB_BLOCK:case VK_FORMAT_BC7_SRGB_BLOCK:case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
+  case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:return true;
+  default:return false;
+ }
+}
 std::optional<uint32_t> textureRouteStart(VkCommandBuffer command,const ms::vkcap::RenderDraw& draw,const TextureRoute& rule){
  const int64_t first=draw.indexed?rule.first:rule.firstVertex,count=draw.indexed?rule.count:rule.vertices;
  if(draw.indexed?(rule.firstVertex>=0||rule.vertices>=0):(rule.first>=0||rule.count>=0))return {};
  if(count>=0&&draw.count!=count)return {};
+ if((rule.instances>=0&&draw.instances!=rule.instances)||(rule.firstInstance>=0&&draw.firstInstance!=rule.firstInstance)||
+    (rule.baseVertex&&(!draw.indexed||draw.baseVertex!=*rule.baseVertex)))return {};
  if(rule.ib){
   if(!draw.indexed||draw.instances!=1||draw.baseVertex)return {};
   for(const auto& index:draw.indices){
@@ -1645,23 +1975,25 @@ void syncTextureLogic(TintDevice::TextureLogic& logic,const TextureProgram& prog
  logic.pushed=std::move(wanted);
 }
 struct TextureDraw {
- struct Binding {uint32_t index;VkDescriptorSet original,replacement;};
+ struct Binding {uint32_t index;VkDescriptorSet original,replacement;TintViews views;TintSamplers samplers;};
  VkPipelineLayout layout{};
  std::vector<Binding> bindings;
  unsigned profile=0;
+ bool skip=false;
 };
 TextureDraw planTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw& draw){
  TextureDraw result;
  if(!draw.count||!draw.instances||!T().routesReady.load(std::memory_order_acquire))return result;
- uint64_t candidates=explicitTexturePrograms;
+ Profiles candidates=explicitTexturePrograms;
  for(const auto& index:draw.indices){
-  if(auto at=textureIBPrograms.find(index.hash);at!=textureIBPrograms.end()){candidates|=at->second;}
+  if(auto at=textureIBPrograms.find(index.hash);at!=textureIBPrograms.end()){candidates.insert(at->second.begin(),at->second.end());}
  }
- const auto enabled=candidates&T().activeRenderMods.load(std::memory_order_relaxed);
- if(!enabled)return result;
+ const auto enabled=selectedProfiles(candidates,*std::atomic_load(&T().activeRenderMods));
+ if(enabled.empty())return result;
  tintObserve([&](auto& state){
   auto cmd=state.commands.find(command);if(cmd==state.commands.end())return;
-  const auto& bind=cmd->second.second;auto& device=state.devices.at(cmd->second.first);
+  auto& bind=cmd->second.second;auto& device=state.devices.at(cmd->second.first);
+  if(T().hotReload&&device.catalogVersion!=T().registryVersion)return;
   const auto family=device.families.find(bind.pool);
   if(!device.upload.queued||family==device.families.end()||family->second!=device.upload.usedFamily)return;
   auto pipeline=device.pipelines.find(bind.pipeline);if(pipeline==device.pipelines.end())return;
@@ -1678,8 +2010,7 @@ TextureDraw planTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw&
    }
   }
   const auto roles=device.textureSlots.find(bind.pipeline);
-  for(uint64_t active=enabled;active;active&=active-1){
-   const unsigned profile=unsigned(__builtin_ctzll(active));
+  for(unsigned profile:enabled){
    const auto& program=texturePrograms[profile];
    migoto::DrawInfo observed;observed.live=true;
    std::map<std::string,std::pair<unsigned,unsigned>> targets;
@@ -1711,11 +2042,15 @@ TextureDraw planTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw&
    if(program.loading&&logic.lastSeen+1<device.renderFrame){++logic.slide;}
    logic.lastSeen=device.renderFrame;
    const auto selected=logic.engine.draw(observed);
-   if(selected.skip||!selected.draws.empty()||selected.unsupported||!selected.customShaders.empty())return;
+   if(!selected.draws.empty()||selected.unsupported||!selected.customShaders.empty())return;
    if(logic.engine.persistDirty){
     auto values=logic.engine.persistent();
     if(!values.empty()){T().rememberLogic(program.persistFile,{"",std::move(values)},true);}
     logic.engine.persistDirty=false;
+   }
+   if(selected.skip){
+    if(program.loading){result.profile=profile;result.skip=true;}
+    return;
    }
    std::array<TintViews,8> replacements{};
    std::array<TintSamplers,8> samplers{};
@@ -1723,10 +2058,15 @@ TextureDraw planTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw&
    for(const auto& [slot,ref]:selected.bindings){
     if(ref.kind!=migoto::Ref::Mod)continue;
     auto target=targets.find(slot);auto image=program.images.find(ref.resource);
-    if(target==targets.end()&&(slot=="ps-t20"||slot=="ps-t21"||slot=="ps-t22"))continue;
+    if(target==targets.end()&&(slot=="ps-t20"||slot=="ps-t21"||slot=="ps-t22"||slot=="ps-t23"))continue;
     if(target==targets.end()||image==program.images.end())return;
     const auto [set,binding]=target->second;
     if(!sets[set]||!(imageMask(*sets[set])&(1u<<binding)))return;
+    if(const auto alternative=program.linearAlternative.find(ref.resource);alternative!=program.linearAlternative.end()){
+     const auto format=device.sampledFormats.find(sets[set]->images[binding].imageView);
+     if(format==device.sampledFormats.end())continue;
+     if(!srgbSampled(format->second)){image=program.images.find(alternative->second);}
+    }
     const auto& slides=image->second;
     const auto mode=program.loading?unsigned(T().renderLoadingFit.load(std::memory_order_relaxed)):0u;
     const auto id=slides[logic.slide%slides.size()][mode];
@@ -1744,9 +2084,9 @@ TextureDraw planTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw&
    TextureDraw plan;plan.layout=layout;plan.profile=profile;
    for(unsigned i=0;i<sets.size();i++){
     if(std::none_of(replacements[i].begin(),replacements[i].end(),[](auto view){return bool(view);}))continue;
-    const auto set=tintClone(cmd->second.first,device,*sets[i],nullptr,0,replacements[i],samplers[i]);
+    const auto set=tintClone(cmd->second.first,device,*sets[i],nullptr,0,replacements[i],samplers[i],&bind);
     if(!set)return;
-    plan.bindings.push_back({i,available[i],set});
+    plan.bindings.push_back({i,available[i],set,replacements[i],samplers[i]});
    }
    if(!plan.bindings.empty()){
     result=std::move(plan);return;
@@ -1755,23 +2095,31 @@ TextureDraw planTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw&
  });
  return result;
 }
-bool renderTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw& draw){
- const auto plan=planTextureDraw(command,draw);
- if(plan.bindings.empty())return false;
+void bindTextureDraw(VkCommandBuffer command,const TextureDraw& plan,bool mod,uint32_t first=0){
  auto bind=tintCmdBindDescriptorSets.load();
- for(const auto& set:plan.bindings){bind(command,VK_PIPELINE_BIND_POINT_GRAPHICS,plan.layout,set.index,1,&set.replacement,0,nullptr);}
+ for(const auto& set:plan.bindings){
+  if(set.index>=first){bind(command,VK_PIPELINE_BIND_POINT_GRAPHICS,plan.layout,set.index,1,mod?&set.replacement:&set.original,0,nullptr);}
+ }
+}
+bool executeTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw& draw,const TextureDraw& plan){
+ if(plan.skip){T().renderDraws[plan.profile].fetch_add(1,std::memory_order_relaxed);return true;}
+ if(plan.bindings.empty())return false;
+ bindTextureDraw(command,plan,true);
  if(draw.indexed){cmdDrawIndexed.load()(command,draw.count,draw.instances,draw.first,draw.baseVertex,draw.firstInstance);}
  else{gpuCmdDraw.load()(command,draw.count,draw.instances,draw.first,draw.firstInstance);}
- for(const auto& set:plan.bindings){bind(command,VK_PIPELINE_BIND_POINT_GRAPHICS,plan.layout,set.index,1,&set.original,0,nullptr);}
+ bindTextureDraw(command,plan,false);
  T().renderDraws[plan.profile].fetch_add(1,std::memory_order_relaxed);
  return true;
+}
+bool renderTextureDraw(VkCommandBuffer command,const ms::vkcap::RenderDraw& draw){
+ return executeTextureDraw(command,draw,planTextureDraw(command,draw));
 }
 struct TintDraw {
  VkPipelineLayout layout{};VkDescriptorSet original{},replacement{};
  unsigned bindings=0;std::array<VkBuffer,maxSkinVertexBindings> oldVertex{},newVertex{};
  std::array<VkDeviceSize,maxSkinVertexBindings> oldOffsets{};
  VkBuffer oldIndex{},newIndex{};VkDeviceSize oldIndexOffset=0;VkIndexType oldIndexType=VK_INDEX_TYPE_UINT16,newIndexType=VK_INDEX_TYPE_UINT16;
- ms::Submesh slot{};bool skip=false;unsigned textures=0;
+ ms::Submesh slot{};bool skip=false,overlayUsed=false;unsigned textures=0;
  std::vector<std::pair<ms::Submesh,VkDescriptorSet>> draws;
  std::optional<size_t> originalAfter;
 };
@@ -1832,10 +2180,10 @@ ms::LogicDriver::LiveDraw skinLogicDraw(TintDevice& device,const SharedSkin& pro
  logic.save(profile.logic->mainNs);
  return result;
 }
-TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},uint32_t firstInstance=0){
+TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},uint32_t firstInstance=0,const TextureDraw::Binding* overlay=nullptr){
  using ms::vkcap::SkinMiss;
  using ms::vkcap::SkinPhase;
- TintDraw result;tintObserve([&](auto& s){auto i=s.commands.find(c);if(i==s.commands.end())return;const auto& state=i->second.second;
+ TintDraw result;tintObserve([&](auto& s){auto i=s.commands.find(c);if(i==s.commands.end())return;auto& state=i->second.second;
   auto j=s.devices.find(i->second.first);if(j==s.devices.end())return;auto& d=j->second;
   auto miss=[&](SkinMiss why){if(shared&&T().skinActive(shared.profile))T().noteSkinMiss(why);};
   auto* materials=boundTintSet(d,state);
@@ -1843,25 +2191,43 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
   const auto image=materials?d.images.find(materials->images[0].imageView):d.images.end();
   auto* view=image==d.images.end()?nullptr:&image->second;
   TintDraw plan;plan.layout=state.layout;plan.original=state.set;
+  if(overlay&&overlay->original!=plan.original){overlay=nullptr;}
+  const auto originalMaterial=overlay?overlay->replacement:plan.original;
+  auto material=[&](TintViews views){
+   TintSamplers samplers{};
+   bool merged=false;
+   if(overlay){for(size_t k=0;k<views.size();k++){
+    if(!views[k]&&overlay->views[k]){views[k]=overlay->views[k];samplers[k]=overlay->samplers[k];merged=true;}
+   }}
+   auto set=tintClone(i->second.first,d,*materials,view,0,views,samplers,&state);
+   if(set&&merged){plan.overlayUsed=true;}
+   return set;
+  };
+  auto finish=[&]{
+   if(T().hotReload&&shared&&plan.bindings){
+    state.skinCatalogs.insert(d.skinVersion);
+    if(plan.newIndex){state.gpuBuffers.insert(plan.newIndex);}
+    for(auto buffer:plan.newVertex){if(buffer){state.gpuBuffers.insert(buffer);}}
+   }
+   result=std::move(plan);
+  };
   VkImageView preset{};
   if(shared){
-   if(shared.profile>=sharedSkins.size()||shared.profile>=d.skin.profiles.size())return;
+   if((T().hotReload&&d.skinVersion!=T().skinVersion)||shared.profile>=sharedSkins.size()||shared.profile>=d.skin.profiles.size())return;
    const auto& profile=sharedSkins[shared.profile];auto& s=d.skin;auto& buffers=s.profiles[shared.profile];
    const bool live=liveLogic(profile)&&shared.slot<profile.logicPasses.size()&&profile.logicPasses[shared.slot].pass;
    if(profile.logic&&profile.logic->driven&&!live)return;
    if(!T().skinActive(shared.profile)&&profile.rigid)return;
-   if(!buffers.ready||shared.slot>=profile.mesh.slots.size()||!state.index||!state.vertex[0]){miss(SkinMiss::Resources);return;}
+   if(shared.slot>=profile.mesh->slots.size()||!state.index||!state.vertex[0]){miss(SkinMiss::Resources);return;}
    auto layout=s.drawLayouts.find(state.pipeline);
    if(layout==s.drawLayouts.end()){
     miss(SkinMiss::Graphics);
     if(T().skinActive(shared.profile)&&s.layoutSamples.size()<256){
-     const auto bit=uint64_t(1)<<shared.profile;
      auto& seen=s.layoutSamples[state.pipeline];
-     if(!(seen&bit)){
+     if(seen.insert(shared.profile).second){
       const auto details=s.rejectedLayouts.find(state.pipeline);
       T().noteSkinLayout(shared.profile,reinterpret_cast<uintptr_t>(state.pipeline),
                         details==s.rejectedLayouts.end()?"未捕获管线声明":details->second.c_str());
-      seen|=bit;
      }
     }
     return;
@@ -1879,23 +2245,29 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
     auto observed=s.seenOutputs.find(state.vertex[0]);if(observed==s.seenOutputs.end()){miss(SkinMiss::SkinOutput);return;}
     source=&observed->second;
     if(!skinFits(profile,observed->second,shared.profile))return;
-    auto& profiles=s.sourceProfiles[{source->rest,source->weights}];const uint64_t bit=uint64_t(1)<<shared.profile;
-    if(!(profiles&bit)){profiles|=bit;T().skinMatches.fetch_add(1,std::memory_order_relaxed);}
+    auto& profiles=s.sourceProfiles[{source->rest,source->weights}];
+    if(profiles.insert(shared.profile).second){T().skinMatches.fetch_add(1,std::memory_order_relaxed);}
     T().noteSkinTime(shared.profile,SkinPhase::Association);
     if(!T().skinActive(shared.profile))return;
     const auto currentKey=std::make_pair(state.vertex[0],shared.profile);auto current=s.sharedOutput.find(currentKey);
     const auto recorded=state.sharedProduced.find(currentKey);
+    const bool currentRecord=!T().hotReload||state.producedCatalog==d.skinVersion;
     poseReady=current!=s.sharedOutput.end()&&current->second.revision==source->revision&&
-       (current->second.queued||(recorded!=state.sharedProduced.end()&&recorded->second==current->second.revision));
+       (current->second.queued||(currentRecord&&recorded!=state.sharedProduced.end()&&recorded->second==current->second.revision));
     if(poseReady){
      T().noteSkinTime(shared.profile,SkinPhase::Pose);
+     current->second.used=u.clock;
      plan.newVertex[0]=plan.newVertex[2]=current->second.buffer.buffer;
     }
     if(poseReady&&(plan.bindings&4)&&!state.vertexOffset[2]){
      auto previous=s.sharedOutput.find({state.vertex[2],shared.profile});
-     if(previous!=s.sharedOutput.end()&&previous->second.queued)plan.newVertex[2]=previous->second.buffer.buffer;
+     if(previous!=s.sharedOutput.end()&&previous->second.queued){
+      previous->second.used=u.clock;plan.newVertex[2]=previous->second.buffer.buffer;
+     }
     }
    }
+   if(!ensureSkinInputs(i->second.first,d,shared.profile)){miss(SkinMiss::Resources);return;}
+   if(profile.rigid){plan.newVertex[0]=plan.newVertex[2]=buffers.input[Rest].buffer;}
    ms::LogicDriver::LiveDraw selection;
    const std::vector<size_t>* liveRows=nullptr;
    if(live){
@@ -1911,26 +2283,48 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
      return;
     }
    }
+   const auto at=d.textureSlots.find(state.pipeline);
+   const SkinTextureSlots bindings=at==d.textureSlots.end()?SkinTextureSlots{~0u,~0u,~0u}:
+     SkinTextureSlots{at->second[0],at->second[1],at->second[2]};
    if(!poseReady){
-    warmSkinImages(d,uint64_t(1)<<shared.profile,false);
+    if(materials){
+     bool usesTextures=false,ready=true;
+     auto warm=[&](unsigned role,unsigned id){
+      const auto binding=bindings[role];
+      if(id==~0u||binding>=tintBindings||!(imageMask(*materials)&(1u<<binding)))return;
+      usesTextures=true;
+      if(!skinImage(u,id)){ready=false;}
+     };
+     if(profile.generic()){
+      const auto& rows=profile.iniDraws[shared.slot];
+      const auto& assignment=skinAssignment(buffers,profile,shared.profile);
+      for(size_t row=0;row<(liveRows?liveRows->size():rows.size());row++){
+       const auto& current=rows[liveRows?(*liveRows)[row]:row];
+       if(!liveRows&&(!current.range.count||!ms::drawn(current.when,assignment)))continue;
+       for(unsigned role=0;role<bindings.size();role++){warm(role,current.images[role]);}
+      }
+     }else{warm(0,profile.images[shared.slot]);}
+     if(usesTextures&&ready){T().noteSkinTime(shared.profile,SkinPhase::Textures);}
+    }
     miss(SkinMiss::Pose);return;
    }
    if(plan.bindings&2){
-    plan.newVertex[1]=skinAttributes(i->second.first,u,buffers,profile.mesh,layout->second.attributes);
+    const auto& attributes=layout->second.attributes;
+    if(!attributes.packed()&&!buffers.attributeBuffers.count(attributes)&&
+       !geometryRoom(d,uint64_t(profile.mesh->vertices)*attributes.stride+65536)){miss(SkinMiss::Resources);return;}
+    plan.newVertex[1]=skinAttributes(i->second.first,u,buffers,*profile.mesh,attributes);
     if(!plan.newVertex[1]){miss(SkinMiss::Resources);return;}
    }
    plan.oldIndex=state.index;plan.oldIndexOffset=state.indexOffset;plan.oldIndexType=state.indexType;
-   plan.newIndex=buffers.input[Indices].buffer;plan.newIndexType=profile.mesh.indexBytes==4?VK_INDEX_TYPE_UINT32:VK_INDEX_TYPE_UINT16;
+   plan.newIndex=buffers.input[Indices].buffer;plan.newIndexType=profile.mesh->indexBytes==4?VK_INDEX_TYPE_UINT32:VK_INDEX_TYPE_UINT16;
    plan.oldVertex=state.vertex;plan.oldOffsets=state.vertexOffset;
-   const auto at=d.textureSlots.find(state.pipeline);
-   const SkinTextureSlots bindings=at==d.textureSlots.end()?SkinTextureSlots{~0u,~0u,~0u}:at->second;
    if(profile.generic()){
     const auto* assignment=live?nullptr:&skinAssignment(buffers,profile,shared.profile);
     const auto& rows=profile.iniDraws[shared.slot];
     if(live){
      if(selection.original){plan.originalAfter=selection.pre;}
     }else if(!ms::drawn(profile.replaceWhen,*assignment))return;
-    bool waitingImages=false;
+    bool waitingImages=false,usesTextures=false;
     for(size_t rowIndex=0;rowIndex<(liveRows?liveRows->size():rows.size());rowIndex++){
      const auto& row=rows[liveRows?(*liveRows)[rowIndex]:rowIndex];
      if(!liveRows&&(!row.range.count||!ms::drawn(row.when,*assignment)))continue;
@@ -1940,7 +2334,7 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
       const auto b=bindings[role],im=row.images[role];
       if(im==~0u)continue;
       if(b==~0u)continue; // This pass may use only some (or none) of the model's material textures.
-      if(!materials||b>=tintSlotCount(materials->shape)){
+      if(!materials||b>=tintBindings||!(imageMask(*materials)&(1u<<b))){
        miss(SkinMiss::Material);
        if(live)return;
        continue;
@@ -1952,24 +2346,26 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
      }
      if(waitingRow){waitingImages=true;continue;}
      if(textures){
-      set=tintClone(i->second.first,d,*materials,view,0,overrides);
+      usesTextures=true;set=material(overrides);
       if(set){plan.textures|=textures;}else{miss(SkinMiss::Material);if(live)return;}
      }
-     plan.draws.emplace_back(row.range,set?set:state.set);
+     if(!set&&overlay){plan.overlayUsed=true;}
+     plan.draws.emplace_back(row.range,set?set:originalMaterial);
     }
     if(waitingImages){miss(SkinMiss::Resources);return;}
+    if(usesTextures){T().noteSkinTime(shared.profile,SkinPhase::Textures);}
     if(plan.draws.empty())return;
-    plan.replacement=plan.draws.front().second;result=std::move(plan);return;
+    plan.replacement=plan.draws.front().second;finish();return;
    }
-   plan.slot=profile.mesh.slots[shared.slot];if(!plan.slot.count){plan.skip=true;result=std::move(plan);return;}
+   plan.slot=profile.mesh->slots[shared.slot];if(!plan.slot.count){plan.skip=true;result=std::move(plan);return;}
    const auto tex=profile.images[shared.slot],binding=bindings[0];
    if(tex!=~0u&&binding!=~0u){
-    if(!materials||binding>=tintSlotCount(materials->shape))miss(SkinMiss::Material);
+    if(!materials||binding>=tintBindings||!(imageMask(*materials)&(1u<<binding)))miss(SkinMiss::Material);
     else{
      const auto replacement=skinImage(u,tex);
      if(!replacement){miss(SkinMiss::Resources);return;}
      TintViews views{};views[binding]=replacement;
-     plan.replacement=tintClone(i->second.first,d,*materials,view,0,views);
+     T().noteSkinTime(shared.profile,SkinPhase::Textures);plan.replacement=material(views);
      if(!plan.replacement)miss(SkinMiss::Material);
     }
    }
@@ -1990,10 +2386,10 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
    plan.slot=paimonSkin.slots[part];
   }
   TintViews views{};views[0]=preset;
-  if(preset&&materials)plan.replacement=tintClone(i->second.first,d,*materials,view,part,views);
-  else if(!shared&&materials&&view)plan.replacement=tintClone(i->second.first,d,*materials,view,part,views);
-  if(shared&&!plan.replacement)plan.replacement=state.set;
-  result=std::move(plan);
+  if(preset&&materials)plan.replacement=tintClone(i->second.first,d,*materials,view,part,views,{},&state);
+  else if(!shared&&materials&&view)plan.replacement=tintClone(i->second.first,d,*materials,view,part,views,{},&state);
+  if(shared&&!plan.replacement){plan.replacement=originalMaterial;plan.overlayUsed=bool(overlay);}
+  finish();
  });return result;
 }
 #endif
@@ -2029,16 +2425,21 @@ VkResult onBeginCommandBuffer(void* c,const void* info){
  return result;
 }
 void onCmdDrawIndexed(void* c,uint32_t count,uint32_t instances,uint32_t first,int32_t baseVertex,uint32_t firstInstance){
+ std::shared_lock<std::shared_mutex> catalog(T().registryMutex);
  [[maybe_unused]] int part=-1;[[maybe_unused]] ms::vkcap::SkinHit shared;
  ms::vkcap::RenderDraw render{true,count,instances,first,firstInstance,baseVertex};
  try{part=T().drawIndexed(reinterpret_cast<uintptr_t>(c),count,instances,first,baseVertex,firstInstance,&shared,T().renderTextures?&render.indices:nullptr);}catch(...){}
  auto draw=cmdDrawIndexed.load();
 #ifdef GIBOX_VK_TINT
+ const auto command=static_cast<VkCommandBuffer>(c);
+ const auto texture=T().renderTextures?planTextureDraw(command,render):TextureDraw{};
+ const auto* overlay=texture.bindings.empty()||texture.bindings.front().index?nullptr:&texture.bindings.front();
  if(shared&&T().skinActive(shared.profile)){T().noteSkinTime(shared.profile,ms::vkcap::SkinPhase::Index);}
- if((part>=0||shared)&&T().tintHooks){const auto command=static_cast<VkCommandBuffer>(c);auto plan=tintDraw(command,shared?shared.slot:unsigned(part),shared,firstInstance);
+ if((part>=0||shared)&&T().tintHooks){auto plan=tintDraw(command,shared?shared.slot:unsigned(part),shared,firstInstance,overlay);
   const bool active=shared?T().skinActive(shared.profile):T().tintOn.load(std::memory_order_relaxed);
   if(active&&plan.skip){T().sharedDraws.fetch_add(1,std::memory_order_relaxed);T().profileDraws[shared.profile].fetch_add(1,std::memory_order_relaxed);return;}
   if(active&&(plan.replacement||(shared&&plan.bindings&&(plan.slot.count||!plan.draws.empty())))){
+   bindTextureDraw(command,texture,true,1);
    auto bind=tintCmdBindDescriptorSets.load();auto current=plan.original;
    auto bindMaterial=[&](VkDescriptorSet set){
     if(set&&set!=current){bind(command,VK_PIPELINE_BIND_POINT_GRAPHICS,plan.layout,0,1,&set,0,nullptr);current=set;}
@@ -2062,7 +2463,7 @@ void onCmdDrawIndexed(void* c,uint32_t count,uint32_t instances,uint32_t first,i
      if(mod){bindVertices(plan.newVertex,zero);ib(c,reinterpret_cast<uintptr_t>(plan.newIndex),0,plan.newIndexType);}
      else{ib(c,reinterpret_cast<uintptr_t>(plan.oldIndex),plan.oldIndexOffset,plan.oldIndexType);bindVertices(plan.oldVertex,plan.oldOffsets);}
     };
-    auto original=[&]{bindGeometry(false);bindMaterial(plan.original);draw(c,count,instances,first,baseVertex,firstInstance);};
+    auto original=[&]{bindGeometry(false);bindMaterial(overlay?overlay->replacement:plan.original);draw(c,count,instances,first,baseVertex,firstInstance);};
     if(plan.draws.empty()){
      bindGeometry(true);bindMaterial(plan.replacement);draw(c,plan.slot.count,instances,plan.slot.start,0,firstInstance);
     }else{
@@ -2076,6 +2477,10 @@ void onCmdDrawIndexed(void* c,uint32_t count,uint32_t instances,uint32_t first,i
     bindGeometry(false);
    }else{bindMaterial(plan.replacement);draw(c,count,instances,first,baseVertex,firstInstance);}
    bindMaterial(plan.original);
+   bindTextureDraw(command,texture,false,1);
+   if(plan.overlayUsed||std::any_of(texture.bindings.begin(),texture.bindings.end(),[](const auto& b){return b.index>0;})){
+    T().renderDraws[texture.profile].fetch_add(1,std::memory_order_relaxed);
+   }
    if(shared){T().noteSkinTime(shared.profile,ms::vkcap::SkinPhase::FirstDraw);T().sharedDraws.fetch_add(1,std::memory_order_relaxed);T().profileDraws[shared.profile].fetch_add(1,std::memory_order_relaxed);
     if(plan.textures&2)T().lightMapDraws.fetch_add(1,std::memory_order_relaxed);
     if(plan.textures&4)T().normalMapDraws.fetch_add(1,std::memory_order_relaxed);}
@@ -2083,7 +2488,7 @@ void onCmdDrawIndexed(void* c,uint32_t count,uint32_t instances,uint32_t first,i
    return;}
   if(shared){if(active)T().sharedMisses.fetch_add(1,std::memory_order_relaxed);}else T().tintMisses[part].fetch_add(1,std::memory_order_relaxed);
  }
- if(T().renderTextures&&renderTextureDraw(static_cast<VkCommandBuffer>(c),render))return;
+ if(executeTextureDraw(command,render,texture))return;
 #endif
  draw(c,count,instances,first,baseVertex,firstInstance);
 }
@@ -2184,7 +2589,9 @@ TextureRoute textureRoute(const Json& j,bool ui){
  TextureRoute r;
  r.first=texdiag::num(j,"first",-1);r.count=texdiag::num(j,"indexCount",-1);
  r.firstVertex=texdiag::num(j,"firstVertex",-1);r.vertices=texdiag::num(j,"vertexCount",-1);
- for(auto n:{r.first,r.count,r.firstVertex,r.vertices}){require(n>=-1&&n<=UINT32_MAX,"绘制范围无效");}
+ r.instances=texdiag::num(j,"instances",ui?1:-1);r.firstInstance=texdiag::num(j,"firstInstance",-1);
+ if(j.at("baseVertex").type!=Json::Null){r.baseVertex=jint(j.at("baseVertex"),"baseVertex");}
+ for(auto n:{r.first,r.count,r.firstVertex,r.vertices,r.instances,r.firstInstance}){require(n>=-1&&n<=UINT32_MAX,"绘制范围无效");}
  require(r.count!=0&&r.vertices!=0&&((r.first<0&&r.count<0)||(r.firstVertex<0&&r.vertices<0)),"绘制类型或数量无效");
  if(auto match=vkcap::resourceMatches(texdiag::str(j,"matchVulkan"))){
   r.terms=std::move(*match);
@@ -2216,11 +2623,12 @@ void appendTextureRule(TextureProgram& program,TextureRoute route,const std::str
 }
 struct TextureImport {
  TextureProgram program;
+ unsigned imageBase;
  std::vector<SkinImage> pending;
  std::shared_ptr<const SkinImageFile> file;
  std::map<std::pair<std::string,bool>,std::string> resources;
- TextureImport(const std::string& shared,const std::string& name,const std::string& dir,const std::string& manifest,const Json& doc):
-  file(std::make_shared<SkinImageFile>(SkinImageFile{dir,jstr(doc,"generation",64),0,manifest})){
+ TextureImport(const std::string& shared,const std::string& name,const std::string& dir,const std::string& manifest,const Json& doc,unsigned base):
+  imageBase(base),file(std::make_shared<SkinImageFile>(SkinImageFile{dir,jstr(doc,"generation",64),0,manifest})){
   program.persistFile=logicPersistFile(shared,name);
  }
  std::string image(const std::string& path,unsigned w,unsigned h,bool linear,bool circle=false,float aspect=0){
@@ -2231,7 +2639,7 @@ struct TextureImport {
   const auto name="resourcegibox"+std::to_string(program.images.size());
   std::array<unsigned,3> ids{};
   for(unsigned i=0;i<(aspect?3u:1u);i++){
-   ids[i]=unsigned(sharedImages.size()+pending.size());
+   ids[i]=unsigned(imageBase+pending.size());
    const auto edge=std::max(w,h);
    const auto bytes=aspect?textureBytes(edge,edge,textureMipCount(edge,edge)):textureBytes(w,h,textureMipCount(w,h));
    pending.push_back({file,TexRef{w,h,0,bytes},linear,path,circle,aspect,int(i)});
@@ -2292,7 +2700,7 @@ struct TextureImport {
     require(binding.condition.find_first_of("\r\n")==binding.condition.npos,"INI 条件中有换行");
     std::string target=binding.slot;
     if(route.semantic||target.rfind("resource",0)==0){
-     const auto role=binding.role=="diffuse"?0:binding.role=="lightmap"?1:binding.role=="normal"?2:-1;
+     const auto role=binding.role=="diffuse"?0:binding.role=="lightmap"?1:binding.role=="normal"?2:binding.role=="ramp"?3:-1;
      require(role>=0,"贴图角色没有可用的安卓着色器绑定");
      target="ps-t"+std::to_string(20+role);
     }else if(target=="this"){require(route.thisBinding!=~0u,"this 缺少唯一的采样纹理");}
@@ -2306,6 +2714,7 @@ struct TextureImport {
      const auto at=std::find_if(parsed.textures.begin(),parsed.textures.end(),[&](const auto& entry){return entry.resource==binding.resource;});
      require(at!=parsed.textures.end(),"转换包缺少贴图 "+binding.resource);
      resource=image(at->file,at->width,at->height,binding.role=="lightmap"||binding.role=="normal");
+     if(binding.role=="ramp"){program.linearAlternative[resource]=image(at->file,at->width,at->height,true);}
     }
     if(!binding.condition.empty()){body+="if "+binding.condition+"\n";}
     body+=target+" = "+resource+"\n";
@@ -2327,7 +2736,9 @@ struct TextureImport {
  }
  void loading(const Json& doc){
   require(jstr(doc,"format",64)=="gibox-loading-images"&&juint(doc,"version",1,1)==1,"加载图片格式无效");
-  require(!jbool(doc,"hideUi",false),"隐藏加载提示需要单独的已验证绘制规则");
+  const auto& hide=doc.at("vulkanHide");
+  const bool initiallyHidden=jbool(doc,"hideUi",false);
+  require(!initiallyHidden||(hide.type==Json::Array&&!hide.array.empty()),"隐藏加载提示需要单独的已验证绘制规则");
   const auto& vk=doc.at("vulkan");
   auto route=textureRoute(vk,true);
   const auto& ratio=vk.at("aspect");
@@ -2346,13 +2757,18 @@ struct TextureImport {
     const auto w=unsigned(juint(row,"width",1,2048)),h=unsigned(juint(row,"height",1,2048)),edge=std::max(w,h);
     std::array<unsigned,3> ids{};
     for(unsigned i=0;i<ids.size();i++){
-     ids[i]=unsigned(sharedImages.size()+pending.size());
+     ids[i]=unsigned(imageBase+pending.size());
      pending.push_back({file,TexRef{w,h,0,textureBytes(edge,edge,textureMipCount(edge,edge))},false,path,false,aspect,int(i)});
     }
     frames.push_back(ids);
    }
   }
   program.images[resource]=std::move(frames);program.loading=true;
+  if(hide.type==Json::Array&&!hide.array.empty()){
+   program.defaults["$skip_ui"]=initiallyHidden?1:0;program.vars["$skip_ui"]={0,1};
+   program.ini+=std::string("[Constants]\nglobal $skip_ui = ")+(initiallyHidden?"1\n":"0\n");
+   for(const auto& ui:hide.array){appendTextureRule(program,textureRoute(ui,true),"if $skip_ui\nhandling = skip\nendif\n");}
+  }
   appendTextureRule(program,std::move(route),"this = "+resource+"\n");
  }
 };
@@ -2443,7 +2859,8 @@ SkinLogicPass findSkinLogicPass(const LogicSpec& logic,const SourceDraw& draw){
  return {selected,{},draw.gpu.empty()?std::nullopt:hash,draw.gpu};
 }
 bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const std::string& dir,
-                     const std::string& name,const std::string& persistFile,std::vector<uint32_t>& probes,size_t& budget){
+                     const std::string& name,const std::string& persistFile,Catalog& catalog,size_t& budget){
+ auto& probes=catalog.probes;
  const auto legacy=legacyIniDraws(model);
  if(summary.parts.size()!=model.parts.size()||std::any_of(summary.parts.begin(),summary.parts.end(),[&](const auto& part){return part.sourceDraws.empty()&&legacy.empty();}))return false;
  std::vector<SharedSkin> skins;std::vector<SkinImage> pendingImages;
@@ -2456,8 +2873,7 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
  size_t bytes=0;
  for(size_t i=0;i<model.parts.size();i++){
   const auto& part=model.parts[i];const auto& explicitRules=summary.parts[i].sourceDraws;const auto& source=explicitRules.empty()?legacy:explicitRules;
-  require(sharedSkins.size()+skins.size()<T().profileDraws.size(),"Vulkan 部件数超限");
-  const auto profile=unsigned(sharedSkins.size()+skins.size());
+  const auto profile=unsigned(catalog.skins.size()+skins.size());
   std::set<unsigned> slots;unsigned count=0;
   for(const auto& r:source){
    require(r.slot<model::maxSlot&&slots.insert(r.slot).second,"原始 INI 的绘制槽有歧义");
@@ -2476,10 +2892,10 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
    }
   }
   require(!model.logic.driven||skin.logic,"实时 INI 款式缺少可确认的 Vulkan 绘制入口");
-  skin.iniDraws.resize(count);skin.mesh=packVulkanSkin(part,{},count,{},true);
+  skin.iniDraws.resize(count);*skin.mesh=packVulkanSkin(part,{},count,{},true);
   skin.rigid=summary.parts[i].hasTarget&&!summary.parts[i].target.bones;
-  if(skin.rigid)skin.mesh.weights.clear();
-  bytes+=skin.mesh.rest.size()+skin.mesh.weights.size()+skin.mesh.attributes.size()+skin.mesh.indices.size();
+  if(skin.rigid)skin.mesh->weights.clear();
+  bytes+=skin.mesh->rest.size()+skin.mesh->weights.size()+skin.mesh->attributes.size()+skin.mesh->indices.size();
   for(const auto& draw:part.draws){
    if(!draw.sub.count)continue;
    const int slot=explicitRules.empty()?int(draw.row.slot):draw.sourceSlot;
@@ -2490,7 +2906,7 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
    for(size_t role=0;role<std::size(refs);role++){
     const auto& ref=refs[role];if(!ref.present())continue;
     const bool isLinear=ref.linear(role!=0);
-    auto entry=images.try_emplace(std::make_pair(ref.off,isLinear),unsigned(sharedImages.size()+images.size()));
+    auto entry=images.try_emplace(std::make_pair(ref.off,isLinear),unsigned(catalog.images.size()+images.size()));
     slotsForDraw[role]=entry.first->second;if(!entry.second)continue;
     pendingImages.push_back({file,ref,isLinear});
    }
@@ -2501,27 +2917,26 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
   }
   skins.push_back(std::move(skin));
  }
- size_t hashes=probes.size();for(const auto& r:rules)hashes+=std::find(probes.begin(),probes.end(),r.first)==probes.end();
- require(hashes<=vkcap::Tracker::maxDrawHashes&&T().resourceRules.size()+gpuRules.size()<=256,"超过 Vulkan 绘制规则上限");
  require(bytes<=budget,"超过 Vulkan 网格预加载预算");
  budget-=bytes;
- for(auto& rule:gpuRules)T().resourceRules.push_back(std::move(rule));
+ for(auto& rule:gpuRules)catalog.resourceRules.push_back(std::move(rule));
  for(const auto& r:rules){
   if(std::find(probes.begin(),probes.end(),r.first)==probes.end())probes.push_back(r.first);
-  auto& dst=T().iniSkinRules[r.first];dst.insert(dst.end(),r.second.begin(),r.second.end());
+  auto& dst=catalog.iniSkinRules[r.first];dst.insert(dst.end(),r.second.begin(),r.second.end());
  }
  for(auto& skin:skins){
-  if(skin.logic){T().logicResources=true;}
-  sharedSkins.push_back(std::move(skin));T().skinMods.push_back(name);
+  if(skin.logic){catalog.logicResources=true;}
+  catalog.skins.push_back(std::move(skin));catalog.skinMods.push_back(name);
  }
- sharedImages.insert(sharedImages.end(),pendingImages.begin(),pendingImages.end());
+ catalog.images.insert(catalog.images.end(),pendingImages.begin(),pendingImages.end());
  return true;
 }
 }
 #endif
-std::vector<std::string> prepareVulkanTextures(const std::string& shared,const std::vector<std::string>& selected,std::vector<uint32_t>& probes){
- std::vector<std::string> notes;
 #ifdef GIBOX_VK_TINT
+static std::vector<std::string> prepareVulkanTextures(const std::string& shared,const std::vector<std::string>& selected,Catalog& catalog){
+ std::vector<std::string> notes;
+ auto& probes=catalog.probes;
  std::set<std::string> visited;
  pcdb::Db pc;
  pcdb::DeviceMap android,learned;learned.base=&android;
@@ -2533,9 +2948,8 @@ std::vector<std::string> prepareVulkanTextures(const std::string& shared,const s
   const auto manifest=exists(dir+"/texture.json")?"texture.json":exists(dir+"/profile.json")?"profile.json":exists(dir+"/loading.json")?"loading.json":nullptr;
   if(!manifest)continue;
   try{
-   require(texturePrograms.size()<64,"Vulkan 贴图 MOD 数量超限");
    const auto doc=JsonParser(text(dir+"/"+manifest)).parse();
-   TextureImport in(shared,name,dir,manifest,doc);
+   TextureImport in(shared,name,dir,manifest,doc,unsigned(catalog.images.size()));
    if(std::strcmp(manifest,"texture.json")==0){
     if(!readMaps&&std::any_of(doc.at("diag").at("rules").array.begin(),doc.at("diag").at("rules").array.end(),
        [](const auto& row){return !row.at("textures").array.empty()&&texdiag::str(row,"kind")=="hash-unknown"&&texdiag::str(row,"matchVulkan").empty();})){
@@ -2571,34 +2985,30 @@ std::vector<std::string> prepareVulkanTextures(const std::string& shared,const s
     if(rule.ib){add(*rule.ib);}
     for(const auto& term:rule.terms){if(term.slot.kind==vkcap::ResourceKind::Index){add(term.hash);}}
    }
-   require(registered.size()<=vkcap::Tracker::maxDrawHashes,"Vulkan 索引探针超限");
    try{T().rememberLogic(in.program.persistFile,{"",readLogicPersist(in.program.persistFile,"")},false);}catch(const std::exception&){}
    probes.swap(registered);
-   const auto bit=uint64_t(1)<<texturePrograms.size();
+   const auto program=unsigned(catalog.textures.size());
    for(const auto& rule:in.program.rules){
     if(rule.ib){
-     textureIBPrograms[*rule.ib]|=bit;T().renderIndexPrograms[*rule.ib]|=bit;
-     if(rule.total){T().renderIndexLengths[*rule.ib]=rule.total;}
+     catalog.textureIB[*rule.ib].insert(program);catalog.renderIndexPrograms[*rule.ib].insert(program);
+     if(rule.total){catalog.renderIndexLengths[*rule.ib]=rule.total;}
     }
     else{
-     explicitTexturePrograms|=bit;T().renderResourceContexts=true;
-     for(const auto& term:rule.terms){if(term.slot.kind==vkcap::ResourceKind::Index){T().renderIndexPrograms[term.hash]|=bit;}}
+     catalog.textureExplicit.insert(program);catalog.renderResourceContexts=true;
+     for(const auto& term:rule.terms){if(term.slot.kind==vkcap::ResourceKind::Index){catalog.renderIndexPrograms[term.hash].insert(program);}}
     }
    }
-   sharedImages.insert(sharedImages.end(),in.pending.begin(),in.pending.end());
-   T().renderMods.push_back(name);texturePrograms.push_back(std::move(in.program));
-   notes.push_back(name+"：已登记 "+std::to_string(texturePrograms.back().rules.size())+" 条 Vulkan 贴图规则");
+   catalog.images.insert(catalog.images.end(),in.pending.begin(),in.pending.end());
+   catalog.renderMods.push_back(name);catalog.textures.push_back(std::move(in.program));
+   notes.push_back(name+"：已登记 "+std::to_string(catalog.textures.back().rules.size())+" 条 Vulkan 贴图规则");
   }catch(const std::exception& e){notes.push_back(name+"："+e.what()+"，使用原兼容路径");}
  }
-#else
- (void)shared;(void)selected;(void)probes;
-#endif
  return notes;
 }
-std::vector<std::string> prepareVulkanSkins(const std::string& shared,const std::vector<std::string>& selected,std::vector<uint32_t>& probes,
+static std::vector<std::string> prepareVulkanSkins(const std::string& shared,const std::vector<std::string>& selected,Catalog& catalog,
                                           const std::vector<std::string>& compatibility){
  std::vector<std::string> notes;
-#ifdef GIBOX_VK_TINT
+ auto& probes=catalog.probes;
  struct Offline {
   std::ifstream in;std::vector<std::streampos> offsets;
   std::map<std::string,std::vector<std::pair<std::string,size_t>>> owners;
@@ -2623,12 +3033,12 @@ std::vector<std::string> prepareVulkanSkins(const std::string& shared,const std:
   if(std::find(compatibility.begin(),compatibility.end(),name)==compatibility.end())try{
    const auto summary=readSummary(dir);if(summary.animated){notes.push_back(name+"：逐帧动画尚未接入 Vulkan，保留游戏原模");continue;}
    auto m=loadModelFile(dir,false,true,-1,summary.generation);
-   const auto at=sharedSkins.size(),gpuAt=T().resourceRules.size();
+   const auto at=catalog.skins.size(),gpuAt=catalog.resourceRules.size();
    const auto persistFile=logicPersistFile(shared,name);
-   if(prepareIniSkins(summary,*m,dir,name,persistFile,probes,budget)){
-    notes.push_back(name+(gpuAt==T().resourceRules.size()?"：已登记 INI 索引规则，":"：已登记 Vulkan 资源规则，")+
-                    std::to_string(sharedSkins.size()-at)+" 个部件，等待 Vulkan 绘制与实时骨骼");
-    if(std::any_of(sharedSkins.begin()+at,sharedSkins.end(),[](const auto& skin){return bool(skin.logic);})){
+   if(prepareIniSkins(summary,*m,dir,name,persistFile,catalog,budget)){
+    notes.push_back(name+(gpuAt==catalog.resourceRules.size()?"：已登记 INI 索引规则，":"：已登记 Vulkan 资源规则，")+
+                    std::to_string(catalog.skins.size()-at)+" 个部件，等待 Vulkan 绘制与实时骨骼");
+    if(std::any_of(catalog.skins.begin()+at,catalog.skins.end(),[](const auto& skin){return bool(skin.logic);})){
      try{T().rememberLogic(persistFile,{m->logic.mainNs,readLogicPersist(persistFile,m->logic.mainNs)},false);}
      catch(const std::exception& e){notes.push_back(name+"：读取 INI 持久变量失败，"+e.what());}
      notes.push_back(name+"：已登记 Vulkan 实时 INI，使用实验开关“逻辑核心驱动”");
@@ -2704,52 +3114,176 @@ std::vector<std::string> prepareVulkanSkins(const std::string& shared,const std:
      require(matchCount==0||map==mapping,"骨骼映射有歧义");mapping=std::move(map);++matchCount;
     }catch(const std::exception&){if(matchCount)throw;}}
    require(matchCount>0,"离线骨骼没有验证过 "+owner+" / "+t.mesh);
-   SharedSkin skin;skin.originalVertices=t.vertices;skin.bones=t.bones;skin.mesh=packVulkanSkin(part,m->variants.defaults,t.submeshes,mapping);
-   extra+=skin.mesh.rest.size()+skin.mesh.weights.size()+skin.mesh.attributes.size()+skin.mesh.indices.size();
+   SharedSkin skin;skin.originalVertices=t.vertices;skin.bones=t.bones;*skin.mesh=packVulkanSkin(part,m->variants.defaults,t.submeshes,mapping);
+   extra+=skin.mesh->rest.size()+skin.mesh->weights.size()+skin.mesh->attributes.size()+skin.mesh->indices.size();
    skin.images.resize(t.submeshes,~0u);std::vector<Submesh> active;std::vector<Material> materials;activeDraws(part.draws,m->variants.defaults,active,materials);
    std::map<unsigned,std::string> slots;for(size_t j=0;j<materials.size();j++)if(active[j].count){auto& n=slots[materials[j].slot];require(n.empty()||n==materials[j].name,"同一槽位存在不同材质");n=materials[j].name;}
    for(const auto& slot:slots){const auto mt=m->materials.find(slot.second);require(slot.first<t.submeshes&&mt!=m->materials.end(),"材质槽无效");
     const auto& ref=mt->second.mainRef;if(!ref.present())continue;
-    const auto [entry,inserted]=imageIds.try_emplace({ref.off,ref.linear(false)},unsigned(sharedImages.size()+pendingImages.size()));
+    const auto [entry,inserted]=imageIds.try_emplace({ref.off,ref.linear(false)},unsigned(catalog.images.size()+pendingImages.size()));
     skin.images[slot.first]=entry->second;
     if(inserted){pendingImages.push_back({file,ref,false});}
    }
    auto pcHashes=pcSkinHashes(c.summary.parts[i],m->logic,p,table,pc,c.summary.id);
    const auto total=pcdb::indices(p.subs);require(total&&total<=model::maxIndices,"原网格索引超限");
-   const unsigned profile=unsigned(sharedSkins.size()+pending.size());
+   const unsigned profile=unsigned(catalog.skins.size()+pending.size());
    for(const auto& v:c.refs[i]){auto hash=vkcap::drawHash(v.ib);require(bool(hash),"哈希无效");
-    require(!T().skinRoutes.count(*hash)&&std::none_of(routes.begin(),routes.end(),[&](const auto& r){return r.hash==*hash;}),"同一原网格已有优先 MOD");
+    require(!catalog.skinRoutes.count(*hash)&&std::none_of(routes.begin(),routes.end(),[&](const auto& r){return r.hash==*hash;}),"同一原网格已有优先 MOD");
     routes.push_back({*hash,uint32_t(total),profile,p.subs,pcHashes.erase(*hash)!=0});}
    for(uint32_t hash:pcHashes)aliases.push_back({hash,uint32_t(total),profile,p.subs,true});
    pending.push_back(std::move(skin));
   }
-  require(!pending.empty()&&sharedSkins.size()+pending.size()<=64&&extra<=budget,"超过 Vulkan 网格预加载预算");
-  size_t newHashes=0;for(const auto& r:routes)newHashes+=std::find(probes.begin(),probes.end(),r.hash)==probes.end();
-  require(probes.size()+newHashes<=vkcap::Tracker::maxDrawHashes,"超过 Vulkan 索引探针上限");
+  require(!pending.empty()&&extra<=budget,"超过 Vulkan 网格预加载预算");
   const auto pcCount=std::count_if(routes.begin(),routes.end(),[](const auto& route){return route.pcRule;});
-  budget-=extra;for(auto& r:routes){if(std::find(probes.begin(),probes.end(),r.hash)==probes.end())probes.push_back(r.hash);T().skinRoutes.emplace(r.hash,std::move(r));}
+  budget-=extra;for(auto& r:routes){if(std::find(probes.begin(),probes.end(),r.hash)==probes.end())probes.push_back(r.hash);catalog.skinRoutes.emplace(r.hash,std::move(r));}
   optionalRoutes.insert(optionalRoutes.end(),std::make_move_iterator(aliases.begin()),std::make_move_iterator(aliases.end()));
-  for(auto& p:pending){sharedSkins.push_back(std::move(p));T().skinMods.push_back(c.name);}
-  sharedImages.insert(sharedImages.end(),pendingImages.begin(),pendingImages.end());
+  for(auto& p:pending){catalog.skins.push_back(std::move(p));catalog.skinMods.push_back(c.name);}
+  catalog.images.insert(catalog.images.end(),pendingImages.begin(),pendingImages.end());
   notes.push_back(c.name+"：Vulkan 就绪，"+std::to_string(pending.size())+" 个部件，"+std::to_string(pcCount)+" 个已验证 PC 索引哈希，等待游戏绘制确认");
  }catch(const std::exception& e){notes.push_back(c.name+"："+e.what());}
  // Allocate remaining probes to unambiguous PC aliases after all Android routes have been registered.
  std::map<uint32_t,unsigned> aliasCounts;
  for(const auto& route:optionalRoutes)++aliasCounts[route.hash];
  for(auto& route:optionalRoutes){
-  if(aliasCounts[route.hash]!=1||T().skinRoutes.count(route.hash))continue;
+  if(aliasCounts[route.hash]!=1||catalog.skinRoutes.count(route.hash))continue;
   if(std::find(probes.begin(),probes.end(),route.hash)==probes.end()){
-   if(probes.size()==vkcap::Tracker::maxDrawHashes)continue;
    probes.push_back(route.hash);
   }
   char hash[9];std::snprintf(hash,sizeof hash,"%08x",route.hash);
-  notes.push_back(T().skinMods[route.profile]+"：启用 PC 索引哈希 "+hash);
-  T().skinRoutes.emplace(route.hash,std::move(route));
+  notes.push_back(catalog.skinMods[route.profile]+"：启用 PC 索引哈希 "+hash);
+  catalog.skinRoutes.emplace(route.hash,std::move(route));
  }
-#else
- (void)shared;(void)selected;(void)probes;(void)compatibility;
-#endif
  return notes;
+}
+static uint64_t catalogMeshBytes(const Catalog& catalog){
+ uint64_t bytes=0;
+ for(const auto& skin:catalog.skins){
+  bytes+=skin.mesh->rest.size()+skin.mesh->weights.size()+skin.mesh->attributes.size()+skin.mesh->indices.size();
+ }
+ return bytes;
+}
+static void appendPackage(Catalog& dst,const Catalog& pkg){
+ const auto skinBase=unsigned(dst.skins.size()),textureBase=unsigned(dst.textures.size()),imageBase=unsigned(dst.images.size());
+ auto rebaseImage=[&](unsigned& id){if(id!=~0u){id+=imageBase;}};
+ for(auto skin:pkg.skins){
+  for(auto& image:skin.images){rebaseImage(image);}
+  for(auto& draw:skin.iniDraws)for(auto& row:draw)for(auto& image:row.images){rebaseImage(image);}
+  dst.skins.push_back(std::move(skin));
+ }
+ for(auto texture:pkg.textures){
+  for(auto& resource:texture.images)for(auto& frame:resource.second)for(auto& image:frame){rebaseImage(image);}
+  dst.textures.push_back(std::move(texture));
+ }
+ dst.skinMods.insert(dst.skinMods.end(),pkg.skinMods.begin(),pkg.skinMods.end());
+ dst.renderMods.insert(dst.renderMods.end(),pkg.renderMods.begin(),pkg.renderMods.end());
+ dst.images.insert(dst.images.end(),pkg.images.begin(),pkg.images.end());
+ dst.probes.insert(dst.probes.end(),pkg.probes.begin(),pkg.probes.end());
+ dst.notes.insert(dst.notes.end(),pkg.notes.begin(),pkg.notes.end());
+ for(auto route:pkg.resourceRules){route.draw.profile+=skinBase;dst.resourceRules.push_back(std::move(route));}
+ for(const auto& entry:pkg.iniSkinRules)for(auto route:entry.second){
+  route.profile+=skinBase;dst.iniSkinRules[entry.first].push_back(route);
+ }
+ for(auto entry:pkg.skinRoutes){entry.second.profile+=skinBase;dst.skinRoutes.try_emplace(entry.first,std::move(entry.second));}
+ for(const auto& entry:pkg.textureIB)for(unsigned profile:entry.second){dst.textureIB[entry.first].insert(textureBase+profile);}
+ for(const auto& entry:pkg.renderIndexPrograms)for(unsigned profile:entry.second){dst.renderIndexPrograms[entry.first].insert(textureBase+profile);}
+ for(unsigned profile:pkg.textureExplicit){dst.textureExplicit.insert(textureBase+profile);}
+ dst.renderIndexLengths.insert(pkg.renderIndexLengths.begin(),pkg.renderIndexLengths.end());
+ dst.logicResources=dst.logicResources||pkg.logicResources;
+ dst.renderResourceContexts=dst.renderResourceContexts||pkg.renderResourceContexts;
+}
+#endif
+void configureVulkanProbes(std::vector<uint32_t> probes){
+#ifdef GIBOX_VK_TINT
+ std::lock_guard<std::mutex> lock(catalogBuildMutex);configuredProbes=std::move(probes);
+#else
+ (void)probes;
+#endif
+}
+void stageVulkanRegistry(const std::string& shared,const std::vector<std::string>& selected,const std::vector<std::string>& compatibility){
+#ifdef GIBOX_VK_TINT
+ if(!T().hotReload||!T().enabled)return;
+ std::lock_guard<std::mutex> lock(catalogBuildMutex);
+ auto signatureOf=[&]{
+  std::vector<std::string> signature{shared};
+  signature.insert(signature.end(),compatibility.begin(),compatibility.end());
+  signature.emplace_back();
+  for(const auto& name:selected){
+   if(name.empty()||name=="."||name==".."||name.find_first_of("/\\")!=name.npos)continue;
+   signature.push_back(name);
+   for(const auto* manifest:{"model.json","texture.json","profile.json","loading.json"}){
+    struct stat info{};
+    const auto path=shared+"/models/"+name+"/"+manifest;
+    if(stat(path.c_str(),&info)!=0){signature.emplace_back();continue;}
+    signature.push_back(std::to_string(info.st_ino)+":"+std::to_string(info.st_size)+":"+
+                        std::to_string(info.st_mtim.tv_sec)+":"+std::to_string(info.st_mtim.tv_nsec));
+   }
+  }
+  return signature;
+ };
+ auto signature=signatureOf();
+ if(signature==catalogSignature)return;
+ auto next=std::make_shared<Catalog>();
+ next->selected=selected;next->compatibility=compatibility;next->probes=configuredProbes;
+ uint64_t budget=192ull<<20;
+ std::set<std::string> visited;
+ const auto first=1+compatibility.size()+1;
+ for(size_t i=first;i+4<signature.size();i+=5){
+  const auto& name=signature[i];
+  if(!visited.insert(name).second)continue;
+  std::vector<std::string> files(signature.begin()+i,signature.begin()+i+5);
+  files.push_back(shared);
+  files.push_back(std::find(compatibility.begin(),compatibility.end(),name)==compatibility.end()?"":"compatibility");
+  auto& cached=parsedPackages[name];
+  if(cached.signature!=files){
+   CachedPackage prepared;prepared.signature=std::move(files);
+   for(auto& note:prepareVulkanSkins(shared,{name},prepared.content,compatibility)){prepared.content.notes.push_back("vulkan-skin-model "+std::move(note));}
+   for(auto& note:prepareVulkanTextures(shared,{name},prepared.content)){prepared.content.notes.push_back("vulkan-texture-mod "+std::move(note));}
+   cached=std::move(prepared);
+  }
+  const auto bytes=catalogMeshBytes(cached.content);
+  if(bytes>budget){
+   next->notes.push_back("vulkan-skin-model "+name+"：达到模型数据预算，保留原版绘制");
+   parsedPackages.erase(name);continue;
+  }
+  budget-=bytes;appendPackage(*next,cached.content);
+ }
+ for(auto it=parsedPackages.begin();it!=parsedPackages.end();){
+  if(visited.count(it->first)){++it;}else{it=parsedPackages.erase(it);}
+ }
+ std::sort(next->probes.begin(),next->probes.end());
+ next->probes.erase(std::unique(next->probes.begin(),next->probes.end()),next->probes.end());
+ if(signature!=signatureOf())return;
+ catalogSignature=std::move(signature);std::atomic_store(&stagedCatalog,std::move(next));
+#else
+ (void)shared;(void)selected;(void)compatibility;
+#endif
+}
+std::vector<std::string> publishVulkanRegistry(bool enabled,bool unity,const std::vector<std::string>& selected,
+                                             const std::vector<std::string>& compatibility,const std::string& fit,
+                                             const std::function<bool(const std::vector<std::string>&)>& restoreUnity){
+#ifdef GIBOX_VK_TINT
+ auto next=std::atomic_load(&stagedCatalog);
+ if(!next||next->selected!=selected||next->compatibility!=compatibility)return {};
+ if(!restoreUnity(next->renderMods))return {};
+ std::unique_lock<std::shared_mutex> lock(T().registryMutex);
+ // The worker may already have staged a newer conversion. Leave that publication for the next tick.
+ auto expected=next;
+ if(!std::atomic_compare_exchange_strong(&stagedCatalog,&expected,std::shared_ptr<Catalog>{}))return {};
+ const bool sameGeometry=sharedSkins.size()==next->skins.size()&&std::equal(sharedSkins.begin(),sharedSkins.end(),next->skins.begin(),
+  [](const auto& a,const auto& b){return a.mesh==b.mesh;});
+ if(!sameGeometry){++T().skinVersion;}
+ next->notes.insert(next->notes.begin(),"vulkan-reload 规则版本 "+std::to_string(T().registryVersion+1)+
+  "，模型部件 "+std::to_string(next->skins.size())+"，贴图 MOD "+std::to_string(next->textures.size())+
+  "，索引哈希 "+std::to_string(next->probes.size()));
+ T().publishRegistration(std::move(static_cast<vkcap::Registration&>(*next)),next->probes);
+ sharedSkins.swap(next->skins);sharedImages.swap(next->images);
+ texturePrograms.swap(next->textures);textureIBPrograms.swap(next->textureIB);explicitTexturePrograms.swap(next->textureExplicit);
+ ++T().registryVersion;
+ T().setSkinReplacement(enabled,!unity,selected);T().setRenderReplacement(enabled,selected,fit);
+ return std::move(next->notes);
+#else
+ (void)enabled;(void)unity;(void)selected;(void)compatibility;(void)fit;(void)restoreUnity;return {};
+#endif
 }
 void preparePaimonTextures(const std::string& modelDir,bool skin){
 #ifdef GIBOX_VK_TINT

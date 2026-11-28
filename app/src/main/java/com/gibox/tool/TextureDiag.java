@@ -74,7 +74,10 @@ final class TextureDiag {
                 else if (a[0].equals("match_vulkan")) r.put("matchVulkan",lower(a[1]).trim());
                 else if (a[0].equals("match_index_count")) r.put("indexCount",parseInt(a[1].trim(),-2));
                 else if (a[0].equals("match_first_vertex")) r.put("firstVertex",parseInt(a[1].trim(),-2));
-                else if (a[0].equals("match_vertex_count")) r.put("vertexCount",parseInt(a[1].trim(),-2)); }
+                else if (a[0].equals("match_vertex_count")) r.put("vertexCount",parseInt(a[1].trim(),-2));
+                else if (a[0].equals("match_instance_count")) r.put("instances",parseInt(a[1].trim(),-2));
+                else if (a[0].equals("match_first_instance")) r.put("firstInstance",parseInt(a[1].trim(),-2));
+                else if (a[0].equals("match_base_vertex")) r.put("baseVertex",Integer.parseInt(a[1].trim())); }
             walk(ini, s, null, new ArrayList<>(), new HashSet<>(), 0, textures, draws, sets, conds, external, runs, other, notes);
             for (Object o : textures) { @SuppressWarnings("unchecked") Map<String, Object> t = (Map<String, Object>) o; if (t.get("resource") instanceof String) usedResources.add((String) t.get("resource")); }
             for (Object c : conds) { java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$[a-z_][a-z0-9_]*").matcher((String) c); while (m.find()) conditionVars.add(m.group()); }

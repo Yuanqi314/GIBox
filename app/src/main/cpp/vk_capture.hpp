@@ -31,6 +31,9 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
+#include <deque>
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
@@ -137,6 +140,16 @@ struct RenderDraw {
  std::vector<IndexIdentity> indices{};
 };
 struct ResourceRule {IniSkinRule draw;std::vector<ResourceMatch> all;};
+using Profiles=std::set<unsigned>;
+struct Registration {
+ std::vector<std::string> skinMods,renderMods;
+ std::unordered_map<uint32_t,SkinRoute> skinRoutes;
+ std::unordered_map<uint32_t,std::vector<IniSkinRule>> iniSkinRules;
+ std::map<uint32_t,Profiles> renderIndexPrograms;
+ std::map<uint32_t,uint32_t> renderIndexLengths;
+ std::vector<ResourceRule> resourceRules;
+ bool renderResourceContexts=false,logicResources=false;
+};
 struct ResourceSample {ResourceMatch identity;bool compute=false;uint64_t pass=0;uint32_t first=0,count=0;};
 struct ResourceBinding {ResourceKind kind;uint64_t handle=0,offset=0,size=~0ull,generation=0;};
 struct ImageCopy {uint64_t offset;uint32_t rowLength,mip,layer,width,height;bool whole;};
@@ -219,15 +232,16 @@ inline std::optional<uint32_t> namedTextureBinding(const uint32_t* code,size_t w
  return set?binding:std::nullopt;
 }
 inline bool mainTextureBinding(const uint32_t* code,size_t words){return namedTextureBinding(code,words,{"_MainTex"})==0u;}
-inline std::array<unsigned,3> materialTextureBindings(const uint32_t* code,size_t words){
+inline std::array<unsigned,4> materialTextureBindings(const uint32_t* code,size_t words){
  return {namedTextureBinding(code,words,{"_MainTex"}).value_or(~0u),
          namedTextureBinding(code,words,{"_LightMapTex","_LightMap","_LightmapTex","_Lightmap"}).value_or(~0u),
-         namedTextureBinding(code,words,{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"}).value_or(~0u)};
+         namedTextureBinding(code,words,{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"}).value_or(~0u),
+         namedTextureBinding(code,words,{"_ShadowRamp","_ShadowRampTex","_RampTex"}).value_or(~0u)};
 }
 
 // The buffers, memory bindings and host mappings needed to find index data in CPU memory: a staging buffer copied
 // into an index buffer (read when the copy is recorded), or an index buffer in mapped memory (read at its first bind).
-class Tracker {
+class Tracker : public Registration {
  struct UploadHash {uint32_t value=0;uint8_t widths=0;}; // bit 0: raw 16-bit input, bit 1: raw 32-bit input
  struct Upload {uint64_t seq,offset,bytes;std::array<UploadHash,12> hashes{};size_t count=0;};
  struct Probe {uint64_t uploads=0;size_t reported=0;std::vector<Draw> draws;};
@@ -351,18 +365,18 @@ class Tracker {
  // Under the lock: an unmap waits until the bytes are read.
  void noteSkinIndexUpload(uint32_t hash){
   if(auto entry=renderIndexPrograms.find(hash);entry!=renderIndexPrograms.end()){
-   renderIndexUploads.fetch_or(entry->second,std::memory_order_relaxed);
+   renderIndexUploads.insert(entry->second.begin(),entry->second.end());
   }
-  uint64_t profiles=0;
   if(auto rules=iniSkinRules.find(hash);rules!=iniSkinRules.end()){
-   for(const auto& rule:rules->second){if(rule.profile<64){profiles|=uint64_t(1)<<rule.profile;}}
+   for(const auto& rule:rules->second){skinIndexUploads.insert(rule.profile);}
   }
-  if(auto route=skinRoutes.find(hash);route!=skinRoutes.end()&&route->second.profile<64){profiles|=uint64_t(1)<<route->second.profile;}
-  if(profiles){skinIndexUploads.fetch_or(profiles,std::memory_order_relaxed);}
+  if(auto route=skinRoutes.find(hash);route!=skinRoutes.end()){skinIndexUploads.insert(route->second.profile);}
  }
+ Profiles skinIndexUploads,renderIndexUploads;
  void add(const uint8_t* p,uint64_t n,uint64_t buffer,Buffer& dst,uint64_t offset,const char* via){st.uploads++;st.bytes+=n;
   if(!probing()&&out.size()>=maxQueue){st.dropped++;return;}
-  Blob b;b.seq=++seq;b.buffer=buffer;b.offset=offset;b.bytes=uint32_t(n);b.via=via;if(allForms)b.hashes=ibHashes(p,size_t(n));else hashFormat(p,size_t(n),0,b.hashes);
+  Blob b;b.seq=++seq;b.buffer=buffer;b.offset=offset;b.bytes=uint32_t(n);b.via=via;
+  if(allForms||hotReload)b.hashes=ibHashes(p,size_t(n));else hashFormat(p,size_t(n),0,b.hashes);
   if(probing()){
    Upload match{b.seq,offset,n};
    const bool ready=routesReady.load(std::memory_order_acquire);
@@ -376,12 +390,19 @@ class Tracker {
     if(allSkins||renderTextures){noteSkinIndexUpload(h.value);}
    };
    for(const auto& h:b.hashes){
-    if(ready)keep(h);
-    else if(h.variant<4)match.hashes[match.count++]={h.value,3};
+    if(hotReload){
+     const auto width=h.variant>>2;
+     const uint8_t widths=width?uint8_t(width==1?1:2):uint8_t(3);
+     match.hashes[match.count++]={h.value,widths};
+     if(ready){
+      if(auto probe=probes.find(h.value);probe!=probes.end()){++probe->second.uploads;noteSkinIndexUpload(h.value);}
+     }
+    }else if(ready){keep(h);}
+    else if(h.variant<4){match.hashes[match.count++]={h.value,3};}
    }
    // GIMI can hash 32-bit PC indices when the same mesh uses 16-bit indices on Android (or vice versa).
    // Try only widths with a verified PC route for the uploaded byte size.
-   if(ready&&!allForms){
+   if(ready&&!allForms&&!hotReload){
     std::vector<Hash> alternate;
     if(pcIndexBytes16.count(n))indexWidthHashes<uint16_t,uint32_t>(p,size_t(n),1,alternate);
     if(pcIndexBytes32.count(n))indexWidthHashes<uint32_t,uint16_t>(p,size_t(n),2,alternate);
@@ -395,7 +416,7 @@ class Tracker {
   if(n%4==0)for(size_t i=0;i<n/4;i++){uint32_t v;std::memcpy(&v,p+4*i,4);if(v>b.max32)b.max32=v;}
   out.push_back(std::move(b));}
 public:
- static constexpr size_t maxDrawHashes=64,maxDrawsPerHash=64;
+ static constexpr size_t maxDrawsPerHash=64;
  std::atomic<bool> enabled{false};
  std::atomic<bool> routesReady{true};   // early hooks can record raw uploads while startup model data is loaded
  std::atomic<bool> allForms{true};   // false (match / collect): the data as uploaded only, one pass over it
@@ -405,24 +426,24 @@ public:
  bool skinnedModel=false; // this preset uses the captured Vulkan skinning pipeline instead of Unity mesh APIs
  bool allSkins=false;
  bool renderTextures=false;
- bool renderResourceContexts=false; // published with routesReady
- std::vector<std::string> renderMods;
- std::map<uint32_t,uint64_t> renderIndexPrograms;
- std::map<uint32_t,uint32_t> renderIndexLengths;
- std::atomic<uint64_t> renderIndexUploads{0};
- std::atomic<uint64_t> activeRenderMods{0};
- std::array<std::atomic<uint64_t>,64> renderDraws{};
+ bool hotReload=false;
+ mutable std::shared_mutex registryMutex;
+ std::shared_ptr<const Profiles> activeRenderMods=std::make_shared<const Profiles>();
+ std::deque<std::atomic<uint64_t>> renderDraws;
  std::atomic<int> renderLoadingFit{0};
  bool inspectResources=false; // existing hash collection mode, set before installing the loader hooks
- std::vector<ResourceRule> resourceRules; // published with routesReady
- bool logicResources=false; // published with routesReady
  std::atomic<bool> skinLogic{false};
  std::atomic<bool> skinSharedChoices{false};
  bool gpuEnabled()const{
-  return inspectResources||((renderTextures||allSkins)&&(!routesReady.load(std::memory_order_acquire)||
+  return hotReload||inspectResources||((renderTextures||allSkins)&&(!routesReady.load(std::memory_order_acquire)||
          (renderTextures&&renderResourceContexts)||(allSkins&&!resourceRules.empty())));
  }
  bool gpuBuffersEnabled()const{return gpuEnabled()||(allSkins&&logicResources);}
+ std::pair<Profiles,Profiles> takeIndexUploads(){
+  std::lock_guard<std::mutex> lock(m);
+  std::pair<Profiles,Profiles> result;
+  result.first.swap(skinIndexUploads);result.second.swap(renderIndexUploads);return result;
+ }
  std::optional<uint32_t> boundResource(uintptr_t command,const ResourceSlot& slot){
   std::lock_guard<std::mutex> lock(m);return resourceHash(command,false,slot);
  }
@@ -478,15 +499,12 @@ private:
  std::vector<SkinKey> skinKeys;
  std::map<std::string,std::shared_ptr<const LogicPersist>> savedLogicValues,pendingLogicValues;
 public:
- std::vector<std::string> skinMods; // profile index -> mod; published before install
- std::unordered_map<uint32_t,SkinRoute> skinRoutes;
- std::unordered_map<uint32_t,std::vector<IniSkinRule>> iniSkinRules;
  std::shared_ptr<const SkinChoices> skinChoices;
- std::atomic<uint64_t> activeSkins{0},skinMatches{0},sharedDraws{0},sharedMisses{0},originalSkinJobs{0};
- std::atomic<uint64_t> skinIndexUploads{0};
+ std::shared_ptr<const Profiles> activeSkins=std::make_shared<const Profiles>();
+ std::atomic<uint64_t> skinMatches{0},sharedDraws{0},sharedMisses{0},originalSkinJobs{0};
  std::atomic<uint64_t> lightMapDraws{0},normalMapDraws{0};
- std::array<std::atomic<uint64_t>,64> profileDraws{};
- std::array<std::array<std::atomic<uint64_t>,unsigned(SkinPhase::Total)>,64> skinTimes{};
+ std::deque<std::atomic<uint64_t>> profileDraws;
+ std::deque<std::array<std::atomic<uint64_t>,unsigned(SkinPhase::Total)>> skinTimes;
  void noteSkinTime(unsigned profile,SkinPhase phase){
   if(profile>=skinTimes.size())return;
   auto& slot=skinTimes[profile][unsigned(phase)];if(slot.load(std::memory_order_relaxed))return;
@@ -494,22 +512,38 @@ public:
   uint64_t absent=0;slot.compare_exchange_strong(absent,uint64_t(now),std::memory_order_relaxed);
  }
  std::array<std::atomic<uint64_t>,unsigned(SkinMiss::Total)> skinMisses{};
- std::array<std::atomic<uint32_t>,64> skinBoneErrors{}; // required in high bits, live palette in low bits
+ std::deque<std::atomic<uint32_t>> skinBoneErrors; // required in high bits, live palette in low bits
  std::atomic<bool> tintOn{false};
  std::atomic<int> textureUpload{0}; // 0 waiting, 1 queued on the only graphics queue, -1 failed
  std::atomic<bool> indexedDrawSeen{false};
  std::atomic<uint64_t> deviceCreates{0},queueSubmits{0};
+ std::atomic<uint64_t> gpuTextureBytes{0},gpuGeometryBytes{0},gpuEvictions{0},gpuDescriptorSets{0};
  std::atomic<uint64_t> computeDispatches{0},skinKernelDispatches{0},skinOutputCaptures{0};
  std::array<std::atomic<uint64_t>,2> tintDraws{},tintMisses{};
  std::atomic<uint64_t> skinDispatches{0};
- void setDrawHashes(const std::vector<uint32_t>& hashes){
-  std::lock_guard<std::mutex> l(m);probes.clear();pcIndexBytes16.clear();pcIndexBytes32.clear();
-  for(uint32_t hash:hashes){if(probes.size()==maxDrawHashes)break;probes.try_emplace(hash);
+private:
+ void replaceDrawHashes(const std::vector<uint32_t>& hashes){
+  auto previous=std::move(probes);probes.clear();pcIndexBytes16.clear();pcIndexBytes32.clear();
+  skinIndexUploads.clear();renderIndexUploads.clear();
+  for(uint32_t hash:hashes){
+   if(auto found=previous.find(hash);found!=previous.end()){
+    probes.try_emplace(hash,std::move(found->second));previous.erase(found);
+   }else{probes.try_emplace(hash);}
    auto route=skinRoutes.find(hash);if(route!=skinRoutes.end()&&route->second.pcRule){pcIndexBytes16.insert(2ull*route->second.total);pcIndexBytes32.insert(4ull*route->second.total);}
    if(auto texture=renderIndexLengths.find(hash);texture!=renderIndexLengths.end()){
     pcIndexBytes16.insert(2ull*texture->second);pcIndexBytes32.insert(4ull*texture->second);
    }}
-  if(!routesReady.load(std::memory_order_relaxed)){
+  if(hotReload){
+   for(const auto& buffer:buffers)for(const auto& upload:buffer.second.matches){
+    for(size_t i=0;i<upload.count;i++){
+     if(auto probe=probes.find(upload.hashes[i].value);probe!=probes.end()){
+      if(!probe->second.uploads){probe->second.uploads=1;}
+      noteSkinIndexUpload(probe->first);
+     }
+    }
+   }
+   routesReady.store(true,std::memory_order_release);
+  }else if(!routesReady.load(std::memory_order_relaxed)){
    for(auto& b:buffers){auto& uploads=b.second.matches;
     for(auto& u:uploads){
      size_t count=0;
@@ -533,29 +567,54 @@ public:
    routesReady.store(true,std::memory_order_release);
   }
  }
- bool probing()const{return allSkins||renderTextures||inspectResources||!probes.empty();}
+public:
+ void setDrawHashes(const std::vector<uint32_t>& hashes){
+  std::lock_guard<std::mutex> l(m);replaceDrawHashes(hashes);
+ }
+ void publishRegistration(Registration next,const std::vector<uint32_t>& hashes){
+  std::lock_guard<std::mutex> l(m);
+  static_cast<Registration&>(*this)=std::move(next);
+  renderDraws.clear();profileDraws.clear();skinTimes.clear();skinBoneErrors.clear();skinLayoutMisses.clear();
+  resizeProfileStats();
+  replaceDrawHashes(hashes);
+ }
+ void resizeProfileStats(){
+  while(renderDraws.size()<renderMods.size()){renderDraws.emplace_back(0);}
+  while(profileDraws.size()<skinMods.size()){
+   profileDraws.emplace_back(0);skinBoneErrors.emplace_back(0);skinTimes.emplace_back();
+   for(auto& time:skinTimes.back()){time.store(0,std::memory_order_relaxed);}
+  }
+ }
+ uint64_t registryVersion=0,skinVersion=0; // guarded by registryMutex, including readers of the associated arrays
+ bool probing()const{return hotReload||allSkins||renderTextures||inspectResources||!probes.empty();}
  void setRenderReplacement(bool master,const std::vector<std::string>& selected,const std::string& fit){
   if(!routesReady.load(std::memory_order_acquire))return;
-  uint64_t bits=0;
+  resizeProfileStats();
+  auto profiles=std::make_shared<Profiles>();
   if(master&&enabled){
-   for(size_t i=0;i<renderMods.size()&&i<64;i++){
-    if(std::find(selected.begin(),selected.end(),renderMods[i])!=selected.end()){bits|=uint64_t(1)<<i;}
+   for(size_t i=0;i<renderMods.size();i++){
+    if(std::find(selected.begin(),selected.end(),renderMods[i])!=selected.end()){profiles->insert(unsigned(i));}
    }
   }
-  activeRenderMods.store(bits,std::memory_order_relaxed);
+  std::atomic_store(&activeRenderMods,std::shared_ptr<const Profiles>(std::move(profiles)));
   renderLoadingFit.store(fit=="cover"?1:fit=="stretch"?2:0,std::memory_order_relaxed);
  }
  bool ownsRenderMod(const std::string& name)const{
+  std::shared_lock<std::shared_mutex> lock(registryMutex);
   return enabled&&routesReady.load(std::memory_order_acquire)&&std::find(renderMods.begin(),renderMods.end(),name)!=renderMods.end();
  }
  void setPaimonReplacement(bool master,bool tint,const std::string& textureMod){
   if(tintHooks)tintOn.store(master&&(paimonTextureMod.empty()?tint:paimonTextureMod==textureMod),std::memory_order_relaxed);
  }
  void setSkinReplacement(bool master,bool request,const std::vector<std::string>& selected){
-  uint64_t bits=0;if(master&&request)for(size_t i=0;i<skinMods.size()&&i<64;i++)if(std::find(selected.begin(),selected.end(),skinMods[i])!=selected.end())bits|=uint64_t(1)<<i;
-  activeSkins.store(bits,std::memory_order_relaxed);
+  resizeProfileStats();
+  auto profiles=std::make_shared<Profiles>();
+  if(master&&request)for(size_t i=0;i<skinMods.size();i++){
+   if(std::find(selected.begin(),selected.end(),skinMods[i])!=selected.end()){profiles->insert(unsigned(i));}
+  }
+  std::atomic_store(&activeSkins,std::shared_ptr<const Profiles>(std::move(profiles)));
  }
- bool skinActive(unsigned profile)const{return profile<64&&(activeSkins.load(std::memory_order_relaxed)&(uint64_t(1)<<profile));}
+ bool skinActive(unsigned profile)const{return std::atomic_load(&activeSkins)->count(profile)!=0;}
  void noteSkinMiss(SkinMiss why){skinMisses[unsigned(why)].fetch_add(1,std::memory_order_relaxed);}
  void noteSkinLayout(unsigned profile,uintptr_t pipeline,const char* details){
   std::lock_guard<std::mutex> lock(m);
@@ -567,7 +626,10 @@ public:
  }
  void setSkinChoices(const SkinChoices& choices){std::atomic_store(&skinChoices,std::make_shared<const SkinChoices>(choices));}
  bool skinBackendReady()const{return enabled&&allSkins&&textureUpload.load(std::memory_order_relaxed)==1&&indexedDrawSeen.load(std::memory_order_relaxed);}
- bool hasSkin(const std::string& name)const{return std::find(skinMods.begin(),skinMods.end(),name)!=skinMods.end();}
+ bool hasSkin(const std::string& name)const{
+  std::shared_lock<std::shared_mutex> lock(registryMutex);
+  return std::find(skinMods.begin(),skinMods.end(),name)!=skinMods.end();
+ }
  void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc))&&!(gpuBuffersEnabled()&&(usage&resourceUsages))&&!(skinnedModel&&(usage&0x20)&&skinSize(size)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;if(probing())b.generation=++bufferGeneration;buffers[buffer]=std::move(b);}
  void destroyed(uint64_t buffer){std::lock_guard<std::mutex> l(m);buffers.erase(buffer);}
  void bound(uint64_t buffer,uint64_t memory,uint64_t offset){std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end())return;b->second.memory=memory;b->second.memoryOffset=offset;b->second.bound=true;b->second.skinCrc=0;b->second.signatures.clear();}
@@ -735,6 +797,11 @@ public:
    if(hit&&(hit.profile!=profile||hit.slot!=slot)){
     const bool previous=skinActive(hit.profile),next=skinActive(profile);
     if(previous&&!next)return;
+    if(hotReload&&previous&&next&&skinMods[hit.profile]!=skinMods[profile]){
+     if(hit.profile<profile)return;
+     ambiguous=false;
+     hit={profile,slot,relative,count,hash};return;
+    }
     ambiguous=previous==next;
    }
    hit={profile,slot,relative,count,hash};
@@ -802,7 +869,9 @@ inline Tracker& tracker(){static Tracker t;return t;}
 namespace ms::vkhook {
 bool install(std::string& detail);
 void preparePaimonTextures(const std::string& modelDir,bool skin=false);
-std::vector<std::string> prepareVulkanTextures(const std::string& shared,const std::vector<std::string>& selected,std::vector<uint32_t>& probes);
-std::vector<std::string> prepareVulkanSkins(const std::string& shared,const std::vector<std::string>& selected,std::vector<uint32_t>& probes,
-                                          const std::vector<std::string>& compatibility={});
+void configureVulkanProbes(std::vector<uint32_t> probes);
+void stageVulkanRegistry(const std::string& shared,const std::vector<std::string>& selected,const std::vector<std::string>& compatibility);
+std::vector<std::string> publishVulkanRegistry(bool enabled,bool unity,const std::vector<std::string>& selected,
+                                             const std::vector<std::string>& compatibility,const std::string& fit,
+                                             const std::function<bool(const std::vector<std::string>&)>& restoreUnity);
 }

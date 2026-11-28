@@ -59,11 +59,11 @@ struct KeyPress {long long seq=0;size_t file=0;std::string section;bool back=fal
 // full / migrate, test rounds.
 // auto (0.7.60): the game's own per-renderer instance is written in place (its effects keep running on it); a loaded asset
 // or a material another renderer shows is copied first, and the game's instance made from that copy is followed in place.
-struct TexModControl {std::string strategy="auto",lod="full",paimonTextureMod,paimonMeshMod;bool capture=false,paimonTint=false;vkcap::Mode hash=vkcap::Mode::Off;long long testRequest=0;std::vector<std::string> testStrategies{"auto","direct","clone"};int observeMs=4000;};
+struct TexModControl {std::string strategy="auto",lod="full",paimonTextureMod,paimonMeshMod;bool capture=false,paimonTint=false;vkcap::Mode hash=vkcap::Mode::Off;long long testRequest=0;std::vector<std::string> testStrategies{"auto","direct","clone"},vulkanCompatibility;int observeMs=4000;};
 struct ControlState {std::string loadingFit="original";cameraFade::Mode cameraFadeMode=cameraFade::Mode::Original;TexModControl tex;Experiments exp;bool sharedChoices=false,enabled=false,useUnityModels=false,lodPin=true,hideUid=false,npcModels=false,synthesisButton=false;int logLevel=int(Level::Info);std::vector<std::string> selected;long long exportBones=0,refreshBones=0,renderMark=0;unsigned refreshBonesCharacter=0;std::map<std::string,std::map<std::string,int>> variables;std::map<std::string,std::vector<KeyPress>> keys;};
 ControlState parseControl(const std::string& raw){
  Json c=JsonParser(raw).parse();require(c.type==Json::Object,"control.json 不是对象");ControlState s;
- const auto& a=c.at("selected");require(a.type==Json::Array&&a.array.size()<=128,"selected 列表无效");
+ const auto& a=c.at("selected");require(a.type==Json::Array,"selected 列表无效");
  for(auto& v:a.array){require(v.type==Json::String&&!v.string.empty()&&v.string.find('/')==v.string.npos&&v.string!="."&&v.string!="..","selected 名称无效");s.selected.push_back(v.string);}
  auto integerOf=[](const Json& j){if(j.type==Json::Null)return 0LL;require(j.type==Json::Number&&std::floor(j.number)==j.number&&std::abs(j.number)<=9007199254740991.,"control.json 计数值无效");return static_cast<long long>(j.number);};
  s.sharedChoices=c.at("sharedModControl").type==Json::Bool&&c.at("sharedModControl").boolean;
@@ -94,6 +94,7 @@ ControlState parseControl(const std::string& raw){
   s.tex.paimonTint=t.at("vulkanPaimonTint").type==Json::Bool&&t.at("vulkanPaimonTint").boolean;
   if(t.at("vulkanPaimonTextures").type==Json::String)s.tex.paimonTextureMod=t.at("vulkanPaimonTextures").string;
   if(t.at("vulkanPaimonModel").type==Json::String)s.tex.paimonMeshMod=t.at("vulkanPaimonModel").string;
+  for(const auto& name:t.at("vulkanSkinCompatibility").array){if(name.type==Json::String){s.tex.vulkanCompatibility.push_back(name.string);}}
   const auto& ts=t.at("testStrategies");if(ts.type==Json::Array){s.tex.testStrategies.clear();for(auto& v:ts.array)if(v.type==Json::String&&(v.string=="auto"||v.string=="direct"||v.string=="clone")&&s.tex.testStrategies.size()<4)s.tex.testStrategies.push_back(v.string);if(s.tex.testStrategies.empty())s.tex.testStrategies={"auto","direct","clone"};}
   auto ms=integerOf(t.at("observeMs"));if(ms)s.tex.observeMs=int(std::min<long long>(60000,std::max<long long>(1000,ms)));}
  const auto& x=c.at("experiments");if(x.type==Json::Object){auto flag=[&](const char* k){return x.at(k).type==Json::Bool&&x.at(k).boolean;};
@@ -202,6 +203,7 @@ struct Runtime::Impl {
  void pollLoading(){if(loading.updating()||loadingDiscovering){return;}std::shared_ptr<LoadingPrepared> ready;bool enabled=ctl.enabled;std::string fit=ctl.loadingFit;std::vector<std::string> selected=ctl.selected;
   {std::lock_guard<std::mutex> lock(sm);ready.swap(loadingPending);if(pendingControl){enabled=pendingControl->enabled;selected=pendingControl->selected;fit=pendingControl->loadingFit;}}
   if(ready){if(!ready->error.empty())log("loading-image-error",ready->name+"："+ready->error);loading.receive(std::move(ready));}
+  enabled=enabled&&!vkcap::tracker().ownsRenderMod(loading.name());
   bool chosen=enabled&&std::find(selected.begin(),selected.end(),loading.name())!=selected.end();if(chosen&&loading.ready()&&!loading.showing()&&texClock()>=loadingDiscoverAt&&loadingClass&&byvalOffset){
    loadingDiscoverAt=texClock()+1000;loadingDiscovering=true;try{if(!loadingType){require(e.call<Ptr>(abi::classFromType,loadingClass+byvalOffset,1)==loadingClass,"加载界面 Type 校验失败");Ptr type=e.call<Ptr>(abi::typeObject,loadingClass+byvalOffset);require(alive(type),"加载界面 Type 尚未就绪");auto handle=e.call<uint32_t>(abi::pin,type,2,Ptr(0));require(handle!=0,"加载界面 Type 引用失败");loadingType=type;loadingTypeHandle=handle;}
     if(loading.discover(loadingType)){log("loading-image-bind","发现后续加载界面，已接管其背景 Image");}}catch(...){loadingDiscovering=false;throw;}loadingDiscovering=false;}
@@ -315,6 +317,9 @@ struct Runtime::Impl {
 
  // ---------------------------------------------------------------- worker side
  uint64_t logicPersistAt=0;
+#ifndef GIBOX_HOST_TEST
+ uint64_t vulkanScanAt=0;
+#endif
  bool flushLogicPersist(){
   auto& capture=vkcap::tracker();
   const auto dir=shared+"/logic-persist/";
@@ -337,6 +342,13 @@ struct Runtime::Impl {
      // report only the same text failing twice.
      try{auto c=parseControl(raw);loadingWorkerControl=c;controlBad.clear();logLevel.store(c.logLevel);uid::on.store(c.hideUid);cameraFade::mode.store(c.cameraFadeMode);std::lock_guard<std::mutex> l(sm);pendingControl=c;controlError.clear();}
      catch(const std::exception& ex){if(raw!=controlBad){controlBad=raw;controlRaw.clear();}else{std::lock_guard<std::mutex> l(sm);controlError=ex.what();}}}}}catch(const std::exception&){}}
+#ifndef GIBOX_HOST_TEST
+  if(now>=vulkanScanAt){
+   vulkanScanAt=now+250;
+   try{vkhook::stageVulkanRegistry(shared,loadingWorkerControl.selected,loadingWorkerControl.tex.vulkanCompatibility);}
+   catch(const std::exception& ex){log("vulkan-reload-error",ex.what());}
+  }
+#endif
   if(now>=loadingAt){loadingAt=now+250;
    auto compatible=loadingWorkerControl.selected;
    auto& capture=vkcap::tracker();
@@ -1213,12 +1225,18 @@ struct Runtime::Impl {
     "，instanceCount "+std::to_string(draw.instances)+"，firstInstance "+std::to_string(draw.firstInstance));
   }
   if(now>=drawProbeReportAt){drawProbeReportAt=now+10000;auto stats=capture.stats();std::string targets;
+   if(capture.hotReload){
+    log("vulkan-cache","贴图 "+std::to_string(capture.gpuTextureBytes.load(std::memory_order_relaxed)>>10)+" KiB，模型 "+
+        std::to_string(capture.gpuGeometryBytes.load(std::memory_order_relaxed)>>10)+" KiB，描述符 "+
+        std::to_string(capture.gpuDescriptorSets.load(std::memory_order_relaxed))+" 个，已回收贴图 "+
+        std::to_string(capture.gpuEvictions.load(std::memory_order_relaxed))+" 个");
+   }
    for(const auto& p:capture.drawStats()){targets+=(targets.empty()?"":"，")+hex8(p.hash)+"：上传 "+std::to_string(p.uploads)+" / 绘制样本 "+std::to_string(p.draws);}
    log("vulkan-draw-status","函数查询已包装 "+std::to_string(stats.wrapped)+
     " 次，Vulkan 设备创建 "+std::to_string(capture.deviceCreates.load(std::memory_order_relaxed))+
     " 次，队列提交 "+std::to_string(capture.queueSubmits.load(std::memory_order_relaxed))+
     " 次，索引上传 "+std::to_string(stats.uploads)+" 次，哈希命中 "+std::to_string(stats.drawProbeUploads)+" 次，vkCmdDrawIndexed "+std::to_string(stats.indexedDraws)+" 次；"+targets);
-   if(capture.allSkins){auto upload=capture.textureUpload.load(std::memory_order_relaxed);
+   if(capture.allSkins){std::shared_lock<std::shared_mutex> lock(capture.registryMutex);auto upload=capture.textureUpload.load(std::memory_order_relaxed);
     for(const auto& miss:capture.takeSkinLayouts())if(miss.profile<capture.skinMods.size())
      log("vulkan-skin-layout",capture.skinMods[miss.profile]+"，管线 "+hex(miss.pipeline)+"，"+miss.details);
     std::map<std::string,uint64_t> draws;for(size_t i=0;i<capture.skinMods.size();i++){
@@ -1233,7 +1251,7 @@ struct Runtime::Impl {
      const auto n=capture.skinMisses[i].load(std::memory_order_relaxed);if(n)models+="；"+std::string(reasons[i])+" "+std::to_string(n);
     }
     const bool ready=capture.skinBackendReady();
-    log("vulkan-skin-status",std::string(capture.activeSkins.load(std::memory_order_relaxed)?"开启":"关闭")+
+    log("vulkan-skin-status",std::string(!std::atomic_load(&capture.activeSkins)->empty()?"开启":"关闭")+
      (upload==1?"，资源已排入队列":upload<0?"，资源准备失败":"，等待上传")+
      (ctl.useUnityModels?"，使用 Unity 替换":ready?"":"，等待 Vulkan 后端，保留游戏原模")+"，识别 "+std::to_string(capture.skinMatches.load(std::memory_order_relaxed))+
      "，Compute 调用 "+std::to_string(capture.computeDispatches.load(std::memory_order_relaxed))+
@@ -1910,18 +1928,25 @@ struct Runtime::Impl {
    if(drawn(m.replaceWhen,pick(m.variants,v==ctl.variables.end()?std::map<std::string,int>{}:v->second)))out.push_back(&m);}
   return out;}
  struct VulkanActivity {uint64_t draws=0,lastAt=0;};
- std::array<VulkanActivity,64> vulkanActivity{};
- std::array<VulkanActivity,64> vulkanTextureActivity{};
- std::array<bool,64> vulkanFirstSkinSaid{};
- std::array<bool,64> vulkanWaitingSkinSaid{},vulkanFirstTextureSaid{};
+ std::vector<VulkanActivity> vulkanActivity,vulkanTextureActivity;
+ std::vector<bool> vulkanFirstSkinSaid,vulkanWaitingSkinSaid,vulkanFirstTextureSaid;
+ uint64_t vulkanStatusVersion=~0ull;
+ void syncVulkanStatus(const vkcap::Tracker& gpu){
+  if(vulkanStatusVersion==gpu.registryVersion)return;
+  vulkanStatusVersion=gpu.registryVersion;
+  vulkanActivity.assign(gpu.skinMods.size(),{});vulkanTextureActivity.assign(gpu.renderMods.size(),{});
+  vulkanFirstSkinSaid.assign(gpu.skinMods.size(),false);vulkanWaitingSkinSaid.assign(gpu.skinMods.size(),false);
+  vulkanFirstTextureSaid.assign(gpu.renderMods.size(),false);
+ }
  void vulkanTextureStatus(std::vector<std::string>& active,uint64_t now){
   auto& gpu=vkcap::tracker();
   if(!gpu.renderTextures||!gpu.routesReady.load(std::memory_order_acquire))return;
-  const auto enabled=gpu.activeRenderMods.load(std::memory_order_relaxed);
+  std::shared_lock<std::shared_mutex> lock(gpu.registryMutex);syncVulkanStatus(gpu);
+  const auto enabled=std::atomic_load(&gpu.activeRenderMods);
   for(size_t i=0;i<gpu.renderMods.size();i++){
    auto& recent=vulkanTextureActivity[i];
    const auto draws=gpu.renderDraws[i].load(std::memory_order_relaxed);
-   if(!(enabled&(uint64_t(1)<<i))){recent={draws,0};continue;}
+   if(!enabled->count(unsigned(i))){recent={draws,0};continue;}
    if(draws&&!vulkanFirstTextureSaid[i]){
     log("vulkan-texture-draw",gpu.renderMods[i]+"：已按绘制上下文换绑贴图");
     vulkanFirstTextureSaid[i]=true;
@@ -1933,6 +1958,7 @@ struct Runtime::Impl {
  void vulkanFirstSkinTimes(){
   auto& gpu=vkcap::tracker();
   if(!gpu.allSkins||!gpu.routesReady.load(std::memory_order_acquire))return;
+  std::shared_lock<std::shared_mutex> lock(gpu.registryMutex);syncVulkanStatus(gpu);
   using Phase=vkcap::SkinPhase;
   for(size_t i=0;i<gpu.skinMods.size();i++){
    if(vulkanFirstSkinSaid[i])continue;
@@ -1956,15 +1982,18 @@ struct Runtime::Impl {
   }
  }
  std::string vulkanModelStatus(std::vector<std::string>& active,uint64_t now){
-  if(ctl.useUnityModels){vulkanActivity={};return {};}
   auto& capture=vkcap::tracker();
-  if(capture.skinBackendReady())for(size_t i=0;i<capture.skinMods.size();i++){
+  {
+   std::shared_lock<std::shared_mutex> lock(capture.registryMutex);syncVulkanStatus(capture);
+   if(ctl.useUnityModels){std::fill(vulkanActivity.begin(),vulkanActivity.end(),VulkanActivity{});return {};}
+   if(capture.skinBackendReady())for(size_t i=0;i<capture.skinMods.size();i++){
    auto& activity=vulkanActivity[i];const auto count=capture.profileDraws[i].load(std::memory_order_relaxed);
    if(!capture.skinActive(unsigned(i))){activity={count,0};continue;}
    if(count!=activity.draws)activity={count,now};
    if(activity.lastAt&&now-activity.lastAt<=1000){
     const auto& name=capture.skinMods[i];if(std::find(active.begin(),active.end(),name)==active.end())active.push_back(name);
    }
+  }
   }
   for(const auto& m:models)if(std::find(ctl.selected.begin(),ctl.selected.end(),m.name)!=ctl.selected.end()){
    auto v=ctl.variables.find(m.name);
@@ -3478,8 +3507,26 @@ struct Runtime::Impl {
    tickPhase="读取文件与当前角色";wantedNow.clear();bindingTargets.clear();bindingReady=false;if(!worker.background()){workerTick(now);}consume();synthesis.collect();ch=current();bindingStats();tickPhase="骨骼库与预览";
    if(ch.entity&&loginRoot){clearLoginDoor();discoverAt=0;}
    if(ch.config!=shownCharacter){shownCharacter=ch.config;log("character",ch.entity?std::to_string(ch.config):std::string("无"));}
-   try{loading.tick(ctl.enabled,ctl.selected,ctl.loadingFit);}catch(const std::exception& ex){if(loadingError!=ex.what()){loadingError=ex.what();log("loading-image-error",loadingError);}}
-   try{profile.tick(ctl.enabled,ctl.selected,now);}catch(const std::exception& ex){if(profileError!=ex.what()){profileError=ex.what();log("profile-image-error",profileError);}}
+#ifndef GIBOX_HOST_TEST
+   for(const auto& line:vkhook::publishVulkanRegistry(ctl.enabled,ctl.useUnityModels,ctl.selected,ctl.tex.vulkanCompatibility,ctl.loadingFit,[&](const auto& owners){
+    auto owns=[&](const auto& name){return std::find(owners.begin(),owners.end(),name)!=owners.end();};
+    for(const auto& stranded:texStranded){if(stranded&&owns(stranded->mod))return false;}
+    for(auto it=texLive.begin();it!=texLive.end();){
+     if(!it->second||!owns(it->second->mod)){++it;continue;}
+     if(!texRestoreAll(*it->second,"交给 Vulkan"))return false;
+     texDrop(std::move(it->second),true);it=texLive.erase(it);
+    }
+    if(!loading.yieldToVulkan(owners))return false;
+    profile.yieldToVulkan(owners);
+    return true;
+   })){
+    const auto split=line.find(' ');log(line.substr(0,split),line.substr(split+1));
+   }
+#endif
+   auto unityImageSelection=ctl.selected;
+   unityImageSelection.erase(std::remove_if(unityImageSelection.begin(),unityImageSelection.end(),[](const auto& name){return vkcap::tracker().ownsRenderMod(name);}),unityImageSelection.end());
+   try{loading.tick(ctl.enabled,unityImageSelection,ctl.loadingFit);}catch(const std::exception& ex){if(loadingError!=ex.what()){loadingError=ex.what();log("loading-image-error",loadingError);}}
+   try{profile.tick(ctl.enabled,unityImageSelection,now);}catch(const std::exception& ex){if(profileError!=ex.what()){profileError=ex.what();log("profile-image-error",profileError);}}
    try{textureDiagTick(now);}catch(const std::exception& ex){log("texture-diag-unsupported",std::string("本轮诊断中止：")+ex.what());}
    try{textureModTick(now);}catch(const std::exception& ex){log("texture-error",std::string("本轮纯贴图 MOD 处理中止：")+ex.what());}
    try{ibHashTick(now);}catch(const std::exception& ex){log("ib-capture",std::string("本轮中止：")+ex.what());}

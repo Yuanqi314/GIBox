@@ -27,7 +27,7 @@ int main(){
   SkinHit before,after;
   early.drawIndexed(1,3,1,3,0,0,&before);assert(!before);
   early.iniSkinRules[hs[2].value]={{0,1,3,3}};early.setDrawHashes({hs[2].value});
-  assert(early.skinIndexUploads.exchange(0)==1);
+  assert(early.takeIndexUploads().first==Profiles{0});
   early.drawIndexed(1,3,1,3,0,0,&after);
   assert(after&&after.profile==0&&after.slot==1&&early.drawStats().front().uploads==1);
  }
@@ -80,11 +80,11 @@ int main(){
    shader.insert(shader.end(),{(4u<<16)|71u,id,34,set,(4u<<16)|71u,id,33,slot});
   };
   texture("_LightMapTex",2,0,1);
-  assert((materialTextureBindings(shader.data(),shader.size())==std::array<unsigned,3>{~0u,1,~0u}));
+  assert((materialTextureBindings(shader.data(),shader.size())==std::array<unsigned,4>{~0u,1,~0u,~0u}));
   texture("_MainTex",3,0,3);texture("_BumpMap",4,0,2);texture("_PackedShadowRampTex",5,0,4);
-  assert((materialTextureBindings(shader.data(),shader.size())==std::array<unsigned,3>{3,1,2}));
+  assert((materialTextureBindings(shader.data(),shader.size())==std::array<unsigned,4>{3,1,2,~0u}));
   texture("_LightMap",6,0,0);
-  assert((materialTextureBindings(shader.data(),shader.size())==std::array<unsigned,3>{3,~0u,2}));
+  assert((materialTextureBindings(shader.data(),shader.size())==std::array<unsigned,4>{3,~0u,2,~0u}));
  }
  {Tracker probe;probe.allForms=false;probe.probeOnly=true;probe.setDrawHashes({hs[1].value});
   probe.created(1,64,0x40);probe.created(2,32,0x1);probe.bound(1,10,0);probe.bound(2,9,0);probe.mapped(9,0,32,staging);

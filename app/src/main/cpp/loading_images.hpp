@@ -67,6 +67,11 @@ class LoadingScreens {
   catch(...){release(roots);throw;}release(roots);return changed;}
  bool hasCanvas()const{return owner!=0;}
  bool ready()const{return prepared&&!prepared->name.empty();}bool active()const{return applied&&visible;}std::string name()const{return prepared?prepared->name:"";}std::string error()const{return prepared?prepared->error:"";}
+ bool yieldToVulkan(const std::vector<std::string>& owners){
+  if(!prepared||std::find(owners.begin(),owners.end(),prepared->name)==owners.end())return true;
+  if(busy)return false;
+  restore();prepared.reset();return true;
+ }
  void receive(std::shared_ptr<LoadingPrepared> p){prepared=std::move(p);}
  bool matches(Ptr p)const{return p&&p==image;}
  void observe(Ptr canvas,Ptr background){if(busy||!alive(canvas)||!alive(background))return;if(owner==canvas&&image==background&&live())return;
@@ -198,6 +203,14 @@ class ProfileScreens {
   for(auto& view:views)if(!view.object){view={object,now,pin(object),false};break;}
  }
  void receive(std::shared_ptr<ProfilePrepared> next){clear();prepared=std::move(next);scanAt=0;}
+ void yieldToVulkan(const std::vector<std::string>& owners){
+  if(!prepared)return;
+  for(const auto& name:prepared->names){
+   if(!name.empty()&&std::find(owners.begin(),owners.end(),name)!=owners.end()){
+    clear();scanAt=0;return;
+   }
+  }
+ }
  bool ready()const{return prepared&&(!prepared->names[0].empty()||!prepared->names[1].empty());}
  void appendActive(std::vector<std::string>& active)const{
   if(!prepared)return;

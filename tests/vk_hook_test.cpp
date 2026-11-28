@@ -178,17 +178,17 @@ static void tintTrial(){
  skin.drawLayouts[p]={7,{20,{}}};
  sharedSkins.resize(2);skin.profiles.resize(2);
  for(unsigned i=0;i<2;i++){
-  auto& profile=sharedSkins[i];profile.originalVertices=123+i;profile.bones=10+i;profile.mesh.slots[0]={6+i,120+i*3};
+  auto& profile=sharedSkins[i];profile.originalVertices=123+i;profile.bones=10+i;profile.mesh->slots[0]={6+i,120+i*3};
   profile.images={~0u,~0u};auto& gpu=skin.profiles[i];gpu.ready=true;
   gpu.input[Indices].buffer=fake<VkBuffer>((i+1)*1000);gpu.input[Attributes].buffer=fake<VkBuffer>((i+1)*1000+1);
   state.vertex[0]=fake<VkBuffer>((i+1)*100);state.vertex[2]=fake<VkBuffer>((i+1)*100+1);
   const auto rest=fake<VkBuffer>((i+1)*100+2),weights=fake<VkBuffer>((i+1)*100+3);
   skin.seenOutputs[state.vertex[0]]={rest,weights,profile.originalVertices,profile.bones};
-  assert(!tintDraw(c,0,{i,0}).replacement&&skin.sourceProfiles.at({rest,weights})==(1ull<<i));
+  assert(!tintDraw(c,0,{i,0}).replacement&&skin.sourceProfiles.at({rest,weights})==Profiles{i});
   skin.sharedOutput[{state.vertex[0],i}]={{fake<VkBuffer>((i+1)*100+4),{},120},true};
   auto plan=tintDraw(c,0,{i,0});assert(plan.replacement==original&&plan.slot.count==120+i*3&&plan.newIndex==gpu.input[Indices].buffer);
  }
- auto& profile=sharedSkins[1];profile.originalVertices=0;profile.bones=0;profile.mesh.requiredBones=21;
+ auto& profile=sharedSkins[1];profile.originalVertices=0;profile.bones=0;profile.mesh->requiredBones=21;
  profile.iniDraws={{{{8,6},{},{}},{{14,9},{},{}}}};
  for(auto& row:profile.iniDraws[0])row.images={~0u,~0u,~0u};
  profile.variants.vars={{"$vision",{0,1}}};profile.variants.defaults={{"$vision",1}};
@@ -210,7 +210,7 @@ static void tintTrial(){
  static unsigned dispatches=0;
  upCmdDispatch=+[](VkCommandBuffer,uint32_t x,uint32_t y,uint32_t z){assert(x==1&&y==1&&z==1);++dispatches;};
  tintCmdBindDescriptorSets=+[](VkCommandBuffer,VkPipelineBindPoint,VkPipelineLayout,uint32_t,uint32_t,const VkDescriptorSet*,uint32_t,const uint32_t*){};
- profile.mesh.vertices=30;
+ profile.mesh->vertices=30;
  sharedSkinDispatch(d,c,state,dev,job,(seen.vertices+63)/64);
  assert(dispatches==1&&skin.sharedOutput.at({output,1}).revision==skin.seenOutputs.at(output).revision);
  T().iniSkinRules[ms::vkcap::paimonBodyHash]={{1,0,0,26226}};
@@ -238,7 +238,7 @@ static void tintTrial(){
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
  assert((call==std::vector<uintptr_t>{204,204,2000,14,23,101,200,201})&&dispatches==2);
  // A pass can sample the lightmap alone. Use its named slot and preserve the other game sampler and the next draw.
- state.set=original;dev.pipelines[p]=layout;dev.textureSlots[p]={~0u,1,~0u};profile.iniDraws[0][0].images={0,1,~0u};
+ state.set=original;dev.pipelines[p]=layout;dev.textureSlots[p]={~0u,1,~0u,~0u};profile.iniDraws[0][0].images={0,1,~0u};
  tintUpdateDescriptorSets=+[](VkDevice,uint32_t n,const VkWriteDescriptorSet* writes,uint32_t copies,const VkCopyDescriptorSet*){
   assert(n==2&&!copies&&writes[0].dstSet==fake<VkDescriptorSet>(34));
   assert(writes[0].pImageInfo->imageView==fake<VkImageView>(6)&&writes[0].pImageInfo->sampler==fake<VkSampler>(8));
@@ -255,7 +255,7 @@ static void tintTrial(){
  }
  // A texture absent from the upload requests only the sampled role and leaves the game draw intact.
  sharedImages.resize(2);auto lightView=dev.upload.images[1].view;dev.upload.images[1].view={};
- warmSkinImages(dev,1ull<<1,true);
+ warmSkinImages(dev,{1},true);
  assert((dev.upload.warm==std::set<unsigned>{0,1}));
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
  assert((call==std::vector<uintptr_t>{26226})&&dev.upload.requested==std::set<unsigned>{1});
@@ -401,7 +401,7 @@ static void ordinaryTextureTrial(){
  ms::vkhook::appendTextureRule(program,sampled,"if $enabled\nthis = ResourceColor\nendif\n");
  TextureRoute indexed=sampled;indexed.vertices=-1;indexed.ib=paimonBodyHash;indexed.first=0;indexed.count=26226;
  ms::vkhook::appendTextureRule(program,indexed,"this = ResourceColor\n");
- texturePrograms={std::move(program)};explicitTexturePrograms=1;textureIBPrograms[paimonBodyHash]=1;
+ texturePrograms={std::move(program)};explicitTexturePrograms={0};textureIBPrograms[paimonBodyHash]={0};
  tracker.setSkinChoices({});tracker.setRenderReplacement(true,{"texture-trial"},"original");
  assert(tracker.ownsRenderMod("texture-trial"));
  static std::vector<uintptr_t> calls;
@@ -436,6 +436,112 @@ static void ordinaryTextureTrial(){
  calls.clear();onCmdDrawIndexed(command,26226,1,0,0,0);assert((calls==std::vector<uintptr_t>{26226}&&set.images[3].imageView==gameView));
  std::cout<<"Vulkan ordinary textures: PASS (both draw calls, atlas context, INI choices and persistence, original descriptor restoration, no model)\n";
 }
+static void registryReloadTrial(){
+ auto temp=(std::filesystem::temp_directory_path()/"gibox-reload-XXXXXX").string();
+ const auto* root=mkdtemp(temp.data());
+ assert(root);
+ const std::string shared(root);
+ auto& tracker=T();tracker.hotReload=true;tracker.enabled=true;tracker.probeOnly=true;
+ std::vector<uint8_t> data(61224);const uint32_t tail=0x86c821d5;std::memcpy(data.data()+data.size()-4,&tail,4);
+ tracker.created(7001,data.size(),0x40);tracker.bound(7001,7002,0);tracker.mapped(7002,0,data.size(),data.data());
+ tracker.indexBound(7001,0,7003,0);tracker.unmapped(7002);
+ std::vector<uint32_t> probes;
+ for(uint32_t i=0;i<90;i++){probes.push_back(1000+i);}
+ ms::vkhook::configureVulkanProbes(probes);
+ std::vector<std::string> selected;
+ auto write=[&](const std::string& name,const std::string& generation){
+  const auto dir=shared+"/models/"+name;
+  std::filesystem::create_directories(dir+"/textures");
+  ms::write(dir+"/textures/0.rgba",std::string(4,'c'));
+  const std::string doc=R"json({"format":"gibox-texture-mod","version":1,"name":")json"+name+
+    R"json(","generation":")json"+generation+R"json(","character":{"id":1},"variants":{},"textures":[
+    {"resource":"color","file":"textures/0.rgba","width":1,"height":1}],
+    "diag":{"format":"gibox-texture-diag","version":1,"rules":[{"section":"Color","kind":"segment",
+    "hash":"5b4cdc9c","first":0,"textures":[{"slot":"ps-t0","resource":"color","role":"diffuse"}]}]}})json";
+  ms::write(dir+"/texture.json",doc);
+ };
+ for(unsigned i=0;i<70;i++){
+  selected.push_back("Texture"+std::to_string(i));write(selected.back(),"first");
+ }
+ ms::vkhook::stageVulkanRegistry(shared,selected,{});
+ assert(!tracker.ownsRenderMod("Texture69"));
+ const auto restore=[](const auto&){return true;};
+ assert(!ms::vkhook::publishVulkanRegistry(true,false,selected,{},"cover",restore).empty());
+ assert(tracker.ownsRenderMod("Texture69")&&std::atomic_load(&tracker.activeRenderMods)->count(69));
+ assert(tracker.drawStats().size()==91&&tracker.takeIndexUploads().second.count(69));
+ std::vector<ms::vkcap::IndexIdentity> identities;
+ tracker.drawIndexed(7003,26226,1,0,0,0,nullptr,&identities);
+ assert(std::any_of(identities.begin(),identities.end(),[](const auto& id){return id.hash==ms::vkcap::paimonBodyHash;}));
+ ms::vkcap::Tracker meshTracker;meshTracker.hotReload=true;meshTracker.allSkins=true;
+ meshTracker.created(7101,data.size(),0x40);meshTracker.bound(7101,7102,0);meshTracker.mapped(7102,0,data.size(),data.data());
+ meshTracker.indexBound(7101,0,7103,0);meshTracker.unmapped(7102);
+ ms::vkcap::Registration modelRules;
+ for(unsigned i=0;i<72;i++){modelRules.skinMods.push_back("Part"+std::to_string(i));}
+ modelRules.iniSkinRules[ms::vkcap::paimonBodyHash]={{71,0,0,26226}};
+ meshTracker.publishRegistration(std::move(modelRules),{ms::vkcap::paimonBodyHash});
+ meshTracker.setSkinReplacement(true,true,{"Part71"});
+ ms::vkcap::SkinHit hit;
+ meshTracker.drawIndexed(7103,26226,1,0,0,0,&hit);
+ assert(hit&&hit.profile==71&&meshTracker.profileDraws.size()==72);
+ const auto version=tracker.registryVersion;
+ const auto unchanged=sharedImages.front().file;
+ write(selected.back(),"second-version");
+ ms::vkhook::stageVulkanRegistry(shared,selected,{});
+ assert(ms::vkhook::publishVulkanRegistry(true,false,selected,{},"original",[](const auto&){return false;}).empty());
+ assert(tracker.registryVersion==version&&sharedImages.back().file->generation=="first");
+ assert(!ms::vkhook::publishVulkanRegistry(true,false,selected,{},"original",restore).empty());
+ assert(tracker.registryVersion==version+1&&sharedImages.front().file==unchanged&&sharedImages.back().file->generation=="second-version");
+ std::filesystem::remove_all(shared+"/models/"+selected.back());
+ ms::vkhook::stageVulkanRegistry(shared,selected,{});
+ assert(!ms::vkhook::publishVulkanRegistry(true,false,selected,{},"original",restore).empty());
+ assert(!tracker.ownsRenderMod("Texture69")&&tracker.ownsRenderMod("Texture68"));
+ ms::vkhook::stageVulkanRegistry(shared,{},{});
+ ms::vkhook::publishVulkanRegistry(false,false,{},{}, "original",restore);
+ assert(std::atomic_load(&tracker.activeRenderMods)->empty()&&sharedImages.empty());
+ std::filesystem::remove_all(shared);
+ std::cout<<"Vulkan live registry: PASS (preexisting uploads, more than 64 rules and mods, refusable handoff, reconvert and delete)\n";
+}
+static void gpuLifetimeTrial(){
+ const auto device=fake<VkDevice>(8001);
+ const auto parent=fake<VkCommandBuffer>(8002),child=fake<VkCommandBuffer>(8003);
+ auto& state=tintState();
+ auto& dev=state.devices[device];auto& upload=dev.upload;
+ const auto held=fake<VkImageView>(8004),idle=fake<VkImageView>(8005);
+ const auto descriptor=fake<VkDescriptorSet>(8006);
+ const ImageKey heldKey{"file","v1","texture.json","1",0,4,1,1,false,false,0,0};
+ const ImageKey idleKey{"file","v2","texture.json","1",0,4,1,1,false,false,0,0};
+ upload.images={{fake<VkImage>(8007),{},held,64},{fake<VkImage>(8008),{},idle,64}};
+ upload.imageKeys={heldKey,idleKey};upload.imageBytes=128;
+ upload.resident.emplace(heldKey,ResidentImage{upload.images[0],20});
+ upload.resident.emplace(idleKey,ResidentImage{upload.images[1],10});
+ dev.pool=fake<VkDescriptorPool>(8009);dev.allocated=1;dev.clones[descriptor]={{held},1,20};
+ state.commands[parent]={device,TintCmd{}};state.commands[child]={device,TintCmd{}};
+ state.commands[child].second.gpuSets.insert(descriptor);state.commands[child].second.skinCatalogs.insert(8);
+ trackExecutedResources(parent,1,&child);
+ tintBegin(child);
+ const auto& pinsOfParent=state.commands[parent].second;
+ assert(pinsOfParent.gpuSets.count(descriptor)&&pinsOfParent.skinCatalogs.count(8));
+ static std::vector<VkImageView> destroyedViews;
+ static unsigned freed=0,destroyedBuffers=0;
+ tintDestroyImageView=+[](VkDevice,VkImageView view,const VkAllocationCallbacks*){destroyedViews.push_back(view);};
+ tintDestroyImage=+[](VkDevice,VkImage,const VkAllocationCallbacks*){};
+ tintFreeDescriptorSets=+[](VkDevice,VkDescriptorPool,uint32_t n,const VkDescriptorSet*){freed+=n;return VK_SUCCESS;};
+ upDestroyBuffer=+[](VkDevice,VkBuffer,const VkAllocationCallbacks*){++destroyedBuffers;};
+ dev.retiredSkins[8].retired.push_back({fake<VkBuffer>(8011),{},32,32});
+ const CommandPins referenced{pinsOfParent.gpuSets,pinsOfParent.gpuBuffers,pinsOfParent.skinCatalogs};
+ upload.fence=fake<VkFence>(8012);
+ evictImages(device,dev,referenced,64,128);assert(destroyedViews.empty());
+ upload.fence={};
+ evictImages(device,dev,referenced,64,128);
+ collectGpuResources(device,dev,referenced);
+ assert((destroyedViews==std::vector<VkImageView>{idle})&&!destroyedBuffers&&upload.imageBytes==64&&!upload.images[1].view);
+ tintBegin(parent);
+ collectGpuResources(device,dev,{});
+ evictImages(device,dev,{},64,64);
+ assert((destroyedViews==std::vector<VkImageView>{idle,held})&&freed==1&&destroyedBuffers==1&&upload.imageBytes==0);
+ state.commands.erase(parent);state.commands.erase(child);state.devices.erase(device);
+ std::cout<<"Vulkan lifetimes: PASS (upload fence, secondary command pins, LRU, clone and geometry retirement)\n";
+}
 #endif
 int main(){
  const size_t page=size_t(sysconf(_SC_PAGESIZE));auto* code=static_cast<uint32_t*>(mmap(nullptr,page*4,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0));assert(code!=MAP_FAILED);
@@ -459,5 +565,7 @@ int main(){
  vertexLayoutTrial();
  tintTrial();
  ordinaryTextureTrial();
+ registryReloadTrial();
+ gpuLifetimeTrial();
 #endif
 }

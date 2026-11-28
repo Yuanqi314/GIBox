@@ -17,8 +17,9 @@ final class LoadingImages {
         String match=value(section,"match_vulkan");
         if(match.isEmpty())return null;
         Map<String,Object> rule=Json.of("matchVulkan",match.toLowerCase(Locale.ROOT));
-        String[] keys={"match_first_index","match_index_count","match_first_vertex","match_vertex_count"};
-        String[] fields={"first","indexCount","firstVertex","vertexCount"};
+        String[] keys={"match_first_index","match_index_count","match_first_vertex","match_vertex_count",
+                       "match_instance_count","match_first_instance","match_base_vertex"};
+        String[] fields={"first","indexCount","firstVertex","vertexCount","instances","firstInstance","baseVertex"};
         for(int i=0;i<keys.length;i++){
             String number=value(section,keys[i]);
             if(!number.isEmpty())rule.put(fields[i],Long.parseLong(number));
@@ -33,11 +34,12 @@ final class LoadingImages {
         File ini=ini(mod);Json.check(ini!=null,"没有找到加载图片列表（ResourceLS.0 等），请选择对应的加载背景 MOD");
         ModelConverter.Ini parsed=new ModelConverter.Ini(ini.getParentFile(),ini);Map<Integer,File> images=new TreeMap<>();
         Map<String,Object> vulkan=null;
+        List<Object> vulkanHide=new ArrayList<>();
         for(ModelConverter.Section s:parsed.sections.values()){
+            Map<String,Object> rule=vulkanRule(s);
             if(!value(s,"match_aspect").isEmpty()){
-                Map<String,Object> rule=vulkanRule(s);
                 if(rule!=null){Json.check(vulkan==null,"加载图有多条 Vulkan 背景规则");vulkan=rule;}
-            }
+            }else if(rule!=null&&"skip".equalsIgnoreCase(value(s,"handling")))vulkanHide.add(rule);
             Matcher m=Pattern.compile("(?i)^ResourceLS\\.(\\d+)$").matcher(s.name);if(!m.matches())continue;
             int index=Integer.parseInt(m.group(1));Json.check(index<64,"加载图片最多 64 张");
             for(String line:s.lines){String[] kv=line.split("=",2);if(kv.length==2&&kv[0].trim().equalsIgnoreCase("filename"))images.put(index,TextureDiag.resolve(ini.getParentFile(),kv[1].trim()));}
@@ -52,6 +54,7 @@ final class LoadingImages {
             }
             Map<String,Object> doc=Json.of("format","gibox-loading-images","version",1,"name",dest.getName(),"generation","l"+System.currentTimeMillis(),"images",rows,"hideUi",hide,"source",Json.of("path",mod.getAbsolutePath(),"signature",ModLibrary.signature(mod)));
             if(vulkan!=null)doc.put("vulkan",vulkan);
+            if(!vulkanHide.isEmpty())doc.put("vulkanHide",vulkanHide);
             Files.write(new File(tmp,FILE).toPath(),Json.write(doc).getBytes(StandardCharsets.UTF_8));Files.write(new File(tmp,"conversion.log").toPath(),log.toString().getBytes(StandardCharsets.UTF_8));
             ModelConverter.commit(tmp,dest,true);Importer.Result result=new Importer.Result();result.id=Characters.LOADING;result.model=dest;result.summary="加载图片："+rows.size()+" 张，每次加载随机切换；在 MOD 详情中可切换是否隐藏加载提示";return result;
         }finally{if(tmp.exists())ModelConverter.remove(tmp);}
