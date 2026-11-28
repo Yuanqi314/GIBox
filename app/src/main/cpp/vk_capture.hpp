@@ -115,7 +115,7 @@ struct SkinHit {
 };
 struct SkinRoute {uint32_t hash=0,total=0;unsigned profile=0;std::vector<std::pair<uint32_t,uint32_t>> ranges;bool pcRule=false;};
 struct IniSkinRule {unsigned profile=0,slot=0;int64_t first=-1,count=-1;};
-enum class SkinMiss : unsigned {DrawRange,Ambiguous,Graphics,SkinOutput,Bones,Resources,Pose,Total};
+enum class SkinMiss : unsigned {DrawRange,Ambiguous,Graphics,SkinOutput,Bones,Resources,Pose,VertexBindings,Material,ComputeDescriptors,Total};
 using SkinChoices=std::map<std::string,std::map<std::string,int>>;
 inline constexpr uint32_t paimonBodyHash=0x5b4cdc9cu;
 // A narrow test route. Do not allow a partial match (instances, index format, range or base vertex).
@@ -218,6 +218,7 @@ public:
  std::atomic<int> textureUpload{0}; // 0 waiting, 1 queued on the only graphics queue, -1 failed
  std::atomic<bool> indexedDrawSeen{false};
  std::atomic<uint64_t> deviceCreates{0},queueSubmits{0};
+ std::atomic<uint64_t> computeDispatches{0},skinKernelDispatches{0},skinOutputCaptures{0};
  std::array<std::atomic<uint64_t>,2> tintDraws{},tintMisses{};
  std::atomic<uint64_t> skinDispatches{0};
  void setDrawHashes(const std::vector<uint32_t>& hashes){

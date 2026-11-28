@@ -1200,7 +1200,8 @@ struct Runtime::Impl {
       log("vulkan-skin-bounds",capture.skinMods[i]+"：MOD 骨骼索引至少需要 "+std::to_string(bones>>16)+" 根，实时矩阵只有 "+std::to_string(bones&0xffffu)+" 根，保留原版绘制");
     }
     std::string models;for(const auto& entry:draws)models+=(models.empty()?"；":"，")+entry.first+" "+std::to_string(entry.second);
-    static constexpr const char* reasons[]={"绘制范围或实例不符","INI 规则冲突","顶点格式或图形管线不兼容","未识别原版蒙皮输出","骨骼超出实时矩阵","资源未就绪","等待姿势"};
+    static constexpr const char* reasons[]={"绘制范围或实例不符","INI 规则冲突","未登记兼容的顶点布局","未关联原版蒙皮输出","骨骼超出实时矩阵","资源未就绪","等待姿势","顶点缓冲绑定不兼容","贴图绑定未确认","蒙皮描述符不兼容"};
+    static_assert(std::size(reasons)==unsigned(vkcap::SkinMiss::Total));
     for(size_t i=0;i<std::size(reasons);i++){
      const auto n=capture.skinMisses[i].load(std::memory_order_relaxed);if(n)models+="；"+std::string(reasons[i])+" "+std::to_string(n);
     }
@@ -1208,6 +1209,9 @@ struct Runtime::Impl {
     log("vulkan-skin-status",std::string(capture.activeSkins.load(std::memory_order_relaxed)?"开启":"关闭")+
      (upload==1?"，资源已排入队列":upload<0?"，资源准备失败":"，等待上传")+
      (ctl.useUnityModels?"，使用 Unity 替换":ready?"":"，等待 Vulkan 后端，保留游戏原模")+"，识别 "+std::to_string(capture.skinMatches.load(std::memory_order_relaxed))+
+     "，Compute 调用 "+std::to_string(capture.computeDispatches.load(std::memory_order_relaxed))+
+     "，已识别蒙皮管线 "+std::to_string(capture.skinKernelDispatches.load(std::memory_order_relaxed))+
+     "，已识别原版输出 "+std::to_string(capture.skinOutputCaptures.load(std::memory_order_relaxed))+
      "，已匹配原版蒙皮 "+std::to_string(capture.originalSkinJobs.load(std::memory_order_relaxed))+
      "，MOD 蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed))+"，换绑 "+std::to_string(capture.sharedDraws.load(std::memory_order_relaxed))+
      "，保持原样 "+std::to_string(capture.sharedMisses.load(std::memory_order_relaxed))+models);
