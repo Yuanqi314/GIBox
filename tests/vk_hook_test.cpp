@@ -14,6 +14,36 @@ extern "C" int DobbyCodePatch(void* address,uint8_t* buffer,uint32_t size){std::
 static uintptr_t target(uint32_t w,uintptr_t at){int64_t imm=int64_t(w&0x03FFFFFFu);if(imm&0x02000000)imm-=0x04000000;return uintptr_t(int64_t(at)+imm*4);}
 #ifdef GIBOX_VK_TINT
 template<class H>static H fake(uintptr_t id){return reinterpret_cast<H>(id);}
+static void livePixelBindingTrial(){
+ ms::LogicSpec spec;
+ spec.files.push_back({"","",R"ini(
+[Constants]
+global $material = 0
+[ResourceIB]
+[ResourceEffect]
+filename = effect.dds
+[ResourceColor]
+filename = alt_diffuse.dds
+[TextureOverrideBody]
+hash = 11223344
+handling = skip
+ib = ResourceIB
+if $material
+ ps-t8 = ResourceColor
+else
+ ps-t8 = ResourceEffect
+ ps-t69 = null
+endif
+drawindexed = 6, 0, 0
+)ini"});
+ spec.resources={{"resourceib","mesh"},{"resourceeffect","file:effect.dds"},{"resourcecolor","file:alt_diffuse.dds"}};
+ spec.parts["Body"]={{"ib","Body","ib"}};
+ ms::LogicDriver driver(spec,{},ms::LogicDriver::Source::Live);
+ migoto::DrawInfo d;d.live=true;d.checks={"ib"};d.bindings["ib"]=migoto::Ref::game(0x11223344);
+ assert(driver.drawLive("Body",d).total==1);
+ assert(driver.set("$material",1));
+ assert(driver.drawLive("Body",d).signature.empty()); // A real material texture needs a recorded slot.
+}
 static void pcRouteTrial(){
  using namespace ms;
  pcdb::Mesh mesh;mesh.mesh="Body";mesh.avatar="avatar_test";mesh.vertices=100;mesh.subs={{0,120},{120,240}};
@@ -251,6 +281,7 @@ $mode = 1
 [ResourceMod]
 [ResourceGame]
 [ResourcePosition]
+[ResourceBlend]
 [CommandListReplacement]
 ResourceGame = ref ib
 ib = ResourceMod
@@ -274,19 +305,23 @@ endif
 [TextureOverrideVertex]
 )ini";
  std::snprintf(hashes,sizeof hashes,"hash=%08x\nfilter_index=42\n",hash);ini+=hashes;
- ini+="[TextureOverridePosition]\nhash=11223344\nvb0=ResourcePosition\n";
+ ini+="[TextureOverridePosition]\nhash=11223344\nvb0=ResourcePosition\n"
+      "[TextureOverrideBlend]\nhash=55667788\nvb1=ResourceBlend\nhandling=skip\ndraw=100000,0\nvb1=null\n";
  ini+="[TextureOverrideOtherGpu]\n";
  std::snprintf(hashes,sizeof hashes,"hash=%08x\n",ms::vkcap::paimonBodyHash);
  ini+=hashes;ini+="match_vulkan = vb0:12345678\nhandling = skip\n";
- logic->files.push_back({"","",ini});logic->resources["resourcemod"]="modib";logic->resources["resourceposition"]="rest";
+ logic->files.push_back({"","",ini});logic->resources["resourcemod"]="modib";
+ logic->resources["resourceposition"]="rest";logic->resources["resourceblend"]="weights";
  logic->keys={{0,"KeyMode","cycle",false}};
- logic->passes={{"skin",{{"vb0",0x11223344}},{"vb0"},{}},
+ logic->passes={{"skin",{{"vb0",0x11223344},{"vb1",0x55667788}},{"vb0","vb1"},{}},
                 {"Body",{{"ib",ms::vkcap::paimonBodyHash}},{"ib"},{{"first_index",0}}}};
- logic->parts["Body"]={{"ib","Body","ib"},{"position","skin","vb0"}};
+ logic->parts["Body"]={{"ib","Body","ib"},{"position","skin","vb0"},{"blend","skin","vb1"}};
  logic->assignments={{{"$vision",0}}};
- logic->choices={{{"Body","original|kind=drawindexed;count=6;start=0;base=0;ib=modib;position=rest;|kind=drawindexed;count=9;start=6;base=0;ib=modib;position=rest;|"}}};
+ logic->choices={{{"Body","original|kind=drawindexed;count=6;start=0;base=0;ib=modib;position=rest;blend=weights;|"
+                          "kind=drawindexed;count=9;start=6;base=0;ib=modib;position=rest;blend=weights;|"}}};
  profile.logic=logic;profile.logicPasses={{&logic->passes.back(),{}}};
  profile.iniDraws[0][0].images={~0u,~0u,~0u};
+ std::swap(profile.iniDraws[0][0],profile.iniDraws[0][1]); // Row order inherited from another outfit.
  indexLogicRows(profile.logicPasses.front(),*logic,profile.iniDraws.front());
  T().logicResources=true;T().skinLogic=true;
  const auto queue=fake<VkQueue>(999);
@@ -320,6 +355,7 @@ int main(){
  code[128]=0xA9BF7BFDu;code[129]=0x910003FDu;Redirect c;assert(!prepare(reinterpret_cast<uintptr_t>(code+128),&hook,island+16,c,why)&&why.find("不是 [bti] + b 形式的入口，开头为 a9bf7bfd 910003fd")==0&&code[128]==0xA9BF7BFDu);
  std::cout<<"Vulkan stub redirect: PASS (landing pad kept, direct b to our page and back, both ready before writing, other shapes refused)\n";
 #ifdef GIBOX_VK_TINT
+ livePixelBindingTrial();
  pcRouteTrial();
  vertexLayoutTrial();
  tintTrial();

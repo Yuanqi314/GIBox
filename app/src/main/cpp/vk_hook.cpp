@@ -17,6 +17,7 @@
 #include "dobby.h"
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -247,6 +248,41 @@ struct SkinLogicPass {
  std::optional<uint32_t> alias{};
  std::string gpu{};
 };
+bool orderLogicRows(const std::string& signature,const std::vector<SharedSkinDraw>& draws,std::vector<size_t>& rows){
+ if(rows.size()<2)return true;
+ constexpr char field[]="kind=drawindexed;count=";
+ std::vector<uint32_t> counts;
+ for(size_t at=signature.find(field);at!=signature.npos;at=signature.find(field,at)){
+  const auto begin=at+sizeof(field)-1;
+  const auto end=signature.find(';',begin);
+  if(end==signature.npos)return false;
+  uint32_t count=0;
+  if(signature.compare(begin,end-begin,"auto")!=0){
+   const auto last=signature.data()+end;
+   const auto parsed=std::from_chars(signature.data()+begin,last,count);
+   if(parsed.ec!=std::errc{}||parsed.ptr!=last||!count)return false;
+  }
+  counts.push_back(count);
+  at=end+1;
+ }
+ if(counts.size()!=rows.size())return false;
+ if(std::equal(counts.begin(),counts.end(),rows.begin(),[&](uint32_t count,size_t row){
+  return !count||count==draws[row].range.count;
+ }))return true;
+ // The converter stores rows in order of first use across outfits. A later outfit can insert a row earlier
+ // in the INI sequence. Restore that sequence when the recorded index counts identify each packed row.
+ std::map<uint32_t,size_t> byCount;
+ for(auto row:rows){
+  if(!byCount.emplace(draws[row].range.count,row).second)return false;
+ }
+ for(size_t i=0;i<counts.size();i++){
+  const auto found=byCount.find(counts[i]);
+  if(found==byCount.end())return false;
+  rows[i]=found->second;
+  byCount.erase(found);
+ }
+ return true;
+}
 void indexLogicRows(SkinLogicPass& route,const ms::LogicSpec& logic,const std::vector<SharedSkinDraw>& draws){
  if(!route.pass)return;
  for(size_t i=0;i<logic.choices.size();i++){
@@ -255,6 +291,10 @@ void indexLogicRows(SkinLogicPass& route,const ms::LogicSpec& logic,const std::v
   std::vector<size_t> rows;
   for(size_t j=0;j<draws.size();j++){
    if(draws[j].range.count&&ms::drawn(draws[j].when,logic.assignments[i])){rows.push_back(j);}
+  }
+  if(!orderLogicRows(at->second,draws,rows)){
+   route.rows[at->second].reset();
+   continue;
   }
   auto [entry,inserted]=route.rows.try_emplace(at->second,std::move(rows));
   if(inserted||!entry->second)continue;
@@ -1203,7 +1243,7 @@ ms::LogicDriver::LiveDraw skinLogicDraw(TintDevice& device,const SharedSkin& pro
   if(!source){driver.useRelated(pass.name,{});break;}
   auto cached=logic.skinPasses.find(source->revision);
   if(cached==logic.skinPasses.end()){
-   if(logic.skinPasses.size()>=64)return {};
+   if(logic.skinPasses.size()>=64){logic.skinPasses.erase(logic.skinPasses.begin());}
    migoto::DrawInfo d;d.live=true;d.checks=pass.checks;d.call.emplace("vertex_count",float(source->vertices));
    const auto pos=T().liveStorage(in,gpuHandle(source->rest),uint64_t(source->vertices)*40);
    const auto blend=T().liveStorage(in,gpuHandle(source->weights),uint64_t(source->vertices)*32);

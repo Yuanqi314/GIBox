@@ -47,8 +47,15 @@ public:
  // A related pass (for example skinning) can supply resource bindings for the indexed draw.
  RelatedDraw observe(const migoto::DrawInfo& d){
   auto r=engine.draw(d);
-  if(!r.draws.empty()||!r.customShaders.empty()||r.unsupported)return {};
-  return {d.bindings,std::move(r.bindings)};}
+  if(!r.customShaders.empty()||r.unsupported)return {};
+  if(r.draws.empty())return {d.bindings,std::move(r.bindings)};
+  // GIMI's Blend override issues one non-indexed draw for skinning. The converter takes the bindings at
+  // that draw; Vulkan already computes the packed vertices with its own dispatch.
+  if(r.draws.size()!=1)return {};
+  auto& draw=r.draws.front();
+  if(draw.kind!="draw"||(!draw.automatic&&!draw.fromCaller&&
+     (draw.args.size()!=2||!std::isfinite(draw.args[0])||draw.args[0]<=0||draw.args[1]!=0)))return {};
+  return {d.bindings,std::move(draw.bindings)};}
  void useRelated(const std::string& name,const RelatedDraw& related){
   liveBindings[name]=related.original;
   current[name].bindings=related.selected;}
@@ -67,6 +74,7 @@ public:
    for(const auto& binding:draw.bindings){
     const auto original=d.bindings.find(binding.first);
     if(original!=d.bindings.end()&&binding.second==original->second)continue;
+    if(result.skip&&!slots.count(binding.first)&&unusedPixelBinding(binding.first,binding.second))continue;
     if(!slots.count(binding.first)||binding.second.kind!=migoto::Ref::Mod)return {};
    }
    if(i<result.preDraws){plan.pre++;}
@@ -172,6 +180,21 @@ private:
   if(d.kind!="drawindexed")return false;
   if(!d.automatic&&!d.args.empty()&&d.args[0]==0)return true;
   const auto ib=d.bindings.find("ib");return ib!=d.bindings.end()&&ib->second.kind==migoto::Ref::Null;}
+ // The packed material retains diffuse, lightmap and normal textures. Extra PC pixel slots whose resources have
+ // no such role keep the existing Vulkan material effect; slots that may supply a packed role require a signature.
+ bool unusedPixelBinding(const std::string& slot,const migoto::Ref& ref)const{
+  if(slot.rfind("ps-t",0)!=0||slot.size()==4||slot.find_first_not_of("0123456789",4)!=slot.npos)return false;
+  if(ref.kind==migoto::Ref::Null)return true;
+  if(ref.kind!=migoto::Ref::Mod)return false;
+  const auto resource=engine.resources.find(ref.resource);
+  const auto id=spec.resources.find(ref.resource);
+  if(resource==engine.resources.end()||id==spec.resources.end()||id->second.rfind("file:",0)!=0)return false;
+  const auto file=resource->second.values.find("filename");
+  if(file==resource->second.values.end())return false;
+  auto hasRole=[](const std::string& name){
+   return name.find("diffuse")!=name.npos||name.find("lightmap")!=name.npos||name.find("normal")!=name.npos;};
+  const auto name=migoto::lower(file->second);
+  return !hasRole(name.substr(name.find_last_of("/\\")+1))&&!hasRole(migoto::lower(resource->second.shortName));}
  static std::string number(float v){if(std::fabs(v)<1e15f&&v==float(int64_t(v)))return std::to_string(int64_t(v));char b[32];std::snprintf(b,sizeof b,"%.9g",double(v));return b;}
  // What the converter calls a ref: a [Resource] by its identity (file and layout; aliases of one file are one), a game
  // resource by its hash, "null", or "-" when nothing is bound.
