@@ -317,6 +317,7 @@ bool stagePaimon(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u){
 }
 
 ::VkResult uploadOnCreateDevice(VkPhysicalDevice p,const VkDeviceCreateInfo* c,const VkAllocationCallbacks* a,VkDevice* d){
+ T().deviceCreates.fetch_add(1,std::memory_order_relaxed);
  const auto r=upCreateDevice.load()(p,c,a,d);
  if(r==VK_SUCCESS&&c&&d)tintObserve([&](auto& s){auto& u=s.devices[*d].upload;
   VkFormatProperties fmt{};upGetPhysicalDeviceFormatProperties.load()(p,VK_FORMAT_R8G8B8A8_SRGB,&fmt);
@@ -344,6 +345,7 @@ void uploadOnGetDeviceQueue2(VkDevice d,const VkDeviceQueueInfo2* i,VkQueue* q){
  if(r==VK_SUCCESS&&c&&pool)tintObserve([&](auto& s){s.devices[d].families[*pool]=c->queueFamilyIndex;});return r;
 }
 ::VkResult uploadOnQueueSubmit(VkQueue queue,uint32_t n,const VkSubmitInfo* p,VkFence fence){
+ T().queueSubmits.fetch_add(1,std::memory_order_relaxed);
  // The application already serializes this queue. On its sole graphics queue, the copy/barrier submission
  // orders all later draws for this family. Retire staging only after our fence signals, without blocking.
  tintObserve([&](auto& s){auto q=s.queues.find(queue);if(q==s.queues.end())return;

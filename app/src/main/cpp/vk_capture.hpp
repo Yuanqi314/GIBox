@@ -211,6 +211,8 @@ public:
  std::array<std::atomic<uint32_t>,64> skinBoneErrors{}; // required in high bits, live palette in low bits
  std::atomic<bool> tintOn{false};
  std::atomic<int> textureUpload{0}; // 0 waiting, 1 queued on the only graphics queue, -1 failed
+ std::atomic<bool> indexedDrawSeen{false};
+ std::atomic<uint64_t> deviceCreates{0},queueSubmits{0};
  std::array<std::atomic<uint64_t>,2> tintDraws{},tintMisses{};
  std::atomic<uint64_t> skinDispatches{0};
  // Startup only. The wrappers and runtime may read the keys once installation succeeds.
@@ -227,8 +229,8 @@ public:
  bool skinActive(unsigned profile)const{return profile<64&&(activeSkins.load(std::memory_order_relaxed)&(uint64_t(1)<<profile));}
  void noteSkinMiss(SkinMiss why){skinMisses[unsigned(why)].fetch_add(1,std::memory_order_relaxed);}
  void setSkinChoices(const SkinChoices& choices){std::atomic_store(&skinChoices,std::make_shared<const SkinChoices>(choices));}
- bool ownsSkin(const std::string& name)const{return enabled&&allSkins&&textureUpload.load(std::memory_order_relaxed)>=0&&
-  std::find(skinMods.begin(),skinMods.end(),name)!=skinMods.end();}
+ bool skinBackendReady()const{return enabled&&allSkins&&textureUpload.load(std::memory_order_relaxed)==1&&indexedDrawSeen.load(std::memory_order_relaxed);}
+ bool ownsSkin(const std::string& name)const{return skinBackendReady()&&std::find(skinMods.begin(),skinMods.end(),name)!=skinMods.end();}
  void created(uint64_t buffer,uint64_t size,uint32_t usage){if(!(usage&(indexUsage|transferSrc))&&!(skinnedModel&&(usage&0x20)&&skinSize(size)))return;std::lock_guard<std::mutex> l(m);Buffer b;b.size=size;b.usage=usage;if(probing())b.generation=++bufferGeneration;buffers[buffer]=std::move(b);}
  void destroyed(uint64_t buffer){std::lock_guard<std::mutex> l(m);buffers.erase(buffer);}
  void bound(uint64_t buffer,uint64_t memory,uint64_t offset){std::lock_guard<std::mutex> l(m);auto b=buffers.find(buffer);if(b==buffers.end())return;b->second.memory=memory;b->second.memoryOffset=offset;b->second.bound=true;b->second.skinCrc=0;}
@@ -274,6 +276,7 @@ public:
  int drawIndexed(uintptr_t command,uint32_t count,uint32_t instances,uint32_t first,int32_t baseVertex,uint32_t firstInstance,SkinHit* skin=nullptr){
   if(!count||!instances)return -1;
   std::lock_guard<std::mutex> l(m);
+  if(!st.indexedDraws)indexedDrawSeen.store(true,std::memory_order_relaxed);
   st.indexedDraws++;
   auto binding=drawBindings.find(command);if(binding==drawBindings.end())return -1;
   const auto& state=binding->second;

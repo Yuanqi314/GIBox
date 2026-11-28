@@ -1190,7 +1190,10 @@ struct Runtime::Impl {
   }
   if(now>=drawProbeReportAt){drawProbeReportAt=now+10000;auto stats=capture.stats();std::string targets;
    for(const auto& p:capture.drawStats()){targets+=(targets.empty()?"":"，")+hex8(p.hash)+"：上传 "+std::to_string(p.uploads)+" / 绘制样本 "+std::to_string(p.draws);}
-   log("vulkan-draw-status","索引上传 "+std::to_string(stats.uploads)+" 次，哈希命中 "+std::to_string(stats.drawProbeUploads)+" 次，vkCmdDrawIndexed "+std::to_string(stats.indexedDraws)+" 次；"+targets);
+   log("vulkan-draw-status","函数查询已包装 "+std::to_string(stats.wrapped)+
+    " 次，Vulkan 设备创建 "+std::to_string(capture.deviceCreates.load(std::memory_order_relaxed))+
+    " 次，队列提交 "+std::to_string(capture.queueSubmits.load(std::memory_order_relaxed))+
+    " 次，索引上传 "+std::to_string(stats.uploads)+" 次，哈希命中 "+std::to_string(stats.drawProbeUploads)+" 次，vkCmdDrawIndexed "+std::to_string(stats.indexedDraws)+" 次；"+targets);
    if(capture.allSkins){auto upload=capture.textureUpload.load(std::memory_order_relaxed);
     std::map<std::string,uint64_t> draws;for(size_t i=0;i<capture.skinMods.size();i++){
      draws[capture.skinMods[i]]+=capture.profileDraws[i].load(std::memory_order_relaxed);
@@ -1202,8 +1205,10 @@ struct Runtime::Impl {
     for(size_t i=0;i<std::size(reasons);i++){
      const auto n=capture.skinMisses[i].load(std::memory_order_relaxed);if(n)models+="；"+std::string(reasons[i])+" "+std::to_string(n);
     }
+    const bool ready=capture.skinBackendReady();
     log("vulkan-skin-status",std::string(capture.activeSkins.load(std::memory_order_relaxed)?"开启":"关闭")+
-     (upload==1?"，资源已排入队列":upload<0?"，资源准备失败":"，等待上传")+"，识别 "+std::to_string(capture.skinMatches.load(std::memory_order_relaxed))+
+     (upload==1?"，资源已排入队列":upload<0?"，资源准备失败":"，等待上传")+
+     (ready?"":"，Vulkan 尚未接管，保留可用的 Unity 替换")+"，识别 "+std::to_string(capture.skinMatches.load(std::memory_order_relaxed))+
      "，已匹配原版蒙皮 "+std::to_string(capture.originalSkinJobs.load(std::memory_order_relaxed))+
      "，MOD 蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed))+"，换绑 "+std::to_string(capture.sharedDraws.load(std::memory_order_relaxed))+
      "，保持原样 "+std::to_string(capture.sharedMisses.load(std::memory_order_relaxed))+models);

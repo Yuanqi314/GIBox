@@ -1937,5 +1937,23 @@ int main(int argc,char** argv){Fake fake;f=&fake;abi::allocVerified=true;   // t
   for(uint64_t now=9100000;now<9110000;now+=200){lr2.tick(now);}
   l=text(ll2);assert(l.find("layout-wait 仍有 2 种字段组合符合")!=std::string::npos&&l.find("runtime ID 字段 0x3f4、0x464 在每个实体上连续 30 次取值相同，按同一字段处理（0x3f4）")!=std::string::npos);
   lr2.shutdown();store<uint32_t>(ent+0x3f4,0);store<uint32_t>(ent+kConfig,was);}
+ // A registered Vulkan model still uses Unity when the loader hooks see no actual rendering.
+ {const auto handles=f->handles;auto& capture=ms::vkcap::tracker();capture.installed(true,"");capture.allSkins=true;capture.skinMods={"GpuFallback"};
+  capture.textureUpload=0;capture.indexedDrawSeen=false;
+  const auto dir=root+"/vulkan-fallback",sharedGpu=dir+"/"+pkg+"/GIBox";
+  writeModel(sharedGpu+"/models/GpuFallback",Spec().withTarget(fixture::target("Body")));
+  write(sharedGpu+"/control.json","{\"enabled\":true,\"selected\":[\"GpuFallback\"],\"textureMods\":{\"vulkanSkinModels\":true}}");
+  Ptr base=f->mesh("Body"),renderer=f->renderer(base);f->world(renderer);f->scene={renderer};
+  Runtime gpu(e,pkg,root+"/vulkan-fallback-private",dir,false);
+  uint64_t now=20000000;for(unsigned i=0;i<20;i++,now+=100)gpu.tick(now);
+  assert(meshOf(renderer)!=base);
+  capture.textureUpload=1;gpu.tick(now);now+=100;
+  assert(meshOf(renderer)!=base);
+  capture.indexedDrawSeen=true;gpu.tick(now);now+=100;
+  assert(meshOf(renderer)==base);
+  capture.textureUpload=-1;for(unsigned i=0;i<10;i++,now+=100)gpu.tick(now);
+  assert(meshOf(renderer)!=base);
+  gpu.shutdown();assert(meshOf(renderer)==base&&f->handles==handles);
+  capture.installed(false,"");capture.allSkins=false;capture.skinMods.clear();}
  std::cout<<"Native runtime: PASS (NPC / monster texture mods: found in the scene by an index-buffer hash, tied from an upload in match mode, kept with the owner in collect mode; LOD pin: the replaced character held at LOD0 by GetComponent(\"MiHoYoLodLoader\"), searched again, game-held loaders taken over and put back at their level, resumed on every off switch; outfits: a bone library folder per outfit, a skin never written over the original (also next session), an old skin record moved out, previews recorded, models only on their outfit; 7.2 entity fields found by what they hold, waiting while two fit; texture-only diagnostics read-only and cached; logic core: outfits by what the logic selects, App value as input, off, not finite and missing variable refused; App key presses as core key events (cycle, toggle, back, taken once, not replayed at start, refused when not a cycle/toggle key or the core is off), persist saved atomically per model and restored over the App table, not for another INI; driven outfit models (the program picks by clock and keys, the App table not pushed); frames by what the draws select, as FrameLoop, a selection no frame has keeps the frame, no match at the start keeps FrameLoop, switch off; face texture swaps: written, copies tracked, fresh materials, restored, assets copied; direct textures: written, put back, game copies tracked, assets and shared materials copied; merged draws: hidden and non-contiguous ranges, variant switches, separateDraws rebuild; structural capture exit after 30 s preserved, replacement-off restores originals and says so, missing renderer logged once, preload and per-variant textures, material experiments, appearance timeline, hidden party members by library identity, model.bin checked once per file, extra material slots borrow a shader, paired restoration after game material copies, clean palette backups, inherited refresh schedule, temporary material readiness, clones retaken after switch-in, lower-LOD world mesh with the same bones (attach, and build checked against the bone library), indexed skeleton bounds and retry, idle sets released after a minute, version 2 conditional draws switched in place, unverified lower LODs never recorded or built against, bone export only on request, wait reasons in status and log, GIBox model folders and learned.json, skeleton.json library (quiet while loading, reasons once), first-switched-on precedence for two mods of one character, manual import by ID + model name, re-import for another character, XXMI log lines and levels,fingerprint matching, detail-page/asset-reload followers, NPC/skeleton guards, multi-model, idle cache, hot reload, broken-edit fallback, variants, name-matched models, async hand-off attach/build, game mesh put back (hand-off, LOD), game rebinding answered with ours, no magenta after drops, adoption, clone hand-over, update retargeting, bone library, Type from this_arg pairs or array classes, scan-off fallback, failure latch, rollback, GC release, threaded worker)\n";
 }

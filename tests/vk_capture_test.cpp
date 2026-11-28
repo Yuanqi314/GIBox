@@ -4,6 +4,17 @@
 #include <iostream>
 using namespace ms::vkcap;
 int main(){
+ {Tracker backend;backend.enabled=true;backend.allSkins=true;backend.skinMods={"Model"};
+  assert(!backend.ownsSkin("Model")); // A successful loader patch cannot prove activity in the renderer.
+  backend.drawIndexed(1,0,1,0,0,0);backend.textureUpload=1;
+  assert(!backend.ownsSkin("Model"));
+  backend.textureUpload=0;backend.drawIndexed(1,3,1,0,0,0);
+  assert(!backend.ownsSkin("Model"));
+  backend.textureUpload=1;
+  assert(backend.ownsSkin("Model")&&!backend.ownsSkin("Other"));
+  backend.textureUpload=-1;
+  assert(!backend.ownsSkin("Model"));
+ }
  // CRC-32C check value, and crc32c_append: a CRC continued over a second part equals the CRC of both.
  assert(crc32c(0,"123456789",9)==0xE3069283u&&crc32c(0,"",0)==0);
  assert(crc32c(crc32c(0,"1234",4),"56789",5)==0xE3069283u);
