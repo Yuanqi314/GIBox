@@ -23,6 +23,7 @@ internal val features = listOf(
     Feature("替换方式","纯贴图 直接材质 复制材质",Screen.Debug,Glyph.Wrench),
     Feature("使用 Unity 替换","模型 Vulkan 渲染 后端",Screen.Debug,Glyph.Wrench),
     Feature("动画播放方式","缓存帧 动态 暂停",Screen.Debug,Glyph.Wrench),
+    Feature("逻辑核心驱动","INI Vulkan CommandList 款式 按键",Screen.Debug,Glyph.Wrench),
     Feature("不使用 3DMigoto 转换","INI 逻辑 按键",Screen.Debug,Glyph.Wrench),
     Feature("一键重新转换","全部 MOD 转换",Screen.Debug,Glyph.Refresh),
     Feature("导出当前角色骨骼","导出 骨骼",Screen.Debug,Glyph.Person),

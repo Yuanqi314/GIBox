@@ -181,6 +181,7 @@ internal fun DebugScreen(state: AppState, target: String?) {
         val lod = remember(state.game, revision) { state.textureMods("lod", "full") }
         val animation = remember(state.game, revision) { state.experimentInt("animationMode").toString() }
         val lodPin = remember(state.game, revision) { state.lodPin() }
+        val logicCore = remember(state.game, revision) { state.experiment("logicCore") }
         val skip3dm = remember(state.game, revision) { state.experiment("skip3dmConversion") }
         val keySteps = remember(state.game, revision) { state.experiment("keySteps") }
         Group {
@@ -199,6 +200,9 @@ internal fun DebugScreen(state: AppState, target: String?) {
             Divider()
             ChoiceRow("动画播放方式", animation, listOf("0" to "缓存帧网格", "1" to "动态网格", "2" to "暂停（初始帧）"),
                 "切换后自动重建，只影响带动画的 MOD", modifier = focusRow("动画播放方式", target)) { state.setExperiment("animationMode", it.toInt()) }
+            Divider()
+            ToggleRow("逻辑核心驱动", logicCore,
+                modifier = focusRow("逻辑核心驱动", target)) { state.setExperiment("logicCore", it) }
             Divider()
             ToggleRow("不使用 3DMigoto 转换", skip3dm, "开启后使用内置转换器。应用到已有 MOD 需重新转换",
                 modifier = focusRow("不使用 3DMigoto 转换", target)) { state.setExperiment("skip3dmConversion", it) }
