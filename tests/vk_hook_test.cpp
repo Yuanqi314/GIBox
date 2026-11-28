@@ -255,7 +255,7 @@ static void tintTrial(){
  }
  // A texture absent from the upload requests only the sampled role and leaves the game draw intact.
  sharedImages.resize(2);auto lightView=dev.upload.images[1].view;dev.upload.images[1].view={};
- warmSkinImages(dev,{1},true);
+ refreshWarmSelection(dev);
  assert(dev.upload.warm==std::set<unsigned>{1});
  assert((dev.upload.protectedWarm==std::set<unsigned>{0,1}));
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
@@ -619,6 +619,24 @@ static void earlySkinTrial(){
  assert(native==3&&modDispatches==1&&tracker.skinDispatches==extra+1&&!dev.skin.sharedOutput.at({output,91}).nativeOutput);
  std::cout<<"Vulkan pre-dispatch skinning: PASS (GIMI hashes, verified reuse, distinct-input fallback, identity invalidation, incremental catalog)\n";
 }
+static void startupTextureBudgetTrial(){
+ auto& tracker=T();
+ sharedSkins.assign(3,SharedSkin{});
+ tracker.skinMods={"Large","Medium","Small"};
+ tracker.setSkinReplacement(true,true,tracker.skinMods);
+ sharedSkins[0].images={0,1};sharedSkins[1].images={2,~0u};sharedSkins[2].images={3,~0u};
+ sharedImages.resize(5);
+ const std::vector<uint64_t> sizes{64,64,50,38,20};
+ for(size_t i=0;i<sizes.size();i++){sharedImages[i].ref.len=sizes[i]<<20;}
+ texturePrograms.resize(1);texturePrograms[0].images["color"]={{{4,4,4}}};
+ tracker.renderMods={"Texture"};tracker.setRenderReplacement(true,tracker.renderMods,"original");
+ TintDevice dev;
+ dev.skin.profiles.resize(sharedSkins.size());dev.upload.images.resize(sharedImages.size());
+ refreshWarmSelection(dev);
+ assert((dev.upload.warm==std::set<unsigned>{2,3,4})&&dev.upload.warm==dev.upload.protectedWarm);
+ assert(dev.skinPreload.size()==3);
+ std::cout<<"Vulkan startup textures: PASS (small complete sets fit a shared budget across model and texture MODs)\n";
+}
 #endif
 int main(){
  const size_t page=size_t(sysconf(_SC_PAGESIZE));auto* code=static_cast<uint32_t*>(mmap(nullptr,page*4,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0));assert(code!=MAP_FAILED);
@@ -645,5 +663,6 @@ int main(){
  registryReloadTrial();
  gpuLifetimeTrial();
  earlySkinTrial();
+ startupTextureBudgetTrial();
 #endif
 }

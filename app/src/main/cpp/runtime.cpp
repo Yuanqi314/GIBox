@@ -581,7 +581,7 @@ struct Runtime::Impl {
  std::map<std::string,TexPixels> texPixels;   // texture.json path -> decoded textures (the worker fills it, under sm)
  // Texture2D made from them, per mod (not per strategy or test round): kept while the mod is on.
  struct TexStore:Owned {std::map<std::string,Owned> gliderAssets;std::string generation;std::map<std::string,Ptr> made;std::vector<std::pair<std::string,bool>> wanted;size_t next=0;uint64_t ms=0,bytes=0,ticks=0,readyAt=0;unsigned kept=0,lost=0;bool done=false;};
- std::map<std::string,std::unique_ptr<TexStore>> texStores;std::vector<std::unique_ptr<TexStore>> texStoresKept;
+ std::map<std::string,std::unique_ptr<TexStore>> texStores;std::multimap<std::string,std::unique_ptr<TexStore>> texStoresKept;
  struct TexDone {texdiag::Write write;Ptr before=0,ours=0;};
  struct TexSlot {std::string rule,evidence,label,mesh,plan;std::vector<size_t> rules;Ptr renderer=0,native=0,material=0,materialNative=0,clone=0;int slot=-1;bool lod=false;std::vector<TexDone> writes;unsigned again=0;bool gaveUp=false;uint64_t writtenAt=0;
   Ptr previewMesh=0;std::string previewAvatar,npcAvatar;
@@ -686,9 +686,11 @@ struct Runtime::Impl {
   {std::lock_guard<std::mutex> l(sm);auto& p=texPixels[path];if(p.pixels){out=p.pixels;return true;}why=p.error.empty()?"正在读取贴图":p.error;}return false;}
  // As soon as a mod is on: its pixels are read, then one Texture2D is made per tick; a model handed over later finds them.
  void texPrepare(){
+  pruneKeptTexStores();
   for(auto it=texStores.begin();it!=texStores.end();){auto f=texDiagDocs.find(it->first);bool keep=f!=texDiagDocs.end()&&f->second.mod&&texModOn(f->second.mod->name)&&it->second->generation==f->second.mod->generation;
-   if(keep){++it;continue;}{std::lock_guard<std::mutex> lock(sm);texPixels.erase(it->first);}bool held=false;for(auto& L:texStranded)held=held||L->path==it->first;auto live=texLive.find(it->first);held=held||(live!=texLive.end()&&live->second&&!live->second->slots.empty());
-   if(held)texStoresKept.push_back(std::move(it->second));else freeTexStore(*it->second);it=texStores.erase(it);}
+   if(keep){++it;continue;}{std::lock_guard<std::mutex> lock(sm);texPixels.erase(it->first);}
+   if(texStoreInUse(it->first)){texStoresKept.emplace(it->first,std::move(it->second));}else{freeTexStore(*it->second);}
+   it=texStores.erase(it);}
   for(auto& kv:texDiagDocs){auto& f=kv.second;if(!f.mod||!texModOn(f.mod->name))continue;auto& S=texStores[kv.first];
    if(!S){S=std::make_unique<TexStore>();S->generation=f.mod->generation;std::set<std::pair<std::string,bool>> seenKeys;
     for(auto& r:f.mod->doc.rules)for(auto& b:r.textures){if(b.resource.empty()||(b.role!="diffuse"&&b.role!="lightmap"))continue;auto k=std::make_pair(b.resource,b.role!="diffuse");if(seenKeys.insert(k).second)S->wanted.push_back(k);}}
@@ -713,6 +715,17 @@ struct Runtime::Impl {
   auto p=px.find(w.resource);require(p!=px.end(),"贴图 "+w.resource+" 导入时未解码");
   auto doc=texDiagDocs.find(L.path);bool glider=doc!=texDiagDocs.end()&&doc->second.mod&&gliderMod(*doc->second.mod);Ptr t=texStoreMake(*S,p->second,w.linear,key,glider);S->made[key]=t;note=lost?"（已重新创建：之前的被游戏销毁）":"（按需创建，尚未预先准备）";return t;}
  void freeTexStore(TexStore& S){for(auto& x:S.gliderAssets){freeOwned(x.second);}S.gliderAssets.clear();freeOwned(S);}
+ bool texStoreInUse(const std::string& path)const{
+  const auto live=texLive.find(path);
+  if(live!=texLive.end()&&live->second&&!live->second->slots.empty())return true;
+  return std::any_of(texStranded.begin(),texStranded.end(),[&](const auto& item){return item->path==path;});
+ }
+ void pruneKeptTexStores(){
+  for(auto it=texStoresKept.begin();it!=texStoresKept.end();){
+   if(texStoreInUse(it->first)){++it;continue;}
+   freeTexStore(*it->second);it=texStoresKept.erase(it);
+  }
+ }
  Ptr texStoreMake(TexStore& S,const Texture& p,bool linear,const std::string& key,bool glider){if(!glider){return texMake(S,p,linear);}auto& asset=S.gliderAssets[key];freeOwned(asset);bool kept=false;Ptr t=makeTexture(asset,p,linear,&kept);if(kept){S.kept++;}return t;}
  void pruneGliderTextures(){for(auto& kv:texStores){auto& S=*kv.second;if(S.gliderAssets.size()<=8){continue;}std::set<Ptr> held;
    auto keep=[&](const TexLive& L){if(L.path==kv.first){for(const auto& slot:L.slots){for(const auto& w:slot.writes){held.insert(w.ours);}}}};
@@ -853,7 +866,7 @@ struct Runtime::Impl {
   return want;}
  // The scene scan can find a character preview even when the world still controls another avatar.
  // Bootstrap its first mapping only from explicit IB segments with an exact avatar and full mesh fingerprint.
- std::vector<TexTarget> texPreviewTargets(const texdiag::TextureMod& m){
+ std::vector<TexTarget> texPreviewTargets(const texdiag::TextureMod& m,const std::vector<texdiag::Renderer>* handed=nullptr){
   std::vector<TexTarget> out;
   const auto* table=deviceMap();
   if(!table||!bonePolicy)return out;
@@ -867,16 +880,11 @@ struct Runtime::Impl {
    wanted[{mesh->mesh,mesh->vertices}].push_back({i,mesh});
   }
   if(wanted.empty())return out;
-  for(const auto& sn:seen){
-   auto candidate=wanted.find({sn.fp.mesh,sn.fp.vertices});
-   if(candidate==wanted.end()||!seenLive(sn)||!alive(sn.mesh))continue;
-   Ptr r=sn.renderer;
-   try{
-    if(!texUsable(nullptr,r,"")||!npcSource(r).empty()||meshGet(r)!=sn.mesh)continue;
-    auto info=texLightRead(r);
-    if(!info.known()||info.layout.subs.size()!=info.materials.size()||info.lod)continue;
+  auto matchPreview=[&](const texdiag::Renderer& info,const SceneWant& candidate){
+    Ptr r=info.renderer;
+    if(!texUsable(nullptr,r,"")||!npcSource(r).empty()||!info.known()||info.layout.subs.size()!=info.materials.size()||info.lod)return;
     std::set<size_t> verified;
-    for(const auto& w:candidate->second){
+    for(const auto& w:candidate){
      const auto& mesh=*w.second;
      if(info.avatar!=mesh.avatar||normalize(info.name)!=normalize(mesh.renderer)||
         (mesh.bones&&info.bones!=mesh.bones)||info.layout.subs.size()!=mesh.subs.size())continue;
@@ -885,17 +893,29 @@ struct Runtime::Impl {
       same=info.layout.subs[i].start==mesh.subs[i].first&&info.layout.subs[i].count==mesh.subs[i].second;
      if(same)verified.insert(w.first);
     }
-    if(verified.empty())continue;
-    std::vector<texdiag::Renderer> renderers{std::move(info)};
-    const auto& preview=renderers.front();
+    if(verified.empty())return;
     std::map<int,size_t> slots;
-    for(const auto& match:texdiag::match(m.doc,renderers,table)){
+    for(const auto& match:texdiag::match(m.doc,{info},table)){
      if(match.verdict!=texdiag::Verdict::Confirmed||match.renderer!=0||match.slot<0||!verified.count(match.rule))continue;
      auto slot=slots.emplace(match.slot,out.size());
-     if(slot.second)out.push_back({r,preview.native,match.slot,{},"角色预览："+preview.avatar+"，设备 IB 哈希、完整网格和子网格布局一致",
-      texdiag::label(preview),preview.meshName,false,preview.mesh,preview.avatar});
+     if(slot.second)out.push_back({r,info.native,match.slot,{},"角色预览："+info.avatar+"，设备 IB 哈希、完整网格和子网格布局一致",
+      texdiag::label(info),info.meshName,false,info.mesh,info.avatar});
      out[slot.first->second].rules.push_back(match.rule);
     }
+  };
+  if(handed){
+   for(const auto& info:*handed){
+    if(auto candidate=wanted.find({info.meshName,info.vertices});candidate!=wanted.end()){matchPreview(info,candidate->second);}
+   }
+   return out;
+  }
+  for(const auto& sn:seen){
+   auto candidate=wanted.find({sn.fp.mesh,sn.fp.vertices});
+   if(candidate==wanted.end()||!seenLive(sn)||!alive(sn.mesh))continue;
+   Ptr r=sn.renderer;
+   try{
+    if(!texUsable(nullptr,r,"")||meshGet(r)!=sn.mesh)continue;
+    matchPreview(texLightRead(r),candidate->second);
    }catch(const std::exception& ex){texDiagLog("texture-error","preview|"+m.doc.path+"|"+hex(r),m.name+"：读取角色预览："+ex.what());}
   }
   return out;
@@ -1009,7 +1029,8 @@ struct Runtime::Impl {
  bool texRestoreAll(TexLive& L,const std::string& why){bool ok=true;for(auto& s:L.slots)ok=texRestore(L,s,why)&&ok;L.slots.clear();return ok;}
  void texDrop(std::unique_ptr<TexLive> L,bool ok){if(ok){freeOwned(*L);return;}log("texture-restore",texTag(*L)+"：仍有 GIBox 的对象留在游戏中，相关贴图和副本保留，不销毁");texStranded.push_back(std::move(L));}
  void texRestoreEverything(const std::string& why){for(auto& kv:texLive){if(!kv.second)continue;bool ok=texRestoreAll(*kv.second,why);texDrop(std::move(kv.second),ok);}texLive.clear();
-  for(auto& kv:texStores){bool held=false;for(auto& L:texStranded)held=held||L->path==kv.first;if(held)texStoresKept.push_back(std::move(kv.second));else freeTexStore(*kv.second);}texStores.clear();}
+  for(auto& kv:texStores){if(texStoreInUse(kv.first)){texStoresKept.emplace(kv.first,std::move(kv.second));}else{freeTexStore(*kv.second);}}
+  texStores.clear();pruneKeptTexStores();}
  // The slots of one renderer, checked now (every tick, at the game's mesh binding, after its hand-off callback): a
  // material the game replaced or a texture it overwrote is logged with the time since our write and done again.
  void texWatchRenderer(TexLive& L,const texdiag::TextureMod& m,const std::map<std::string,Texture>& px,Ptr r,const std::string& via){
@@ -1095,6 +1116,27 @@ struct Runtime::Impl {
     std::string goAvatar;for(auto& i:infos)if(!i.avatar.empty()){goAvatar=i.avatar;break;}
     std::string want=ch.entity&&m.character==ch.config?controlledAvatar():std::string();bool own=!goAvatar.empty()&&goAvatar==want;
     auto ri=texRecords.find(kv.first);if(!own&&!goAvatar.empty()&&ri!=texRecords.end())for(auto& rec:ri->second)own=own||rec.avatar==goAvatar;
+    if(!own&&(!ch.entity||ch.config!=m.character)&&!goAvatar.empty()&&previewId(goAvatar)==m.character&&texStrategy()!="diagnose"){
+     auto targets=texPreviewTargets(m,&infos);
+     if(!targets.empty()){
+      TexLive* L=nullptr;std::shared_ptr<std::map<std::string,Texture>> px;std::string why;
+      const bool ready=texLiveFor(kv.first,f,texStrategy(),texTestId(),L,px,why)&&texStoreReady(kv.first,why);
+      std::set<Ptr> tracked;
+      for(const auto& target:targets){
+       if(tracked.insert(target.renderer).second){
+        Seen preview{target.renderer,target.previewMesh,fingerprint(target.previewMesh),load<Ptr>(target.renderer),target.native};
+        auto prior=std::find_if(seen.begin(),seen.end(),[&](const Seen& sn){return sn.renderer==target.renderer;});
+        if(prior==seen.end()){seen.push_back(std::move(preview));}else{*prior=std::move(preview);}
+        if(ready){texHanded.push_back(target.renderer);}
+       }
+       auto& timing=texTimes[target.native];if(!timing.matched)timing.matched=texClock();
+       if(!ready||texAssetWait(*L,target,"交接")){texModAt=0;continue;}
+       if(std::any_of(L->slots.begin(),L->slots.end(),[&](const TexSlot& slot){return slot.renderer==target.renderer&&slot.slot==target.slot;}))continue;
+       TexSlot fresh;texApply(*L,m,*px,target,fresh);L->slots.push_back(std::move(fresh));
+      }
+      continue;
+     }
+    }
     if(!own){if(texHandoffSaid.insert(m.name+"|"+goName).second)log("texture-handoff",m.name+"："+goName+"（渲染器 "+std::to_string(infos.size())+" 个，avatar "+(goAvatar.empty()?std::string("未知"):goAvatar)+"）不是角色 "+std::to_string(m.character)+(want.empty()?"":"（"+want+"）")+"，也不在已保存的记录中，不匹配");continue;}
     infos.erase(std::remove_if(infos.begin(),infos.end(),[&](const texdiag::Renderer& i){return i.avatar!=goAvatar;}),infos.end());
     auto matches=texdiag::match(m.doc,infos,deviceMap());unsigned confirmed=0;for(auto& x:matches)confirmed+=x.verdict==texdiag::Verdict::Confirmed;
@@ -1117,7 +1159,7 @@ struct Runtime::Impl {
    for(auto& t:texTargets(kv.first,*f.mod,nullptr)){TexBase b;b.renderer=t.renderer;b.native=t.native;b.slot=t.slot;b.label=t.label;Ptr arr=e.get(abi::getMaterials,t.renderer);if(!arr)continue;auto list=pointers(arr,64);if(size_t(t.slot)>=list.size())continue;b.material=list[size_t(t.slot)];
     for(auto* p:{"_MainTex","_LightMapTex"}){b.textures[p]=e.call<Ptr>(abi::getTexture,b.material,propertyId(p),Ptr(0));}out.push_back(b);}}
   return out;}
- bool texOursTexture(Ptr t){for(auto& kv:texStores)if(kv.second)for(auto& x:kv.second->made)if(x.second==t)return true;for(auto& S:texStoresKept)for(auto& x:S->made)if(x.second==t)return true;return false;}
+ bool texOursTexture(Ptr t){for(auto& kv:texStores)if(kv.second)for(auto& x:kv.second->made)if(x.second==t)return true;for(auto& kv:texStoresKept)for(auto& x:kv.second->made)if(x.second==t)return true;return false;}
  bool texVerify(const std::vector<TexBase>& base,std::string& report){bool ok=true;
   for(auto& b:base){std::string r=b.label+" 槽 "+std::to_string(b.slot)+"：";if(!alive(b.renderer)||load<Ptr>(b.renderer+0x10)!=b.native){report+=r+"渲染器已不存在；";continue;}
    Ptr arr=e.get(abi::getMaterials,b.renderer);auto list=arr?pointers(arr,64):std::vector<Ptr>{};Ptr on=size_t(b.slot)<list.size()?list[size_t(b.slot)]:0;

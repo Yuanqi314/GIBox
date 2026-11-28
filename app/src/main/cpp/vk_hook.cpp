@@ -293,7 +293,6 @@ struct TextureProgram {
 };
 using UploadPixels=std::vector<std::pair<std::shared_ptr<ms::Texture>,bool>>;
 constexpr uint64_t maxResidentSkinTextures=192ull<<20,skinTextureBatch=16ull<<20,gpuBudget=256ull<<20;
-constexpr uint64_t startupSkinTextureBudget=64ull<<20;
 struct TextureUpload {
  VkPhysicalDeviceMemoryProperties memory{};std::set<uint32_t> families;
  bool attempted=false,queued=false;uint32_t usedFamily=0;
@@ -536,7 +535,9 @@ std::vector<std::string> catalogSignature;
 std::shared_ptr<StagedCatalog> stagedCatalog;
 struct CachedPackage {std::vector<std::string> signature;Catalog content;};
 std::map<std::string,CachedPackage> parsedPackages;
-void warmSkinImages(TintDevice& device,const Profiles& profiles,bool startup);
+uint64_t skinBytes(const TintDevice& device);
+std::set<unsigned> selectedSkinImages(TintDevice& device,unsigned profile);
+void requestSkinImages(TintDevice& device,const Profiles& profiles);
 VkImageView skinImage(TextureUpload& upload,unsigned id);
 void queueWarmImage(TextureUpload& upload,unsigned id){
  upload.protectedWarm.insert(id);
@@ -545,19 +546,19 @@ void queueWarmImage(TextureUpload& upload,unsigned id){
   upload.warm.insert(id);
  }
 }
-void warmRenderImages(TextureUpload& upload,const Profiles& profiles,bool startup){
- uint64_t budget=startupSkinTextureBudget;
- for(unsigned profile:profiles){
-  const auto& program=texturePrograms.at(profile);
-  const auto mode=program.loading?unsigned(T().renderLoadingFit.load(std::memory_order_relaxed)):0u;
-  for(const auto& resource:program.images){
-   const auto id=resource.second.front()[mode];
-   if(!startup){skinImage(upload,id);continue;}
-   if(upload.protectedWarm.count(id))continue;
-   const auto bytes=sharedImages[id].ref.len;
-   if(bytes<=budget){queueWarmImage(upload,id);budget-=bytes;}
-  }
+std::set<unsigned> selectedRenderImages(unsigned profile){
+ const auto& program=texturePrograms.at(profile);
+ const auto mode=program.loading?unsigned(T().renderLoadingFit.load(std::memory_order_relaxed)):0u;
+ std::set<unsigned> images;
+ for(const auto& resource:program.images){images.insert(resource.second.front()[mode]);}
+ return images;
+}
+uint64_t missingWarmBytes(const TextureUpload& upload,const std::set<unsigned>& images){
+ uint64_t bytes=0;
+ for(auto id:images){
+  if(!upload.protectedWarm.count(id)){bytes+=sharedImages.at(id).ref.len+65536;}
  }
+ return bytes;
 }
 void refreshWarmSelection(TintDevice& dev){
  const auto skins=std::atomic_load(&T().activeSkins),textures=std::atomic_load(&T().activeRenderMods);
@@ -567,10 +568,32 @@ void refreshWarmSelection(TintDevice& dev){
  dev.warmDirty=false;
  dev.warmedSkins=skins;dev.warmedTextures=textures;dev.warmedChoices=choices;dev.warmedFit=fit;
  dev.upload.warm.clear();dev.upload.protectedWarm.clear();dev.skinPreload.clear();
+ auto geometry=skinBytes(dev);
+ std::vector<std::pair<uint64_t,std::set<unsigned>>> workingSets;
+ auto add=[&](std::set<unsigned> images){
+  if(!images.empty()){workingSets.emplace_back(missingWarmBytes(dev.upload,images),std::move(images));}
+ };
  for(unsigned profile:*skins){
-  if(profile<dev.skin.profiles.size()&&!dev.skin.profiles[profile].ready){dev.skinPreload.insert(profile);}
+  if(profile>=dev.skin.profiles.size()||profile>=sharedSkins.size())continue;
+  const auto& skin=sharedSkins[profile];
+  const auto& mesh=*skin.mesh;
+  if(!dev.skin.profiles[profile].ready){
+   dev.skinPreload.insert(profile);
+   geometry+=mesh.rest.size()+mesh.weights.size()+mesh.attributes.size()+mesh.indices.size()+5*65536;
+  }
+  if(!skin.rigid){geometry+=mesh.rest.size()+65536;}
+  add(selectedSkinImages(dev,profile));
  }
- warmSkinImages(dev,*skins,true);warmRenderImages(dev.upload,*textures,true);
+ for(unsigned profile:*textures){add(selectedRenderImages(profile));}
+ // Fit complete working sets under the shared GPU budget. A large pack must not leave several smaller ones cold.
+ std::stable_sort(workingSets.begin(),workingSets.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+ auto budget=std::min(maxResidentSkinTextures,geometry<gpuBudget?gpuBudget-geometry:0);
+ for(const auto& group:workingSets){
+  const auto bytes=missingWarmBytes(dev.upload,group.second);
+  if(bytes>budget)continue;
+  for(auto id:group.second){queueWarmImage(dev.upload,id);}
+  budget-=bytes;
+ }
 }
 
 // The packed shape preserves each binding and its shader stage flags when cloning a combined-sampler layout.
@@ -1222,7 +1245,7 @@ void serviceUploads(VkQueue queue){
    const auto interested=selectedProfiles(seen,*std::atomic_load(&T().activeSkins));
    if(!interested.empty()){
     for(unsigned profile:interested){ensureSkinInputs(d,it->second,profile);}
-    warmSkinImages(it->second,interested,false);
+    requestSkinImages(it->second,interested);
    }
    if(!it->second.skinPreload.empty()){
     const auto next=it->second.skinPreload.begin();
@@ -1233,7 +1256,9 @@ void serviceUploads(VkQueue queue){
    const auto free=mesh<gpuBudget?gpuBudget-mesh:0;
    const auto limit=std::min(maxResidentSkinTextures,free>u.meshDemand?free-u.meshDemand:0);
    evictImages(d,it->second,pins,0,limit,u.clock%60==0);
-   if(!textured.empty()){warmRenderImages(u,selectedProfiles(textured,*std::atomic_load(&T().activeRenderMods)),false);}
+   for(unsigned profile:selectedProfiles(textured,*std::atomic_load(&T().activeRenderMods))){
+    for(auto id:selectedRenderImages(profile)){skinImage(u,id);}
+   }
    serviceSkinImages(d,queue,family,it->second,pins,limit);
    T().gpuTextureBytes.store(u.imageBytes,std::memory_order_relaxed);
    T().gpuGeometryBytes.store(mesh,std::memory_order_relaxed);
@@ -1821,30 +1846,23 @@ ms::Assignment warmAssignment(TintDevice& device,const SharedSkin& skin,unsigned
  }
  return values;
 }
-void warmSkinImages(TintDevice& device,const Profiles& profiles,bool startup){
- auto& upload=device.upload;
- uint64_t budget=startupSkinTextureBudget;
+std::set<unsigned> selectedSkinImages(TintDevice& device,unsigned profile){
+ const auto& skin=sharedSkins[profile];
+ const auto assignment=warmAssignment(device,skin,profile);
+ if(!ms::drawn(skin.replaceWhen,assignment))return {};
+ std::set<unsigned> images;
+ if(skin.generic()){
+  for(const auto& slot:skin.iniDraws){
+   for(const auto& row:slot){if(ms::drawn(row.when,assignment)){images.insert(row.images.begin(),row.images.end());}}
+  }
+ }else{images.insert(skin.images.begin(),skin.images.end());}
+ images.erase(~0u);
+ return images;
+}
+void requestSkinImages(TintDevice& device,const Profiles& profiles){
  for(unsigned profile:profiles){
   if(profile>=sharedSkins.size()||profile>=device.skin.profiles.size())continue;
-  const auto& skin=sharedSkins[profile];
-  const auto assignment=warmAssignment(device,skin,profile);
-  if(!ms::drawn(skin.replaceWhen,assignment))continue;
-  std::set<unsigned> images;
-  if(skin.generic()){
-   for(const auto& slot:skin.iniDraws){
-    for(const auto& row:slot){if(ms::drawn(row.when,assignment)){images.insert(row.images.begin(),row.images.end());}}
-   }
-  }else{images.insert(skin.images.begin(),skin.images.end());}
-  images.erase(~0u);
-  if(!startup){
-   for(auto id:images){skinImage(upload,id);}
-   continue;
-  }
-  uint64_t bytes=0;
-  for(auto id:images){if(!upload.protectedWarm.count(id)){bytes+=sharedImages.at(id).ref.len;}}
-  if(bytes>budget)continue;
-  for(auto id:images){queueWarmImage(upload,id);}
-  budget-=bytes;
+  for(auto id:selectedSkinImages(device,profile)){skinImage(device.upload,id);}
  }
 }
 void syncSkinLogic(SkinLogic& logic,const SharedSkin& skin,unsigned profile){
@@ -2017,6 +2035,7 @@ void sharedSkinDispatch(VkDevice device,VkCommandBuffer cmd,TintCmd& state,TintD
  if(candidates.empty()&&T().hotReload&&observed.restIdentity.generation&&observed.blendIdentity.generation){
   auto direct=identifySkinInputs(command,observed,*active);
   if(direct.size()==1){
+   requestSkinImages(d,direct);
    candidates.swap(direct);
    s.sourceProfiles[key]=candidates;
    s.sourceVersions[key]={observed.restIdentity,observed.blendIdentity};

@@ -1567,7 +1567,7 @@ int main(int argc,char** argv){Fake fake;f=&fake;abi::allocVerified=true;   // t
   write(sharedQ+"/control.json","{\"enabled\":true,\"selected\":[],\"textureMods\":{\"strategy\":\"direct\"}}");run(1000);
   assert(f->diffuse[mat]==gameTex&&f->diffuse[tmat]==gameTex&&f->diffuse[hmat]==gameTex&&f->diffuse[ainst]==gameTex&&f->diffuse[minst]==gameTex);
   q.shutdown();f->world(0);f->scene={};}
- // Anemolumine is enabled with the original Lumine preview already open while the world controls another character.
+ // Anemolumine can match its first preview at hand-off, and an already open preview when enabled from the App.
  {std::string media=root+"/mediaAnemo",shared=media+"/"+pkg+"/GIBox",mod=shared+"/models/Anemo";
   std::filesystem::create_directories(mod+"/textures");
   Bytes rgba(16,0xff);write(mod+"/textures/0.rgba",rgba.data(),rgba.size());write(mod+"/textures/1.rgba",rgba.data(),rgba.size());
@@ -1589,10 +1589,19 @@ int main(int argc,char** argv){Fake fake;f=&fake;abi::allocVerified=true;   // t
    for(size_t i=0;i<mats.size();i++){mats[i]=f->object("material",std::string("Avatar_Girl_Sword_PlayerGirl_Mat_")+parts[i]);
     f->diffuse[mats[i]]=original;store<uint32_t>(load<Ptr>(mats[i]+0x10)+8,uint32_t(-30-int(i)));}
    f->obj[r].materials=f->array(8,3,mats.data());return mats;};
-  auto mats=materials(preview),wrongMats=materials(wrong);f->world(player);f->scene={player,preview,wrong};
+  auto mats=materials(preview),wrongMats=materials(wrong);f->world(player);f->scene={player};
   auto control=[&](bool on){write(shared+"/control.json",std::string("{\"enabled\":true,\"selected\":[")+(on?"\"Anemo\"":"")+"],\"textureMods\":{\"strategy\":\"direct\"}}");};
-  control(false);auto handles=f->handles.size();Runtime rt(e,pkg,root+"/privateAnemo",media,false);uint64_t t=6900000;
-  auto run=[&]{for(uint64_t end=t+3000;t<end;t+=250)rt.tick(t);};run();control(true);run();
+  control(true);auto handles=f->handles.size();Runtime rt(e,pkg,root+"/privateAnemo",media,false);uint64_t t=6900000;
+  auto run=[&]{for(uint64_t end=t+3000;t<end;t+=250)rt.tick(t);};run();
+  rt.spawned(f->gameObjectOf({wrong}));rt.spawnedAfter();
+  rt.spawned(f->gameObjectOf({preview}));rt.spawnedAfter();
+  const Ptr firstTexture=f->diffuse[mats[1]];
+  assert(firstTexture!=original&&text(shared+"/GIBox Log.txt").find("匹配 +0 ms")!=std::string::npos);
+  for(Ptr mat:wrongMats)assert(f->diffuse[mat]==original);
+  f->scene={player,preview,wrong};control(false);run();
+  assert(!alive(firstTexture));
+  for(Ptr mat:mats)assert(f->diffuse[mat]==original);
+  control(true);run();
   assert(f->diffuse[mats[0]]!=original&&f->diffuse[mats[1]]!=original&&f->diffuse[mats[1]]==f->diffuse[mats[2]]&&f->diffuse[mats[0]]!=f->diffuse[mats[1]]);
   for(Ptr mat:wrongMats)assert(f->diffuse[mat]==original);
   f->scene={player,wrong};run();for(Ptr mat:mats)assert(f->diffuse[mat]==original);
