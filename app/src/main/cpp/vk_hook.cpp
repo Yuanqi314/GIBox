@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <future>
 #include <initializer_list>
 #include <dlfcn.h>
 #include <map>
@@ -231,11 +232,19 @@ struct TintCmd {
  std::map<std::pair<VkBuffer,unsigned>,uint64_t> sharedProduced{};
 };
 struct TextureGpu {VkImage image{};VkDeviceMemory memory{};VkImageView view{};};
+struct SkinImageFile {std::string dir,generation;uint64_t size=0;};
+struct SkinImage {std::shared_ptr<const SkinImageFile> file;ms::TexRef ref;bool linear=false;};
+using UploadPixels=std::vector<std::pair<std::shared_ptr<ms::Texture>,bool>>;
+constexpr uint64_t maxResidentSkinTextures=192ull<<20,skinTextureBatch=16ull<<20;
 struct TextureUpload {
  VkPhysicalDeviceMemoryProperties memory{};std::set<uint32_t> families;
  bool attempted=false,queued=false;uint32_t usedFamily=0;
  std::vector<TextureGpu> images{TextureGpu{},TextureGpu{}};
  VkCommandPool pool{};VkBuffer staging{};VkDeviceMemory stagingMemory{};VkFence fence{};
+ uint64_t imageBytes=0;
+ std::set<unsigned> requested,unavailable;
+ std::vector<unsigned> readingIds;
+ std::future<UploadPixels> reading;
 };
 struct SkinBuffer {VkBuffer buffer{};VkDeviceMemory memory{};VkDeviceSize size=0;};
 enum SkinStream {Rest=0,Weights,Attributes,Indices,Count,SkinStreamCount};
@@ -378,8 +387,7 @@ TintState& tintState(){static TintState state;return state;}
 std::array<std::shared_ptr<ms::Texture>,2> paimonPixels; // immutable after startup
 ms::VulkanSkinPayload paimonSkin; // immutable after startup
 std::vector<SharedSkin> sharedSkins;
-std::vector<std::shared_ptr<ms::Texture>> sharedPixels;
-std::vector<bool> sharedLinear;
+std::vector<SkinImage> sharedImages;
 
 // Shader access flags (in addition to descriptor types/count) are part of set compatibility. Here every
 // layout has contiguous combined samplers; accept only the layouts seen for this Body in the capture.
@@ -484,20 +492,20 @@ void releaseSkin(VkDevice d,SkinDevice& s){
  for(auto& b:s.retired)releaseSkinBuffer(d,b);
  s.pool={};s.storage={};s.uniform={};s.ready=false;
 }
-bool stagePaimon(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u){
- const std::vector<std::shared_ptr<ms::Texture>> lookup=T().allSkins?sharedPixels:std::vector<std::shared_ptr<ms::Texture>>(paimonPixels.begin(),paimonPixels.end());
- if(T().allSkins&&lookup.empty()){u.images.clear();u.usedFamily=family;u.queued=true;return true;}
- if(lookup.empty()||std::any_of(lookup.begin(),lookup.end(),[](const auto& p){return !p;}))return false;
+bool stageSkinImages(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u,const UploadPixels& lookup,uint64_t budget){
+ if(lookup.empty()||std::any_of(lookup.begin(),lookup.end(),[](const auto& p){return !p.first;}))return false;
  u.images.resize(lookup.size());VkDeviceSize size=0;std::vector<std::vector<VkBufferImageCopy>> regions(lookup.size());
  for(size_t i=0;i<u.images.size();i++){
-  const auto& p=*lookup[i];auto& x=u.images[i];
+  const auto& p=*lookup[i].first;auto& x=u.images[i];
   if(!p.w||!p.h||!p.mips||p.mips>ms::textureMipCount(p.w,p.h)||p.pixels.size()!=ms::textureBytes(p.w,p.h,p.mips))return false;
-  const bool linear=p.linear(T().allSkins&&i<sharedLinear.size()&&sharedLinear[i]);
+  const bool linear=p.linear(lookup[i].second);
   const auto format=linear?VK_FORMAT_R8G8B8A8_UNORM:VK_FORMAT_R8G8B8A8_SRGB;
   const VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,nullptr,0,VK_IMAGE_TYPE_2D,format,{p.w,p.h,1},p.mips,1,
    VK_SAMPLE_COUNT_1_BIT,VK_IMAGE_TILING_OPTIMAL,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_SHARING_MODE_EXCLUSIVE,0,nullptr,VK_IMAGE_LAYOUT_UNDEFINED};
   if(upCreateImage.load()(d,&ci,nullptr,&x.image)!=VK_SUCCESS){x.image={};return false;}
   VkMemoryRequirements req{};upGetImageMemoryRequirements.load()(d,x.image,&req);
+  if(req.size>budget-u.imageBytes)return false;
+  u.imageBytes+=req.size;
   if(!uploadMemory(d,u,req,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,x.memory)||upBindImageMemory.load()(d,x.image,x.memory,0)!=VK_SUCCESS)return false;
   const VkImageViewCreateInfo v{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,nullptr,0,x.image,VK_IMAGE_VIEW_TYPE_2D,ci.format,{}, {VK_IMAGE_ASPECT_COLOR_BIT,0,p.mips,0,1}};
   if(tintCreateImageView.load()(d,&v,nullptr,&x.view)!=VK_SUCCESS){x.view={};return false;}
@@ -512,7 +520,7 @@ bool stagePaimon(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u){
  VkMemoryRequirements req{};upGetBufferMemoryRequirements.load()(d,u.staging,&req);
  if(!uploadMemory(d,u,req,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,u.stagingMemory)||upBindBufferMemory.load()(d,u.staging,u.stagingMemory,0)!=VK_SUCCESS)return false;
  void* mapped=nullptr;if(upMapMemory.load()(d,u.stagingMemory,0,size,0,&mapped)!=VK_SUCCESS)return false;
- for(size_t i=0;i<regions.size();i++)std::memcpy(static_cast<char*>(mapped)+regions[i].front().bufferOffset,lookup[i]->pixels.data(),lookup[i]->pixels.size());
+ for(size_t i=0;i<regions.size();i++)std::memcpy(static_cast<char*>(mapped)+regions[i].front().bufferOffset,lookup[i].first->pixels.data(),lookup[i].first->pixels.size());
  upUnmapMemory.load()(d,u.stagingMemory);
  const VkCommandPoolCreateInfo pc{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,nullptr,VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,family};
  if(upCreateCommandPool.load()(d,&pc,nullptr,&u.pool)!=VK_SUCCESS){u.pool={};return false;}
@@ -522,7 +530,7 @@ bool stagePaimon(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u){
  if(upBeginCommandBuffer.load()(cmd,&bc)!=VK_SUCCESS)return false;
  std::vector<VkImageMemoryBarrier> barriers(regions.size());
  for(size_t i=0;i<barriers.size();i++)barriers[i]={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,nullptr,0,VK_ACCESS_TRANSFER_WRITE_BIT,VK_IMAGE_LAYOUT_UNDEFINED,
-  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_QUEUE_FAMILY_IGNORED,VK_QUEUE_FAMILY_IGNORED,u.images[i].image,{VK_IMAGE_ASPECT_COLOR_BIT,0,lookup[i]->mips,0,1}};
+  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_QUEUE_FAMILY_IGNORED,VK_QUEUE_FAMILY_IGNORED,u.images[i].image,{VK_IMAGE_ASPECT_COLOR_BIT,0,lookup[i].first->mips,0,1}};
  auto barrier=upCmdPipelineBarrier.load();
  barrier(cmd,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,uint32_t(barriers.size()),barriers.data());
  for(size_t i=0;i<barriers.size();i++){
@@ -537,6 +545,70 @@ bool stagePaimon(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u){
  const VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO,nullptr,0,nullptr,nullptr,1,&cmd,0,nullptr};
  if(upQueueSubmit.load()(queue,1,&submit,u.fence)!=VK_SUCCESS)return false;
  u.usedFamily=family;u.queued=true;return true;
+}
+
+UploadPixels readSkinImages(const std::vector<unsigned>& indices){
+ UploadPixels out(indices.size());
+ std::map<const SkinImageFile*,std::vector<size_t>> grouped;
+ for(size_t i=0;i<indices.size();i++){grouped[sharedImages.at(indices[i]).file.get()].push_back(i);}
+ for(const auto& group:grouped){
+  const auto& file=*group.first;
+  std::map<std::string,ms::MaterialFile> materials;std::set<std::string> names;
+  for(size_t i:group.second){
+   const auto& image=sharedImages[indices[i]];
+   const auto key=std::to_string(i);auto& material=materials[key];material.original=false;material.mainRef=image.ref;
+   names.insert(key);
+  }
+  try{
+   ms::readTextures(file.dir,file.generation,file.size,materials,names);
+   ms::require(ms::jstr(ms::JsonParser(ms::manifestText(file.dir)).parse(),"generation",64)==file.generation,"读取 Vulkan 贴图时转换结果发生变化");
+   for(size_t i:group.second){out[i]={std::move(materials.at(std::to_string(i)).main),sharedImages[indices[i]].linear};}
+  }catch(const std::exception&){}
+ }
+ return out;
+}
+void serviceSkinImages(VkDevice d,VkQueue queue,uint32_t family,TextureUpload& u){
+ if(u.fence)return;
+ if(u.reading.valid()){
+  if(u.reading.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
+  auto ids=std::move(u.readingIds);u.readingIds.clear();
+  UploadPixels loaded;
+  try{loaded=u.reading.get();}catch(const std::exception&){}
+  UploadPixels pixels;std::vector<unsigned> ready;
+  for(size_t i=0;i<ids.size();i++){
+   if(i<loaded.size()&&loaded[i].first){ready.push_back(ids[i]);pixels.push_back(std::move(loaded[i]));}
+   else{u.unavailable.insert(ids[i]);}
+  }
+  if(pixels.empty())return;
+  TextureUpload batch;batch.memory=u.memory;
+  if(!stageSkinImages(d,queue,family,batch,pixels,maxResidentSkinTextures-u.imageBytes)){
+   releaseUpload(d,batch);u.unavailable.insert(ready.begin(),ready.end());return;
+  }
+  for(size_t i=0;i<ready.size();i++){u.images[ready[i]]=batch.images[i];}
+  u.imageBytes+=batch.imageBytes;
+  u.pool=batch.pool;u.staging=batch.staging;u.stagingMemory=batch.stagingMemory;u.fence=batch.fence;
+  return;
+ }
+ uint64_t bytes=0;
+ for(auto at=u.requested.begin();at!=u.requested.end();){
+  const auto id=*at;const auto size=sharedImages.at(id).ref.len;
+  if(size>maxResidentSkinTextures-u.imageBytes){u.unavailable.insert(id);}
+  else{
+   if(bytes&&(bytes+size>skinTextureBatch||bytes+size>maxResidentSkinTextures-u.imageBytes))break;
+   bytes+=size;u.readingIds.push_back(id);
+  }
+  at=u.requested.erase(at);
+ }
+ if(u.readingIds.empty())return;
+ try{u.reading=std::async(std::launch::async,readSkinImages,u.readingIds);}
+ catch(const std::exception&){u.requested.insert(u.readingIds.begin(),u.readingIds.end());u.readingIds.clear();}
+}
+VkImageView skinImage(TextureUpload& u,unsigned id){
+ if(id>=u.images.size())return {};
+ if(auto view=u.images[id].view)return view;
+ if(id<sharedImages.size()&&!u.unavailable.count(id)&&
+    std::find(u.readingIds.begin(),u.readingIds.end(),id)==u.readingIds.end()){u.requested.insert(id);}
+ return {};
 }
 
 ::VkResult uploadOnCreateDevice(VkPhysicalDevice p,const VkDeviceCreateInfo* c,const VkAllocationCallbacks* a,VkDevice* d){
@@ -574,9 +646,18 @@ void uploadOnGetDeviceQueue2(VkDevice d,const VkDeviceQueueInfo2* i,VkQueue* q){
  tintObserve([&](auto& s){auto q=s.queues.find(queue);if(q==s.queues.end())return;
   auto [d,family]=q->second;auto it=s.devices.find(d);if(it==s.devices.end())return;auto& u=it->second.upload;
   if(T().allSkins&&(!T().routesReady.load(std::memory_order_acquire)||sharedSkins.empty()))return;
-  if(!u.attempted){u.attempted=true;if((!T().skinnedModel||prepareSkinBuffers(d,it->second))&&stagePaimon(d,queue,family,u))T().textureUpload.store(1,std::memory_order_relaxed);
-   else{releaseUpload(d,u);if(T().skinnedModel)releaseSkin(d,it->second.skin);T().textureUpload.store(-1,std::memory_order_relaxed);}}
-  else if(u.queued&&u.fence&&u.usedFamily==family&&upGetFenceStatus.load()(d,u.fence)==VK_SUCCESS)releaseUploadStaging(d,u);
+  if(!u.attempted){
+   u.attempted=true;
+   if(!T().skinnedModel||prepareSkinBuffers(d,it->second)){
+    if(T().allSkins){u.images.resize(sharedImages.size());u.usedFamily=family;u.queued=true;}
+    else{stageSkinImages(d,queue,family,u,{{paimonPixels[0],false},{paimonPixels[1],false}},maxResidentSkinTextures);}
+   }
+   if(u.queued){T().textureUpload.store(1,std::memory_order_relaxed);}
+   else{releaseUpload(d,u);if(T().skinnedModel)releaseSkin(d,it->second.skin);T().textureUpload.store(-1,std::memory_order_relaxed);}
+  }
+  if(!u.queued||u.usedFamily!=family)return;
+  if(u.fence&&upGetFenceStatus.load()(d,u.fence)==VK_SUCCESS){releaseUploadStaging(d,u);}
+  if(T().allSkins){serviceSkinImages(d,queue,family,u);}
  });
  const auto result=upQueueSubmit.load()(queue,n,p,fence);
  if(result==VK_SUCCESS&&T().gpuBuffersEnabled())for(uint32_t i=0;p&&i<n;i++)for(uint32_t j=0;j<p[i].commandBufferCount;j++)
@@ -1314,7 +1395,7 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
     }
     return;
    }
-   const auto& u=d.upload;auto family=d.families.find(state.pool);if(!u.queued||family==d.families.end()||family->second!=u.usedFamily){miss(SkinMiss::Resources);return;}
+   auto& u=d.upload;auto family=d.families.find(state.pool);if(!u.queued||family==d.families.end()||family->second!=u.usedFamily){miss(SkinMiss::Resources);return;}
    plan.bindings=layout->second.bindings;
    if(state.vertexOffset[0]){miss(SkinMiss::VertexBindings);return;}
    for(unsigned z=0;z<state.vertex.size();z++)if((plan.bindings&(1u<<z))&&!state.vertex[z]){miss(SkinMiss::VertexBindings);return;}
@@ -1371,10 +1452,12 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
     if(live){
      if(selection.original){plan.originalAfter=selection.pre;}
     }else if(!ms::drawn(profile.replaceWhen,*assignment))return;
+    bool waitingImages=false;
     for(size_t rowIndex=0;rowIndex<(liveRows?liveRows->size():rows.size());rowIndex++){
      const auto& row=rows[liveRows?(*liveRows)[rowIndex]:rowIndex];
      if(!liveRows&&(!row.range.count||!ms::drawn(row.when,*assignment)))continue;
      VkDescriptorSet set{};TintViews overrides{};unsigned textures=0;
+     bool waitingRow=false;
      for(size_t role=0;role<bindings.size();role++){
       const auto b=bindings[role],im=row.images[role];
       if(im==~0u)continue;
@@ -1384,15 +1467,19 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
        if(live)return;
        continue;
       }
-      if(im>=u.images.size()||!u.images[im].view||overrides[b]){miss(SkinMiss::Resources);if(live)return;continue;}
-      overrides[b]=u.images[im].view;textures|=1u<<role;
+      const auto replacement=skinImage(u,im);
+      if(!replacement){waitingRow=true;continue;}
+      if(overrides[b]){miss(SkinMiss::Material);if(live)return;continue;}
+      overrides[b]=replacement;textures|=1u<<role;
      }
+     if(waitingRow){waitingImages=true;continue;}
      if(textures){
       set=tintClone(i->second.first,d,*materials,view,0,overrides);
       if(set){plan.textures|=textures;}else{miss(SkinMiss::Material);if(live)return;}
      }
      plan.draws.emplace_back(row.range,set?set:state.set);
     }
+    if(waitingImages){miss(SkinMiss::Resources);return;}
     if(plan.draws.empty())return;
     plan.replacement=plan.draws.front().second;result=std::move(plan);return;
    }
@@ -1400,9 +1487,10 @@ TintDraw tintDraw(VkCommandBuffer c,unsigned part,ms::vkcap::SkinHit shared={},u
    const auto tex=profile.images[shared.slot],binding=bindings[0];
    if(tex!=~0u&&binding!=~0u){
     if(!materials||binding>=tintSlotCount(materials->shape))miss(SkinMiss::Material);
-    else if(tex>=u.images.size()||!u.images[tex].view)miss(SkinMiss::Resources);
     else{
-     TintViews views{};views[binding]=u.images[tex].view;
+     const auto replacement=skinImage(u,tex);
+     if(!replacement){miss(SkinMiss::Resources);return;}
+     TintViews views{};views[binding]=replacement;
      plan.replacement=tintClone(i->second.first,d,*materials,view,0,views);
      if(!plan.replacement)miss(SkinMiss::Material);
     }
@@ -1700,13 +1788,11 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
                      const std::string& name,std::vector<uint32_t>& probes,size_t& budget){
  const auto legacy=legacyIniDraws(model);
  if(summary.parts.size()!=model.parts.size()||std::any_of(summary.parts.begin(),summary.parts.end(),[&](const auto& part){return part.sourceDraws.empty()&&legacy.empty();}))return false;
- std::vector<SharedSkin> skins;std::vector<std::shared_ptr<Texture>> pixels;
+ std::vector<SharedSkin> skins;std::vector<SkinImage> pendingImages;
  std::map<uint32_t,std::vector<vkcap::IniSkinRule>> rules;
  std::vector<vkcap::ResourceRule> gpuRules;
  std::map<std::pair<uint64_t,bool>,unsigned> images;
- std::vector<bool> linear;
- std::map<std::string,MaterialFile> textures;
- std::set<std::string> names;
+ const auto file=std::make_shared<SkinImageFile>(SkinImageFile{dir,model.generation,model.blobSize});
  const auto logic=!model.logic.files.empty()&&model.logic.unsupported.empty()&&model.logic.assignments.size()==model.logic.choices.size()
      ?std::make_shared<const LogicSpec>(model.logic):nullptr;
  size_t bytes=0;
@@ -1744,11 +1830,9 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
    for(size_t role=0;role<std::size(refs);role++){
     const auto& ref=refs[role];if(!ref.present())continue;
     const bool isLinear=ref.linear(role!=0);
-    auto entry=images.try_emplace(std::make_pair(ref.off,isLinear),unsigned(sharedPixels.size()+images.size()));
+    auto entry=images.try_emplace(std::make_pair(ref.off,isLinear),unsigned(sharedImages.size()+images.size()));
     slotsForDraw[role]=entry.first->second;if(!entry.second)continue;
-    linear.push_back(isLinear);bytes+=size_t(ref.len);
-    MaterialFile f;f.original=false;f.mainRef=ref;
-    const auto key=std::to_string(entry.first->second-sharedPixels.size());textures.emplace(key,f);names.insert(key);
+    pendingImages.push_back({file,ref,isLinear});
    }
    skin.iniDraws[size_t(slot)].push_back({draw.sub,draw.when,slotsForDraw});
   }
@@ -1758,12 +1842,8 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
   skins.push_back(std::move(skin));
  }
  size_t hashes=probes.size();for(const auto& r:rules)hashes+=std::find(probes.begin(),probes.end(),r.first)==probes.end();
- require(hashes<=vkcap::Tracker::maxDrawHashes&&bytes<=budget&&T().resourceRules.size()+gpuRules.size()<=256,"超过 Vulkan 规则或预加载预算");
- readTextures(dir,model.generation,model.blobSize,textures,names);pixels.resize(images.size());
- for(const auto& t:textures){
-  require(bool(t.second.main),"无法读取 Vulkan 贴图");
-  pixels[size_t(std::stoul(t.first))]=t.second.main;
- }
+ require(hashes<=vkcap::Tracker::maxDrawHashes&&T().resourceRules.size()+gpuRules.size()<=256,"超过 Vulkan 绘制规则上限");
+ require(bytes<=budget,"超过 Vulkan 网格预加载预算");
  budget-=bytes;
  for(auto& rule:gpuRules)T().resourceRules.push_back(std::move(rule));
  for(const auto& r:rules){
@@ -1774,8 +1854,7 @@ bool prepareIniSkins(const ModelSummary& summary,const ModelFile& model,const st
   if(skin.logic){T().logicResources=true;}
   sharedSkins.push_back(std::move(skin));T().skinMods.push_back(name);
  }
- sharedPixels.insert(sharedPixels.end(),pixels.begin(),pixels.end());
- sharedLinear.insert(sharedLinear.end(),linear.begin(),linear.end());
+ sharedImages.insert(sharedImages.end(),pendingImages.begin(),pendingImages.end());
  return true;
 }
 }
@@ -1865,7 +1944,9 @@ std::vector<std::string> prepareVulkanSkins(const std::string& shared,const std:
  std::vector<vkcap::SkinRoute> optionalRoutes;
  for(auto& c:candidates)try{
   auto m=loadModelFile(c.dir,false,true,-1,c.summary.generation);
-  std::vector<SharedSkin> pending;std::vector<std::shared_ptr<Texture>> pixels;
+  std::vector<SharedSkin> pending;std::vector<SkinImage> pendingImages;
+  const auto file=std::make_shared<SkinImageFile>(SkinImageFile{c.dir,m->generation,m->blobSize});
+  std::map<std::pair<uint64_t,bool>,unsigned> imageIds;
   std::vector<vkcap::SkinRoute> routes,aliases;
   size_t extra=0;
   for(size_t i=0;i<m->parts.size();i++){
@@ -1888,14 +1969,12 @@ std::vector<std::string> prepareVulkanSkins(const std::string& shared,const std:
    extra+=skin.mesh.rest.size()+skin.mesh.weights.size()+skin.mesh.attributes.size()+skin.mesh.indices.size();
    skin.images.resize(t.submeshes,~0u);std::vector<Submesh> active;std::vector<Material> materials;activeDraws(part.draws,m->variants.defaults,active,materials);
    std::map<unsigned,std::string> slots;for(size_t j=0;j<materials.size();j++)if(active[j].count){auto& n=slots[materials[j].slot];require(n.empty()||n==materials[j].name,"同一槽位存在不同材质");n=materials[j].name;}
-   std::map<std::string,MaterialFile> request;std::set<std::string> names;
    for(const auto& slot:slots){const auto mt=m->materials.find(slot.second);require(slot.first<t.submeshes&&mt!=m->materials.end(),"材质槽无效");
     const auto& ref=mt->second.mainRef;if(!ref.present())continue;
-    require(ref.w<=4096&&ref.h<=4096,"主贴图超出 Vulkan 预加载上限");MaterialFile f;f.original=false;f.mainRef=ref;request[slot.second]=f;names.insert(slot.second);}
-   readTextures(c.dir,m->generation,m->blobSize,request,names);
-   for(const auto& slot:slots){const auto entry=request.find(slot.second);if(entry==request.end())continue;
-    const auto tex=entry->second.main;require(bool(tex),"无法读取主贴图");
-    skin.images[slot.first]=unsigned(sharedPixels.size()+pixels.size());extra+=tex->pixels.size();pixels.push_back(tex);}
+    const auto [entry,inserted]=imageIds.try_emplace({ref.off,ref.linear(false)},unsigned(sharedImages.size()+pendingImages.size()));
+    skin.images[slot.first]=entry->second;
+    if(inserted){pendingImages.push_back({file,ref,false});}
+   }
    auto pcHashes=pcSkinHashes(c.summary.parts[i],m->logic,p,table,pc,c.summary.id);
    const auto total=pcdb::indices(p.subs);require(total&&total<=model::maxIndices,"原网格索引超限");
    const unsigned profile=unsigned(sharedSkins.size()+pending.size());
@@ -1905,15 +1984,14 @@ std::vector<std::string> prepareVulkanSkins(const std::string& shared,const std:
    for(uint32_t hash:pcHashes)aliases.push_back({hash,uint32_t(total),profile,p.subs,true});
    pending.push_back(std::move(skin));
   }
-  require(!pending.empty()&&sharedSkins.size()+pending.size()<=64&&extra<=budget,"超过 Vulkan 预加载预算");
+  require(!pending.empty()&&sharedSkins.size()+pending.size()<=64&&extra<=budget,"超过 Vulkan 网格预加载预算");
   size_t newHashes=0;for(const auto& r:routes)newHashes+=std::find(probes.begin(),probes.end(),r.hash)==probes.end();
   require(probes.size()+newHashes<=vkcap::Tracker::maxDrawHashes,"超过 Vulkan 索引探针上限");
   const auto pcCount=std::count_if(routes.begin(),routes.end(),[](const auto& route){return route.pcRule;});
   budget-=extra;for(auto& r:routes){if(std::find(probes.begin(),probes.end(),r.hash)==probes.end())probes.push_back(r.hash);T().skinRoutes.emplace(r.hash,std::move(r));}
   optionalRoutes.insert(optionalRoutes.end(),std::make_move_iterator(aliases.begin()),std::make_move_iterator(aliases.end()));
   for(auto& p:pending){sharedSkins.push_back(std::move(p));T().skinMods.push_back(c.name);}
-  sharedPixels.insert(sharedPixels.end(),pixels.begin(),pixels.end());
-  sharedLinear.resize(sharedPixels.size(),false);
+  sharedImages.insert(sharedImages.end(),pendingImages.begin(),pendingImages.end());
   notes.push_back(c.name+"：Vulkan 就绪，"+std::to_string(pending.size())+" 个部件，"+std::to_string(pcCount)+" 个已验证 PC 索引哈希，等待游戏绘制确认");
  }catch(const std::exception& e){notes.push_back(c.name+"："+e.what());}
  // Allocate remaining probes to unambiguous PC aliases after all Android routes have been registered.

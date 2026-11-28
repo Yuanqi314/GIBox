@@ -3219,6 +3219,17 @@ struct Runtime::Impl {
   // Renderers of replaced characters: ours, and the controlled character's while one of its mods is wanted.
   std::set<Ptr> renderers;for(auto& kv:attachments)if(alive(kv.first))renderers.insert(kv.first);
   bool mine=false;for(auto* m:wanted)mine=mine||(ch.entity&&m->id==ch.config);
+  auto& capture=vkcap::tracker();
+  if(!mine&&!ctl.useUnityModels&&ch.entity&&capture.allSkins&&capture.enabled&&capture.routesReady.load(std::memory_order_acquire)){
+   for(const auto& m:models){
+    if(m.id!=ch.config||!capture.hasSkin(m.name)||std::find(ctl.selected.begin(),ctl.selected.end(),m.name)==ctl.selected.end())continue;
+    const auto vars=ctl.variables.find(m.name);
+    if(drawn(m.replaceWhen,pick(m.variants,vars==ctl.variables.end()?Assignment{}:vars->second))&&outfitMatchesWorld(m)){
+     mine=true;
+     break;
+    }
+   }
+  }
   if(mine)try{for(Ptr r:worldRenderers())if(alive(r))renderers.insert(r);}catch(const std::exception&){}
   if(!renderers.empty()&&lodApiReady())for(Ptr r:renderers){Ptr native=load<Ptr>(r+0x10);auto seen=lodSearched.find(r);if(seen!=lodSearched.end()&&seen->second.first==native&&now<seen->second.second)continue;
    // Found: not searched again for this renderer; none yet (the loader may come with the model later): again in 30 s.

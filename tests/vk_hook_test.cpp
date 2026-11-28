@@ -253,6 +253,11 @@ static void tintTrial(){
   call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
   assert(call==expected&&updates==5&&dispatches==2&&T().lightMapDraws==i+1);
  }
+ // A texture absent from the upload requests only the sampled role and leaves the game draw intact.
+ sharedImages.resize(2);auto lightView=dev.upload.images[1].view;dev.upload.images[1].view={};
+ call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
+ assert((call==std::vector<uintptr_t>{26226})&&dev.upload.requested==std::set<unsigned>{1});
+ dev.upload.images[1].view=lightView;dev.upload.requested.clear();sharedImages.clear();
  // The same draw executor can select its model by a Vulkan shader and vertex upload without a PC IB rule.
  T().iniSkinRules.clear();
  const uint32_t code[]={0x07230203u,0x10000u,0u,8u,0u};const unsigned usedVertex=203;
