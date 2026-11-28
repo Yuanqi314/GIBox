@@ -20,6 +20,7 @@
 // its upload for hash-map.json; "full" is the old diagnostic: every form, ib-hashes.txt, per-mesh candidate lines.
 // The optional draw probe watches a set of hashes against the same uploads without enabling mesh collection.
 #include <algorithm>
+#include <initializer_list>
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -126,14 +127,17 @@ inline int paimonTintPart(uint32_t hash,uint64_t uploadBytes,uint32_t first,uint
 }
 // SPIR-V OpName and OpDecorate suffice for this deliberately narrow prototype. A shader stripped of names,
 // using decoration groups or containing an unexpected binding does not prove this target.
-inline std::optional<uint32_t> namedTextureBinding(const uint32_t* code,size_t words,const char* name){
+inline std::optional<uint32_t> namedTextureBinding(const uint32_t* code,size_t words,std::initializer_list<const char*> names){
  if(!code||words<5||words>(1u<<18)||code[0]!=0x07230203u)return std::nullopt;
- const size_t length=std::strlen(name)+1;
  uint32_t id=0;
  for(size_t i=5;i<words;){size_t n=code[i]>>16;if(!n||n>words-i)return std::nullopt;
-  if((code[i]&0xffff)==5&&n>=2&&(n-2)*4>=length&&!std::memcmp(code+i+2,name,length)){
-   if(!code[i+1]||(id&&id!=code[i+1]))return std::nullopt;
-   id=code[i+1];}
+  if((code[i]&0xffff)==5&&n>=3)for(const auto* name:names){
+   const size_t length=std::strlen(name)+1;
+   if((n-2)*4>=length&&!std::memcmp(code+i+2,name,length)){
+    if(!code[i+1]||(id&&id!=code[i+1]))return std::nullopt;
+    id=code[i+1];break;
+   }
+  }
   i+=n;}
  if(!id)return std::nullopt;
  bool set=false;std::optional<uint32_t> binding;
@@ -144,7 +148,12 @@ inline std::optional<uint32_t> namedTextureBinding(const uint32_t* code,size_t w
   i+=n;}
  return set?binding:std::nullopt;
 }
-inline bool mainTextureBinding(const uint32_t* code,size_t words){return namedTextureBinding(code,words,"_MainTex")==0u;}
+inline bool mainTextureBinding(const uint32_t* code,size_t words){return namedTextureBinding(code,words,{"_MainTex"})==0u;}
+inline std::array<unsigned,3> materialTextureBindings(const uint32_t* code,size_t words){
+ return {namedTextureBinding(code,words,{"_MainTex"}).value_or(~0u),
+         namedTextureBinding(code,words,{"_LightMapTex","_LightMap","_LightmapTex","_Lightmap"}).value_or(~0u),
+         namedTextureBinding(code,words,{"_BumpMap","_NormalMap","_BaseNormalMap","_NormalTex"}).value_or(~0u)};
+}
 
 // The buffers, memory bindings and host mappings needed to find index data in CPU memory: a staging buffer copied
 // into an index buffer (read when the copy is recorded), or an index buffer in mapped memory (read at its first bind).
@@ -213,6 +222,7 @@ public:
  std::unordered_map<uint32_t,std::vector<IniSkinRule>> iniSkinRules;
  std::shared_ptr<const SkinChoices> skinChoices;
  std::atomic<uint64_t> activeSkins{0},skinMatches{0},sharedDraws{0},sharedMisses{0},originalSkinJobs{0};
+ std::atomic<uint64_t> lightMapDraws{0},normalMapDraws{0};
  std::array<std::atomic<uint64_t>,64> profileDraws{};
  std::array<std::atomic<uint64_t>,unsigned(SkinMiss::Total)> skinMisses{};
  std::array<std::atomic<uint32_t>,64> skinBoneErrors{}; // required in high bits, live palette in low bits

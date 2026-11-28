@@ -206,6 +206,22 @@ static void tintTrial(){
   assert(n==1&&(first==0||first==2));call.push_back(reinterpret_cast<uintptr_t>(buffers[0]));};
  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
  assert((call==std::vector<uintptr_t>{204,204,2000,14,23,101,200,201})&&dispatches==2);
+ // A pass can sample the lightmap alone. Use its named slot and preserve the other game sampler and the next draw.
+ state.set=original;dev.pipelines[p]=layout;dev.textureSlots[p]={~0u,1,~0u};profile.iniDraws[0][0].images={0,1,~0u};
+ tintUpdateDescriptorSets=+[](VkDevice,uint32_t n,const VkWriteDescriptorSet* writes,uint32_t copies,const VkCopyDescriptorSet*){
+  assert(n==2&&!copies&&writes[0].dstSet==fake<VkDescriptorSet>(34));
+  assert(writes[0].pImageInfo->imageView==fake<VkImageView>(6)&&writes[0].pImageInfo->sampler==fake<VkSampler>(8));
+  assert(writes[1].pImageInfo->imageView==fake<VkImageView>(23)&&writes[1].pImageInfo->sampler==fake<VkSampler>(9));++updates;
+ };
+ tintCmdBindDescriptorSets=+[](VkCommandBuffer,VkPipelineBindPoint point,VkPipelineLayout l,uint32_t first,uint32_t n,const VkDescriptorSet* sets,uint32_t,const uint32_t*){
+  assert(point==VK_PIPELINE_BIND_POINT_GRAPHICS&&l==fake<VkPipelineLayout>(4)&&!first&&n==1);
+  call.push_back(reinterpret_cast<uintptr_t>(*sets));
+ };
+ const auto expected=std::vector<uintptr_t>{34,204,204,2000,14,5,23,101,200,201};
+ for(unsigned i=0;i<2;i++){
+  call.clear();onCmdDrawIndexed(c,26226,1,0,0,0);
+  assert(call==expected&&updates==5&&dispatches==2&&T().lightMapDraws==i+1);
+ }
  std::cout<<"Vulkan draw replacement: PASS (scoped textures, skinned vertex and index rebind, queue ownership, restoration and master switch)\n";
 }
 #endif

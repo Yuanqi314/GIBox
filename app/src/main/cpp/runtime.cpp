@@ -1216,6 +1216,7 @@ struct Runtime::Impl {
      "，已识别原版输出 "+std::to_string(capture.skinOutputCaptures.load(std::memory_order_relaxed))+
      "，已匹配原版蒙皮 "+std::to_string(capture.originalSkinJobs.load(std::memory_order_relaxed))+
      "，MOD 蒙皮 "+std::to_string(capture.skinDispatches.load(std::memory_order_relaxed))+"，换绑 "+std::to_string(capture.sharedDraws.load(std::memory_order_relaxed))+
+     "，光照贴图换绑 "+std::to_string(capture.lightMapDraws.load(std::memory_order_relaxed))+"，法线贴图换绑 "+std::to_string(capture.normalMapDraws.load(std::memory_order_relaxed))+
      "，保持原样 "+std::to_string(capture.sharedMisses.load(std::memory_order_relaxed))+models);
    }else if(capture.tintHooks){std::string line=capture.tintOn.load(std::memory_order_relaxed)?"开启":"关闭";const bool textured=!capture.paimonTextureMod.empty();
     if(textured){const int upload=capture.textureUpload.load(std::memory_order_relaxed);line+=upload==1?"，贴图已排入队列":upload<0?"，贴图准备失败":"，等待贴图上传";}

@@ -69,6 +69,20 @@ int main(){
   assert(mainTextureBinding(spirv,words)&&!mainTextureBinding(spirv,words-1));
   spirv[words-1]=1;assert(!mainTextureBinding(spirv,words));
   spirv[words-1]=0;spirv[15]=3;assert(!mainTextureBinding(spirv,words));}
+ {std::vector<uint32_t> shader{0x07230203u,0x10000,0,8,0};
+  auto texture=[&](const char* name,uint32_t id,uint32_t set,uint32_t slot){
+   const size_t length=std::strlen(name)+1,words=(length+3)/4;
+   shader.insert(shader.end(),{uint32_t((words+2)<<16)|5u,id});
+   auto at=shader.size();shader.resize(at+words);std::memcpy(shader.data()+at,name,length);
+   shader.insert(shader.end(),{(4u<<16)|71u,id,34,set,(4u<<16)|71u,id,33,slot});
+  };
+  texture("_LightMapTex",2,0,1);
+  assert((materialTextureBindings(shader.data(),shader.size())==std::array<unsigned,3>{~0u,1,~0u}));
+  texture("_MainTex",3,0,3);texture("_BumpMap",4,0,2);texture("_PackedShadowRampTex",5,0,4);
+  assert((materialTextureBindings(shader.data(),shader.size())==std::array<unsigned,3>{3,1,2}));
+  texture("_LightMap",6,0,0);
+  assert((materialTextureBindings(shader.data(),shader.size())==std::array<unsigned,3>{3,~0u,2}));
+ }
  {Tracker probe;probe.allForms=false;probe.probeOnly=true;probe.setDrawHashes({hs[1].value});
   probe.created(1,64,0x40);probe.created(2,32,0x1);probe.bound(1,10,0);probe.bound(2,9,0);probe.mapped(9,0,32,staging);
   Copy upload{8,16,12};probe.copied(2,1,&upload,1);
